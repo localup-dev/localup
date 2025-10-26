@@ -241,17 +241,48 @@ jobs:
 
       - name: Extract version from tag
         id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+          # Detect if this is a pre-release (contains alpha, beta, rc, or has dash followed by non-numeric)
+          if [[ "$VERSION" =~ (alpha|beta|rc|-[a-zA-Z]) ]]; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           name: Release ${{ steps.get_version.outputs.VERSION }}
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.get_version.outputs.IS_PRERELEASE }}
           generate_release_notes: true
           body: |
             ## Installation
+
+            ### Homebrew (macOS/Linux)
+
+            **Note:** The Homebrew formula needs to be updated manually after this release.
+
+            **For Maintainers:**
+            ```bash
+            # Update the formula (interactive)
+            ./scripts/manual-formula-update.sh
+
+            # Or quick update
+            ./scripts/quick-formula-update.sh ${{ steps.get_version.outputs.VERSION }}
+            ```
+
+            **For Users (after formula is updated):**
+            ```bash
+            ${{ steps.get_version.outputs.IS_PRERELEASE == 'true' && '# BETA/PRE-RELEASE' || '# Stable release' }}
+            ${{ steps.get_version.outputs.IS_PRERELEASE == 'true' && 'brew install https://raw.githubusercontent.com/localup-dev/localup/main/Formula/localup-beta.rb' || 'brew tap localup-dev/localup https://github.com/localup-dev/localup' }}
+            ${{ steps.get_version.outputs.IS_PRERELEASE == 'false' && 'brew install localup' || '' }}
+            ```
+
+            ### Direct Download
 
             Download the appropriate binary for your platform:
 
