@@ -1,0 +1,29 @@
+[package]
+name = "tunnel-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tunnel-proto = { path = "../tunnel-proto" }
+tunnel-auth = { path = "../tunnel-auth" }
+tunnel-router = { path = "../tunnel-router" }
+tunnel-transport = { path = "../tunnel-transport" }
+tunnel-transport-quic = { path = "../tunnel-transport-quic" }
+tokio = { workspace = true, features = ["sync"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bincode = { workspace = true }
+dashmap = "6.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+bincode = { workspace = true }
+chrono = { workspace = true }
+tunnel-cert = { path = "../tunnel-cert" }
+jsonwebtoken = { workspace = true }
+serde = { workspace = true }
+quinn = { workspace = true }
+tracing-subscriber = { workspace = true }
+rustls = { version = "0.23", features = ["ring"] }

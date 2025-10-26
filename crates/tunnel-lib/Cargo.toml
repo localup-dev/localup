@@ -1,0 +1,38 @@
+[package]
+name = "tunnel-lib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tunnel-proto = { path = "../tunnel-proto" }
+tunnel-client = { path = "../tunnel-client" }
+tunnel-auth = { path = "../tunnel-auth" }
+tunnel-router = { path = "../tunnel-router" }
+tunnel-server-tcp = { path = "../tunnel-server-tcp" }
+tunnel-server-tcp-proxy = { path = "../tunnel-server-tcp-proxy" }
+tunnel-server-tls = { path = "../tunnel-server-tls" }
+tunnel-server-https = { path = "../tunnel-server-https" }
+tunnel-cert = { path = "../tunnel-cert" }
+tunnel-control = { path = "../tunnel-control" }
+tunnel-transport = { path = "../tunnel-transport" }
+tunnel-transport-quic = { path = "../tunnel-transport-quic" }
+tunnel-relay-db = { path = "../tunnel-relay-db" }
+
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+tracing-subscriber = { workspace = true }
+bincode = { workspace = true }
+uuid = { version = "1.11", features = ["v4"] }
+rcgen = "0.13"
+futures = { workspace = true }
+tunnel-transport = { path = "../tunnel-transport" }
+tunnel-transport-quic = { path = "../tunnel-transport-quic" }

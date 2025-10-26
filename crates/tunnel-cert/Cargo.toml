@@ -1,0 +1,33 @@
+[package]
+name = "tunnel-cert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# ACME/Let's Encrypt
+instant-acme = { workspace = true }
+
+# TLS
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# Self-signed certificate generation
+rcgen = "0.13"
+time = "0.3"
+rand = "0.8"
+
+# Async runtime
+tokio = { workspace = true }
+
+# Utilities
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

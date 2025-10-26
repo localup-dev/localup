@@ -1,0 +1,32 @@
+[package]
+name = "tunnel-exit-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "tunnel-exit-node"
+path = "src/main.rs"
+
+[dependencies]
+tunnel-control = { path = "../tunnel-control" }
+tunnel-server-tcp = { path = "../tunnel-server-tcp" }
+tunnel-server-tcp-proxy = { path = "../tunnel-server-tcp-proxy" }
+# tunnel-server-tls = { path = "../tunnel-server-tls" }  # TLS SNI passthrough - TODO
+tunnel-server-https = { path = "../tunnel-server-https" }
+tunnel-router = { path = "../tunnel-router" }
+tunnel-auth = { path = "../tunnel-auth" }
+# tunnel-api = { path = "../tunnel-api" }  # TODO: Re-enable after testing
+tunnel-relay-db = { path = "../tunnel-relay-db" }
+tunnel-transport = { path = "../tunnel-transport" }
+tunnel-transport-quic = { path = "../tunnel-transport-quic" }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+rust-embed = "8.5.0"
+mime_guess = "2.0"

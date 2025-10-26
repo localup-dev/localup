@@ -1,0 +1,296 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*" # Trigger on version tags like v1.0.0, v0.1.2, etc.
+
+permissions:
+  contents: write # Required for creating releases
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.90.0" # Pin Rust version for reproducible builds
+
+jobs:
+  # Build webapps once and share across all platforms
+  build-webapps:
+    name: Build Web Applications
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Build dashboard webapp
+        run: |
+          cd webapps/dashboard
+          bun install
+          bun run build
+
+      - name: Build exit-node-portal webapp
+        run: |
+          cd webapps/exit-node-portal
+          bun install
+          bun run build
+
+      - name: Upload webapp artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapps
+          path: |
+            webapps/dashboard/dist
+            webapps/exit-node-portal/dist
+          retention-days: 1
+
+  # Matrix build for all platforms
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    needs: build-webapps
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux AMD64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_name: linux-amd64
+            strip: strip
+
+          # Linux ARM64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_name: linux-arm64
+            strip: aarch64-linux-gnu-strip
+            cross: true
+
+          # macOS AMD64 (Intel)
+          - target: x86_64-apple-darwin
+            os: macos-13  # Intel runner
+            archive_name: macos-amd64
+            strip: strip
+
+          # macOS ARM64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-14  # Apple Silicon runner
+            archive_name: macos-arm64
+            strip: strip
+
+          # Windows AMD64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive_name: windows-amd64
+            extension: .exe
+            strip: ""  # Windows doesn't use strip
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download webapp artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: webapps
+          path: webapps/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      # Linux ARM64 requires cross-compilation tools
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.cross == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache Cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache target directory
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-${{ matrix.target }}-target-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-target-release-
+
+      # Build with cross-compilation environment for Linux ARM64
+      - name: Build binaries (Linux ARM64)
+        if: matrix.cross == true
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin tunnel
+          cargo build --release --target ${{ matrix.target }} --bin tunnel-exit-node
+
+      # Build normally for other platforms
+      - name: Build binaries
+        if: matrix.cross != true
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin tunnel
+          cargo build --release --target ${{ matrix.target }} --bin tunnel-exit-node
+
+      # Strip binaries (Unix only)
+      - name: Strip binaries (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ${{ matrix.strip }} target/${{ matrix.target }}/release/tunnel
+          ${{ matrix.strip }} target/${{ matrix.target }}/release/tunnel-exit-node
+
+      # Create archives (Unix - tar.gz)
+      - name: Create release archives (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p release
+
+          # Package tunnel CLI
+          tar -czf release/tunnel-${{ matrix.archive_name }}.tar.gz \
+            -C target/${{ matrix.target }}/release tunnel
+
+          # Package tunnel-exit-node
+          tar -czf release/tunnel-exit-node-${{ matrix.archive_name }}.tar.gz \
+            -C target/${{ matrix.target }}/release tunnel-exit-node
+
+          # Create checksums
+          cd release
+          shasum -a 256 *.tar.gz > checksums-${{ matrix.archive_name }}.txt
+
+      # Create archives (Windows - zip)
+      - name: Create release archives (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release
+
+          # Package tunnel CLI
+          Compress-Archive -Path target/${{ matrix.target }}/release/tunnel.exe `
+            -DestinationPath release/tunnel-${{ matrix.archive_name }}.zip
+
+          # Package tunnel-exit-node
+          Compress-Archive -Path target/${{ matrix.target }}/release/tunnel-exit-node.exe `
+            -DestinationPath release/tunnel-exit-node-${{ matrix.archive_name }}.zip
+
+          # Create checksums
+          cd release
+          Get-FileHash *.zip -Algorithm SHA256 | `
+            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path.Split('\')[-1])" } | `
+            Out-File -Encoding ASCII checksums-${{ matrix.archive_name }}.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive_name }}-binaries
+          path: release/*
+          retention-days: 1
+
+  # Create GitHub Release with all artifacts
+  create-release:
+    name: Create GitHub Release
+    needs: build-binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Consolidate release files
+        run: |
+          mkdir -p release
+          find artifacts/ -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "checksums-*.txt" \) \
+            -exec cp {} release/ \;
+
+          # Create a combined checksums file
+          cat release/checksums-*.txt > release/SHA256SUMS.txt
+
+          ls -lah release/
+
+      - name: Extract version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release ${{ steps.get_version.outputs.VERSION }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            Download the appropriate binary for your platform:
+
+            ### Linux
+            - **AMD64**: `tunnel-linux-amd64.tar.gz`, `tunnel-exit-node-linux-amd64.tar.gz`
+            - **ARM64**: `tunnel-linux-arm64.tar.gz`, `tunnel-exit-node-linux-arm64.tar.gz`
+
+            ### macOS
+            - **Intel (AMD64)**: `tunnel-macos-amd64.tar.gz`, `tunnel-exit-node-macos-amd64.tar.gz`
+            - **Apple Silicon (ARM64)**: `tunnel-macos-arm64.tar.gz`, `tunnel-exit-node-macos-arm64.tar.gz`
+
+            ### Windows
+            - **AMD64**: `tunnel-windows-amd64.zip`, `tunnel-exit-node-windows-amd64.zip`
+
+            ### Verify Downloads
+
+            All archives include SHA256 checksums. Verify your download:
+
+            ```bash
+            # Unix
+            sha256sum -c checksums-<platform>.txt
+
+            # Or check against combined checksums
+            sha256sum tunnel-<platform>-<arch>.tar.gz
+            grep tunnel-<platform>-<arch> SHA256SUMS.txt
+            ```
+
+            ### Extract and Install
+
+            **Unix (Linux/macOS)**:
+            ```bash
+            tar -xzf tunnel-<platform>-<arch>.tar.gz
+            sudo mv tunnel /usr/local/bin/
+            chmod +x /usr/local/bin/tunnel
+            ```
+
+            **Windows**:
+            ```powershell
+            Expand-Archive tunnel-windows-amd64.zip -DestinationPath .
+            # Add to PATH or move to desired location
+            ```
+          files: |
+            release/*.tar.gz
+            release/*.zip
+            release/checksums-*.txt
+            release/SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

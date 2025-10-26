@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tunnel Metrics</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+        * {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .spinner {
+            animation: spin 0.8s linear infinite;
+        }
+
+        .bg-gray-950 {
+            background-color: #030712;
+        }
+
+        .sidebar-container {
+            height: calc(100vh - 2rem);
+        }
+
+        .request-list {
+            height: calc(100vh - 380px);
+            overflow-y: auto;
+        }
+
+        .detail-view {
+            height: calc(100vh - 2rem);
+            overflow-y: auto;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1f2937;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #4b5563;
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #6b7280;
+        }
+
+        .request-item.selected {
+            background-color: #1e40af;
+            border-left: 4px solid #3b82f6;
+        }
+
+        .json-viewer {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+        }
+
+        .json-key {
+            color: #818cf8;
+            cursor: pointer;
+        }
+
+        .json-string {
+            color: #86efac;
+        }
+
+        .json-number {
+            color: #fbbf24;
+        }
+
+        .json-boolean {
+            color: #fb923c;
+        }
+
+        .json-null {
+            color: #94a3b8;
+        }
+
+        .json-toggle {
+            cursor: pointer;
+            user-select: none;
+            display: inline-block;
+            width: 14px;
+            color: #9ca3af;
+            font-weight: bold;
+        }
+
+        .json-toggle:hover {
+            color: #f3f4f6;
+        }
+
+        .json-collapsed {
+            display: none;
+        }
+
+        /* Mode toggle styles */
+        .mode-toggle {
+            position: relative;
+            display: inline-block;
+        }
+
+        .mode-btn {
+            padding: 0.5rem 1rem;
+            font-size: 0.875rem;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .mode-btn.active {
+            background-color: #7c3aed;
+            color: white;
+        }
+
+        .mode-btn:not(.active) {
+            background-color: #1f2937;
+            color: #9ca3af;
+        }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100">
+    <div class="flex h-screen p-4 gap-4">
+        <!-- Sidebar (always visible) -->
+        <div id="sidebar" class="w-96 flex-shrink-0 flex flex-col gap-4 sidebar-container">
+            <!-- Mode Toggle -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <h2 class="text-sm font-bold mb-3 text-gray-400">view.mode</h2>
+                <div class="mode-toggle flex rounded-lg overflow-hidden border border-gray-800">
+                    <button id="mode-http" class="mode-btn active flex-1" onclick="switchMode('http')">
+                        HTTP Requests
+                    </button>
+                    <button id="mode-tcp" class="mode-btn flex-1" onclick="switchMode('tcp')">
+                        TCP Connections
+                    </button>
+                </div>
+            </div>
+
+            <!-- Tunnel Info -->
+            <div id="tunnel-info" class="bg-gray-900 border border-gray-800 rounded-lg p-4 hidden">
+                <h2 class="text-sm font-bold mb-3 text-gray-400">tunnel.endpoints</h2>
+                <div id="endpoints-list" class="space-y-2 text-xs">
+                    <!-- Will be populated dynamically -->
+                </div>
+            </div>
+
+            <!-- Stats -->
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <h2 class="text-sm font-bold mb-3 text-gray-400">metrics.overview</h2>
+                <div id="http-stats" class="grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                        <div class="text-gray-500">total</div>
+                        <div class="text-xl font-bold" id="total-requests">-</div>
+                    </div>
+                    <div>
+                        <div class="text-gray-500">success</div>
+                        <div class="text-xl font-bold text-green-400" id="successful-requests">-</div>
+                    </div>
+                    <div>
+                        <div class="text-gray-500">failed</div>
+                        <div class="text-xl font-bold text-red-400" id="failed-requests">-</div>
+                    </div>
+                    <div>
+                        <div class="text-gray-500">avg</div>
+                        <div class="text-xl font-bold text-purple-400" id="avg-duration">-</div>
+                    </div>
+                </div>
+                <div id="tcp-stats" class="hidden grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                        <div class="text-gray-500">total</div>
+                        <div class="text-xl font-bold" id="tcp-total">-</div>
+                    </div>
+                    <div>
+                        <div class="text-gray-500">active</div>
+                        <div class="text-xl font-bold text-green-400" id="tcp-active">-</div>
+                    </div>
+                    <div>
+                        <div class="text-gray-500">closed</div>
+                        <div class="text-xl font-bold text-gray-400" id="tcp-closed">-</div>
+                    </div>
+                    <div>
+                        <div class="text-gray-500">errors</div>
+                        <div class="text-xl font-bold text-red-400" id="tcp-errors">-</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Percentiles (HTTP only) -->
+            <div id="percentiles-section" class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <h2 class="text-sm font-bold mb-3 text-gray-400">latency.percentiles</h2>
+                <div class="grid grid-cols-4 gap-2 text-xs">
+                    <div class="text-center">
+                        <div class="text-gray-500">p50</div>
+                        <div class="text-lg font-bold text-cyan-400" id="p-50">-</div>
+                    </div>
+                    <div class="text-center">
+                        <div class="text-gray-500">p90</div>
+                        <div class="text-lg font-bold text-green-400" id="p-90">-</div>
+                    </div>
+                    <div class="text-center">
+                        <div class="text-gray-500">p95</div>
+                        <div class="text-lg font-bold text-yellow-400" id="p-95">-</div>
+                    </div>
+                    <div class="text-center">
+                        <div class="text-gray-500">p99</div>
+                        <div class="text-lg font-bold text-orange-400" id="p-99">-</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Request/Connection List -->
+            <div class="flex-1 bg-gray-900 border border-gray-800 rounded-lg overflow-hidden flex flex-col">
+                <div class="p-3 border-b border-gray-800 flex items-center justify-between">
+                    <h2 id="list-title" class="text-sm font-bold text-gray-400">requests</h2>
+                    <span class="text-xs text-gray-500" id="filtered-count">0</span>
+                </div>
+                <div id="request-list" class="request-list divide-y divide-gray-800">
+                    <div class="flex items-center justify-center p-8 text-gray-500">
+                        <div class="text-center">
+                            <div class="spinner inline-block w-6 h-6 border-2 border-gray-700 border-t-violet-500 rounded-full mb-4"></div>
+                            <p class="text-sm">loading...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Content Area -->
+        <div class="flex-1 flex flex-col gap-4">
+            <!-- Filters Bar -->
+            <div id="http-filters" class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="flex items-center gap-3">
+                    <div class="flex-1">
+                        <input
+                            type="text"
+                            id="search-input"
+                            placeholder="search url (start with / for exact path match)..."
+                            class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:border-violet-500 focus:outline-none"
+                            oninput="applyFilters()"
+                        />
+                    </div>
+                    <select id="method-filter" class="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:border-violet-500 focus:outline-none" onchange="applyFilters()">
+                        <option value="">all methods</option>
+                        <option value="GET">GET</option>
+                        <option value="POST">POST</option>
+                        <option value="PUT">PUT</option>
+                        <option value="DELETE">DELETE</option>
+                        <option value="PATCH">PATCH</option>
+                    </select>
+                    <select id="status-filter" class="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:border-violet-500 focus:outline-none" onchange="applyFilters()">
+                        <option value="all">all status</option>
+                        <option value="success">2xx-3xx</option>
+                        <option value="failed">4xx-5xx</option>
+                        <option value="errors">errors</option>
+                    </select>
+                    <button onclick="clearMetrics()" class="px-4 py-2 bg-red-600 hover:bg-red-500 rounded text-sm font-medium transition-colors whitespace-nowrap">
+                        ✕ clear all
+                    </button>
+                </div>
+            </div>
+
+            <div id="tcp-filters" class="hidden bg-gray-900 border border-gray-800 rounded-lg p-4">
+                <div class="flex items-center gap-3">
+                    <div class="flex-1">
+                        <input
+                            type="text"
+                            id="tcp-search"
+                            placeholder="search by remote IP..."
+                            class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:border-violet-500 focus:outline-none"
+                            oninput="applyTcpFilters()"
+                        />
+                    </div>
+                    <select id="tcp-state-filter" class="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:border-violet-500 focus:outline-none" onchange="applyTcpFilters()">
+                        <option value="all">all states</option>
+                        <option value="active">active</option>
+                        <option value="closed">closed</option>
+                        <option value="error">error</option>
+                    </select>
+                    <button onclick="clearMetrics()" class="px-4 py-2 bg-red-600 hover:bg-red-500 rounded text-sm font-medium transition-colors whitespace-nowrap">
+                        ✕ clear all
+                    </button>
+                </div>
+            </div>
+
+            <!-- List View -->
+            <div id="list-view" class="flex-1 bg-gray-900 border border-gray-800 rounded-lg overflow-hidden flex flex-col">
+                <div class="p-6 border-b border-gray-800">
+                    <h2 id="main-title" class="text-xl font-bold">requests.log</h2>
+                </div>
+                <div id="full-request-list" class="flex-1 overflow-y-auto divide-y divide-gray-800">
+                    <div class="flex items-center justify-center p-16 text-gray-500">
+                        <div class="text-center">
+                            <div class="spinner inline-block w-6 h-6 border-2 border-gray-700 border-t-violet-500 rounded-full mb-4"></div>
+                            <p>loading metrics...</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- HTTP Detail View -->
+            <div id="http-detail-view" class="hidden flex-1 bg-gray-900 border border-gray-800 rounded-lg overflow-hidden flex flex-col">
+                <div class="p-4 border-b border-gray-800 flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <button onclick="closeDetail()" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-sm font-medium transition-colors">
+                            ← back to list
+                        </button>
+                        <div class="text-sm text-gray-500">request details</div>
+                    </div>
+                    <button onclick="replayRequest()" class="px-3 py-1.5 bg-violet-600 hover:bg-violet-500 rounded text-sm font-medium transition-colors">
+                        ↻ replay request
+                    </button>
+                </div>
+                <div class="detail-view">
+                <div id="detail-content" class="p-6 space-y-6">
+                    <!-- HTTP request details (keeping existing structure) -->
+                    <div class="flex items-start justify-between">
+                        <div class="flex-1">
+                            <div class="flex items-center gap-3 mb-2">
+                                <span id="detail-method" class="px-2 py-1 bg-green-500/10 text-green-400 border border-green-500/20 rounded text-sm font-bold">GET</span>
+                                <span id="detail-status" class="px-2 py-1 bg-gray-500/10 text-gray-400 border border-gray-500/20 rounded text-sm font-bold">200</span>
+                                <span id="detail-duration" class="text-sm text-gray-400">42ms</span>
+                            </div>
+                            <div id="detail-uri" class="text-xl font-bold text-gray-100 break-all">/api/example</div>
+                            <div class="flex items-center gap-4 mt-2 text-xs text-gray-500">
+                                <span id="detail-timestamp">2024-01-01 12:00:00</span>
+                                <span>stream: <code id="detail-stream" class="px-1.5 py-0.5 bg-gray-800 rounded">abc123</code></span>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="detail-error" class="hidden p-4 bg-red-500/10 border border-red-500/20 rounded">
+                        <div class="text-red-400 text-sm font-bold mb-1">error</div>
+                        <pre id="detail-error-text" class="text-red-400 text-sm whitespace-pre-wrap"></pre>
+                    </div>
+                    <div>
+                        <h3 class="text-sm font-bold text-gray-400 mb-3">→ request</h3>
+                        <div class="mb-4">
+                            <div class="text-xs text-gray-500 mb-2">headers</div>
+                            <div id="detail-request-headers" class="bg-gray-950 border border-gray-800 rounded p-3 text-xs space-y-1">
+                                <div class="text-gray-500">No headers</div>
+                            </div>
+                        </div>
+                        <div id="detail-request-body-container" class="hidden">
+                            <div class="text-xs text-gray-500 mb-2">body</div>
+                            <div class="bg-gray-950 border border-gray-800 rounded p-3">
+                                <pre id="detail-request-body" class="text-xs text-green-400 overflow-x-auto"></pre>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="detail-response-section">
+                        <h3 class="text-sm font-bold text-gray-400 mb-3">← response</h3>
+                        <div class="mb-4">
+                            <div class="text-xs text-gray-500 mb-2">headers</div>
+                            <div id="detail-response-headers" class="bg-gray-950 border border-gray-800 rounded p-3 text-xs space-y-1">
+                                <div class="text-gray-500">No headers</div>
+                            </div>
+                        </div>
+                        <div id="detail-response-body-container" class="hidden">
+                            <div class="text-xs text-gray-500 mb-2">body</div>
+                            <div class="bg-gray-950 border border-gray-800 rounded p-3">
+                                <pre id="detail-response-body" class="text-xs text-green-400 overflow-x-auto"></pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </div>
+
+            <!-- TCP Detail View -->
+            <div id="tcp-detail-view" class="hidden flex-1 bg-gray-900 border border-gray-800 rounded-lg overflow-hidden flex flex-col">
+                <div class="p-4 border-b border-gray-800 flex items-center justify-between">
+                    <div class="flex items-center gap-3">
+                        <button onclick="closeDetail()" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 rounded text-sm font-medium transition-colors">
+                            ← back to list
+                        </button>
+                        <div class="text-sm text-gray-500">connection details</div>
+                    </div>
+                </div>
+                <div class="detail-view">
+                <div id="tcp-detail-content" class="p-6 space-y-6">
+                    <!-- TCP connection details -->
+                    <div class="flex items-start justify-between">
+                        <div class="flex-1">
+                            <div class="flex items-center gap-3 mb-2">
+                                <span id="tcp-detail-state" class="px-2 py-1 bg-green-500/10 text-green-400 border border-green-500/20 rounded text-sm font-bold">active</span>
+                                <span id="tcp-detail-duration" class="text-sm text-gray-400">-</span>
+                            </div>
+                            <div class="text-xl font-bold text-gray-100 mb-2">
+                                <span class="text-gray-500">Remote:</span> <span id="tcp-detail-remote" class="text-violet-400">-</span>
+                            </div>
+                            <div class="text-lg text-gray-300">
+                                <span class="text-gray-500">Local:</span> <span id="tcp-detail-local">-</span>
+                            </div>
+                            <div class="flex items-center gap-4 mt-2 text-xs text-gray-500">
+                                <span id="tcp-detail-timestamp">-</span>
+                                <span>stream: <code id="tcp-detail-stream" class="px-1.5 py-0.5 bg-gray-800 rounded">-</code></span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Error (if present) -->
+                    <div id="tcp-detail-error" class="hidden p-4 bg-red-500/10 border border-red-500/20 rounded">
+                        <div class="text-red-400 text-sm font-bold mb-1">error</div>
+                        <pre id="tcp-detail-error-text" class="text-red-400 text-sm whitespace-pre-wrap"></pre>
+                    </div>
+
+                    <!-- Data Transfer Stats -->
+                    <div>
+                        <h3 class="text-sm font-bold text-gray-400 mb-3">↔ data transfer</h3>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div class="bg-gray-950 border border-gray-800 rounded p-4">
+                                <div class="text-xs text-gray-500 mb-1">↓ bytes received</div>
+                                <div id="tcp-detail-received" class="text-2xl font-bold text-cyan-400">-</div>
+                            </div>
+                            <div class="bg-gray-950 border border-gray-800 rounded p-4">
+                                <div class="text-xs text-gray-500 mb-1">↑ bytes sent</div>
+                                <div id="tcp-detail-sent" class="text-2xl font-bold text-green-400">-</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Timeline -->
+                    <div>
+                        <h3 class="text-sm font-bold text-gray-400 mb-3">⏱ timeline</h3>
+                        <div class="bg-gray-950 border border-gray-800 rounded p-4 text-sm space-y-2">
+                            <div class="flex justify-between">
+                                <span class="text-gray-500">Opened:</span>
+                                <span id="tcp-detail-opened" class="text-gray-300">-</span>
+                            </div>
+                            <div id="tcp-detail-closed-row" class="hidden flex justify-between">
+                                <span class="text-gray-500">Closed:</span>
+                                <span id="tcp-detail-closed" class="text-gray-300">-</span>
+                            </div>
+                            <div class="flex justify-between">
+                                <span class="text-gray-500">Duration:</span>
+                                <span id="tcp-detail-duration-full" class="text-gray-300">-</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/dashboard.js"></script>
+</body>
+</html>

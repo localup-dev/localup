@@ -1,0 +1,4 @@
+/target
+*.db
+node_modules
+.vscode
