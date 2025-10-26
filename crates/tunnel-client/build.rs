@@ -1,8 +1,8 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn build_webapp(workspace_root: &PathBuf, webapp_name: &str) {
+fn build_webapp(workspace_root: &Path, webapp_name: &str) {
     let webapp_dir = workspace_root.join("webapps").join(webapp_name);
 
     println!("cargo:rerun-if-changed={}/src", webapp_dir.display());
@@ -24,7 +24,7 @@ fn build_webapp(workspace_root: &PathBuf, webapp_name: &str) {
         .arg("install")
         .current_dir(&webapp_dir)
         .status()
-        .expect(&format!("Failed to run bun install for {}", webapp_name));
+        .unwrap_or_else(|_| panic!("Failed to run bun install for {}", webapp_name));
 
     if !install_status.success() {
         eprintln!("Failed to install {} dependencies", webapp_name);
@@ -38,7 +38,7 @@ fn build_webapp(workspace_root: &PathBuf, webapp_name: &str) {
         .arg("build")
         .current_dir(&webapp_dir)
         .status()
-        .expect(&format!("Failed to run bun build for {}", webapp_name));
+        .unwrap_or_else(|_| panic!("Failed to run bun build for {}", webapp_name));
 
     if !build_status.success() {
         eprintln!("Failed to build {}", webapp_name);
