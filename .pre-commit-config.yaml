@@ -18,14 +18,14 @@ repos:
       - id: conventional-pre-commit
         stages: [commit-msg]
 
-  # Rust formatting and linting with prek
-  - repo: https://github.com/KOBA789/prek
-    rev: v0.2.1
+  # Rust formatting and linting
+  - repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
     hooks:
-      - id: cargo-fmt
+      - id: fmt
         name: cargo fmt
         args: ["--", "--check"]
 
-      - id: cargo-clippy
+      - id: clippy
         name: cargo clippy
         args: ["--all-targets", "--all-features", "--", "-D", "warnings"]

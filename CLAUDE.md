@@ -823,7 +823,7 @@ Current milestone: Phase 1-2 (Core protocol and TCP tunnel implementation)
 ```rust
 // tunnel-lib/src/lib.rs
 pub use tunnel_client::{TunnelClient, TunnelConfig, ...};  // Client API
-pub use tunnel_control::{TunnelHandler, ...};               // Relay API  
+pub use tunnel_control::{TunnelHandler, ...};               // Relay API
 pub use tunnel_server_https::{HttpsServer, ...};           // Server components
 // ... etc
 ```

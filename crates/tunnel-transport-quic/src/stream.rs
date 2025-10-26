@@ -204,7 +204,7 @@ impl QuicSendHalf {
     }
 }
 
-/// Receive half of a split QUIC stream  
+/// Receive half of a split QUIC stream
 pub struct QuicRecvHalf {
     recv: RecvStream,
     stream_id: u64,
