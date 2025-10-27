@@ -118,29 +118,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
+      # Use Swatinem/rust-cache for proper cross-platform Rust caching
+      # This caches ~/.cargo and target/ directories intelligently
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
-
-      - name: Cache Cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-git-
-
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-${{ matrix.target }}-target-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-target-release-
+          # Share cargo registry/index across all targets (huge savings)
+          # Only target/ is per-target (necessary due to different architectures)
+          shared-key: "release"
+          cache-targets: true
+          cache-on-failure: true
+          # Cache key includes: OS, target, Cargo.lock hash, and rust version
+          # Automatically handles cross-platform paths (works on Windows/Linux/macOS)
 
       # Build with cross-compilation environment for Linux ARM64
       - name: Build binaries (Linux ARM64)

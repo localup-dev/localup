@@ -127,12 +127,15 @@ Expand-Archive -Path "localup-relay-windows-amd64.zip" -DestinationPath "."
 git clone https://github.com/localup-dev/localup.git
 cd localup
 
-# Build with automatic webapp compilation
-cargo build --release -p tunnel-cli -p tunnel-exit-node
+# Option 1: Use install script (interactive)
+./scripts/install-local.sh
 
-# Install
-sudo cp target/release/tunnel-cli /usr/local/bin/localup
-sudo cp target/release/tunnel-exit-node /usr/local/bin/localup-relay
+# Option 2: Quick install (no prompts)
+./scripts/install-local-quick.sh
+
+# Option 3: Manual build and install
+cargo build --release -p tunnel-cli -p tunnel-exit-node
+sudo cp target/release/localup target/release/localup-relay /usr/local/bin/
 sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
 ```
 
