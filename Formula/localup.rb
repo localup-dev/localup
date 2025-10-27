@@ -27,7 +27,7 @@ class Localup < Formula
   depends_on "openssl@3"
 
   def install
-    bin.install "tunnel-cli" => "localup"
+    bin.install "tunnel" => "localup"
     bin.install "tunnel-exit-node" => "localup-relay"
 
     # Generate shell completions (if supported)

@@ -12,8 +12,8 @@ class LocalupHead < Formula
     system "cargo", "build", "--release", "-p", "tunnel-cli"
     system "cargo", "build", "--release", "-p", "tunnel-exit-node"
 
-    # Install binaries
-    bin.install "target/release/tunnel-cli" => "localup"
+    # Install binaries (note: binary names in target/release)
+    bin.install "target/release/tunnel" => "localup"
     bin.install "target/release/tunnel-exit-node" => "localup-relay"
   end
 
