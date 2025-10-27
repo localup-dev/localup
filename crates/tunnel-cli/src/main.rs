@@ -10,9 +10,10 @@ use tunnel_client::{ExitNodeConfig, MetricsServer, ProtocolConfig, TunnelClient,
 
 /// Tunnel CLI - Expose local servers to the internet
 #[derive(Parser, Debug)]
-#[command(name = "tunnel")]
+#[command(name = "localup")]
 #[command(about = "Expose local servers through secure tunnels", long_about = None)]
-#[command(version)]
+#[command(version = env!("GIT_TAG"))]
+#[command(long_version = concat!(env!("GIT_TAG"), "\nCommit: ", env!("GIT_HASH"), "\nBuilt: ", env!("BUILD_TIME")))]
 struct Cli {
     /// Local port to expose
     #[arg(short, long)]

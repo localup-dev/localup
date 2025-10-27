@@ -58,16 +58,16 @@ localup-relay --version
 ```bash
 # Download
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-linux-amd64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-exit-node-linux-amd64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-linux-amd64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-linux-amd64.tar.gz"
 
 # Extract
-tar -xzf tunnel-linux-amd64.tar.gz
-tar -xzf tunnel-exit-node-linux-amd64.tar.gz
+tar -xzf localup-linux-amd64.tar.gz
+tar -xzf localup-relay-linux-amd64.tar.gz
 
 # Install
-sudo mv tunnel /usr/local/bin/localup
-sudo mv tunnel-exit-node /usr/local/bin/localup-relay
+sudo mv localup localup-relay /usr/local/bin/
+
 sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
 
 # Verify
@@ -79,16 +79,16 @@ localup-relay --version
 ```bash
 # Download
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-linux-arm64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-exit-node-linux-arm64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-linux-arm64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-linux-arm64.tar.gz"
 
 # Extract
-tar -xzf tunnel-linux-arm64.tar.gz
-tar -xzf tunnel-exit-node-linux-arm64.tar.gz
+tar -xzf localup-linux-arm64.tar.gz
+tar -xzf localup-relay-linux-arm64.tar.gz
 
 # Install
-sudo mv tunnel /usr/local/bin/localup
-sudo mv tunnel-exit-node /usr/local/bin/localup-relay
+sudo mv localup localup-relay /usr/local/bin/
+
 sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
 ```
 
@@ -100,16 +100,16 @@ sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
 ```bash
 # Download
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-macos-amd64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-exit-node-macos-amd64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-macos-amd64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-macos-amd64.tar.gz"
 
 # Extract
-tar -xzf tunnel-macos-amd64.tar.gz
-tar -xzf tunnel-exit-node-macos-amd64.tar.gz
+tar -xzf localup-macos-amd64.tar.gz
+tar -xzf localup-relay-macos-amd64.tar.gz
 
 # Install
-sudo mv tunnel /usr/local/bin/localup
-sudo mv tunnel-exit-node /usr/local/bin/localup-relay
+sudo mv localup localup-relay /usr/local/bin/
+
 sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
 ```
 
@@ -117,16 +117,16 @@ sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
 ```bash
 # Download
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-macos-arm64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-exit-node-macos-arm64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-macos-arm64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-macos-arm64.tar.gz"
 
 # Extract
-tar -xzf tunnel-macos-arm64.tar.gz
-tar -xzf tunnel-exit-node-macos-arm64.tar.gz
+tar -xzf localup-macos-arm64.tar.gz
+tar -xzf localup-relay-macos-arm64.tar.gz
 
 # Install
-sudo mv tunnel /usr/local/bin/localup
-sudo mv tunnel-exit-node /usr/local/bin/localup-relay
+sudo mv localup localup-relay /usr/local/bin/
+
 sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
 ```
 
@@ -143,12 +143,12 @@ $latestRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/localup-de
 $version = $latestRelease.tag_name
 
 # Download
-Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/tunnel-windows-amd64.zip" -OutFile "tunnel-windows-amd64.zip"
-Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/tunnel-exit-node-windows-amd64.zip" -OutFile "tunnel-exit-node-windows-amd64.zip"
+Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/localup-windows-amd64.zip" -OutFile "localup-windows-amd64.zip"
+Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/localup-relay-windows-amd64.zip" -OutFile "localup-relay-windows-amd64.zip"
 
 # Extract
-Expand-Archive -Path "tunnel-windows-amd64.zip" -DestinationPath "."
-Expand-Archive -Path "tunnel-exit-node-windows-amd64.zip" -DestinationPath "."
+Expand-Archive -Path "localup-windows-amd64.zip" -DestinationPath "."
+Expand-Archive -Path "localup-relay-windows-amd64.zip" -DestinationPath "."
 
 # Rename
 Rename-Item "tunnel.exe" "localup.exe"

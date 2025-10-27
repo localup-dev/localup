@@ -20,9 +20,10 @@ use tunnel_transport_quic::QuicConfig;
 
 /// Tunnel exit node - accepts public connections and routes to tunnels
 #[derive(Parser, Debug)]
-#[command(name = "tunnel-exit-node")]
+#[command(name = "localup-relay")]
 #[command(about = "Run a tunnel relay (exit node) server", long_about = None)]
-#[command(version)]
+#[command(version = env!("GIT_TAG"))]
+#[command(long_version = concat!(env!("GIT_TAG"), "\nCommit: ", env!("GIT_HASH"), "\nBuilt: ", env!("BUILD_TIME")))]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

@@ -20,5 +20,8 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 rustls = { workspace = true }
 
+[build-dependencies]
+chrono = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
