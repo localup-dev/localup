@@ -134,6 +134,11 @@ mod tests {
 
     #[test]
     fn test_cert_can_be_used_with_rustls() {
+        // Initialize crypto provider (required for rustls)
+        let _ = rustls::crypto::CryptoProvider::install_default(
+            rustls::crypto::ring::default_provider(),
+        );
+
         let cert = generate_self_signed_cert().unwrap();
 
         // Verify rustls can parse it
