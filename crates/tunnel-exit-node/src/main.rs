@@ -159,6 +159,10 @@ fn generate_token(secret: &str, tunnel_id: &str, hours: i64) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize rustls crypto provider (required for QUIC/TLS)
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+        .unwrap();
+
     let cli = Cli::parse();
 
     // Handle subcommands

@@ -58,6 +58,10 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize rustls crypto provider (required for QUIC/TLS)
+    rustls::crypto::CryptoProvider::install_default(rustls::crypto::ring::default_provider())
+        .unwrap();
+
     let cli = Cli::parse();
 
     // Initialize logging
