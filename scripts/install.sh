@@ -1,168 +1,200 @@
 #!/bin/bash
-# Installation script for tunnel CLI
-# Usage: curl -sSL https://raw.githubusercontent.com/OWNER/REPO/main/scripts/install.sh | bash
+# Download the latest localup release for your platform
+# Usage: ./scripts/install.sh
+# Or: curl -fsSL https://raw.githubusercontent.com/localup-dev/localup/main/scripts/install.sh | bash
 
 set -e
 
 # Colors
 GREEN='\033[0;32m'
-BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 RED='\033[0;31m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
-# Configuration
-GITHUB_REPO="localup-dev/localup"  # Replace with actual repo
-BINARY_NAME="tunnel"
-INSTALL_DIR="/usr/local/bin"
-TEMP_DIR=$(mktemp -d)
+echo -e "${BLUE}═══════════════════════════════════════════════${NC}"
+echo -e "${BLUE}   Localup - Download Latest Release${NC}"
+echo -e "${BLUE}═══════════════════════════════════════════════${NC}"
+echo ""
 
 # Detect OS and architecture
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
-echo -e "${BLUE}═══════════════════════════════════════${NC}"
-echo -e "${BLUE}  Tunnel Installation Script${NC}"
-echo -e "${BLUE}═══════════════════════════════════════${NC}"
-echo ""
-
-# Check OS and architecture
-if [ "$OS" != "linux" ]; then
-    echo -e "${RED}Error: This script only supports Linux${NC}"
-    echo "For other platforms, please build from source or download from releases"
+case "$OS" in
+  linux*)
+    PLATFORM="linux"
+    EXT="tar.gz"
+    ;;
+  darwin*)
+    PLATFORM="macos"
+    EXT="tar.gz"
+    ;;
+  mingw* | msys* | cygwin*)
+    PLATFORM="windows"
+    EXT="zip"
+    ;;
+  *)
+    echo -e "${RED}❌ Unsupported OS: $OS${NC}"
     exit 1
-fi
+    ;;
+esac
 
-if [ "$ARCH" != "x86_64" ]; then
-    echo -e "${RED}Error: This script only supports x86_64 (AMD64) architecture${NC}"
-    echo "Detected architecture: $ARCH"
+case "$ARCH" in
+  x86_64 | amd64)
+    ARCH_NAME="amd64"
+    ;;
+  aarch64 | arm64)
+    ARCH_NAME="arm64"
+    ;;
+  *)
+    echo -e "${RED}❌ Unsupported architecture: $ARCH${NC}"
     exit 1
-fi
+    ;;
+esac
 
-echo -e "${GREEN}✓ Platform detected: Linux AMD64${NC}"
+echo -e "${GREEN}📋 Detected platform:${NC}"
+echo -e "  OS: $PLATFORM"
+echo -e "  Architecture: $ARCH_NAME"
 echo ""
-
-# Check for required tools
-echo -e "${BLUE}Checking dependencies...${NC}"
-for cmd in curl tar sha256sum; do
-    if ! command -v $cmd &> /dev/null; then
-        echo -e "${RED}Error: $cmd is required but not installed${NC}"
-        exit 1
-    fi
-    echo -e "${GREEN}✓ $cmd found${NC}"
-done
-echo ""
-
-# Check if we need sudo
-NEED_SUDO=false
-if [ ! -w "$INSTALL_DIR" ]; then
-    NEED_SUDO=true
-    echo -e "${YELLOW}Note: sudo is required to install to $INSTALL_DIR${NC}"
-    echo -e "${YELLOW}Alternatively, you can install to ~/.local/bin without sudo${NC}"
-    echo ""
-    read -p "Install to $INSTALL_DIR with sudo? (y/n): " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        INSTALL_DIR="$HOME/.local/bin"
-        mkdir -p "$INSTALL_DIR"
-        echo -e "${BLUE}Installing to $INSTALL_DIR${NC}"
-        echo ""
-    fi
-fi
 
 # Get latest release version
-echo -e "${BLUE}Fetching latest release...${NC}"
-LATEST_RELEASE=$(curl -s https://api.github.com/repos/$GITHUB_REPO/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+echo -e "${YELLOW}🔍 Fetching latest release...${NC}"
 
-if [ -z "$LATEST_RELEASE" ]; then
-    echo -e "${RED}Error: Could not fetch latest release${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}✓ Latest version: $LATEST_RELEASE${NC}"
-echo ""
-
-# Download binary
-DOWNLOAD_URL="https://github.com/$GITHUB_REPO/releases/download/$LATEST_RELEASE/tunnel-linux-amd64.tar.gz"
-CHECKSUM_URL="https://github.com/$GITHUB_REPO/releases/download/$LATEST_RELEASE/checksums-linux-amd64.txt"
-
-echo -e "${BLUE}Downloading $BINARY_NAME...${NC}"
-cd "$TEMP_DIR"
-
-if ! curl -sL "$DOWNLOAD_URL" -o tunnel-linux-amd64.tar.gz; then
-    echo -e "${RED}Error: Failed to download binary${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}✓ Downloaded${NC}"
-echo ""
-
-# Download and verify checksum
-echo -e "${BLUE}Verifying checksum...${NC}"
-if ! curl -sL "$CHECKSUM_URL" -o checksums.txt; then
-    echo -e "${YELLOW}Warning: Could not download checksums, skipping verification${NC}"
+if command -v gh &> /dev/null; then
+  # Use GitHub CLI
+  LATEST_VERSION=$(gh release list --repo localup-dev/localup --limit 1 | awk '{print $1}' | head -1)
 else
-    if sha256sum -c checksums.txt --ignore-missing --status; then
-        echo -e "${GREEN}✓ Checksum verified${NC}"
+  # Use curl and GitHub API
+  LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+fi
+
+if [ -z "$LATEST_VERSION" ]; then
+  echo -e "${RED}❌ Could not fetch latest release version${NC}"
+  exit 1
+fi
+
+echo -e "  Latest version: ${GREEN}$LATEST_VERSION${NC}"
+echo ""
+
+# Construct download URLs
+TUNNEL_FILE="tunnel-${PLATFORM}-${ARCH_NAME}.${EXT}"
+RELAY_FILE="tunnel-exit-node-${PLATFORM}-${ARCH_NAME}.${EXT}"
+CHECKSUMS_FILE="checksums-${PLATFORM}-${ARCH_NAME}.txt"
+
+BASE_URL="https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}"
+
+TUNNEL_URL="${BASE_URL}/${TUNNEL_FILE}"
+RELAY_URL="${BASE_URL}/${RELAY_FILE}"
+CHECKSUMS_URL="${BASE_URL}/${CHECKSUMS_FILE}"
+
+# Create download directory
+DOWNLOAD_DIR="localup-${LATEST_VERSION}"
+mkdir -p "$DOWNLOAD_DIR"
+cd "$DOWNLOAD_DIR"
+
+echo -e "${YELLOW}📥 Downloading binaries...${NC}"
+
+# Download files
+echo -e "  Downloading tunnel CLI..."
+if curl -L -f -o "$TUNNEL_FILE" "$TUNNEL_URL"; then
+  echo -e "  ${GREEN}✓ Downloaded $TUNNEL_FILE${NC}"
+else
+  echo -e "  ${RED}✗ Failed to download $TUNNEL_FILE${NC}"
+  exit 1
+fi
+
+echo -e "  Downloading relay server..."
+if curl -L -f -o "$RELAY_FILE" "$RELAY_URL"; then
+  echo -e "  ${GREEN}✓ Downloaded $RELAY_FILE${NC}"
+else
+  echo -e "  ${RED}✗ Failed to download $RELAY_FILE${NC}"
+  exit 1
+fi
+
+echo -e "  Downloading checksums..."
+if curl -L -f -o "$CHECKSUMS_FILE" "$CHECKSUMS_URL"; then
+  echo -e "  ${GREEN}✓ Downloaded $CHECKSUMS_FILE${NC}"
+else
+  echo -e "  ${YELLOW}⚠️  Checksums file not available${NC}"
+fi
+
+echo ""
+
+# Verify checksums if available
+if [ -f "$CHECKSUMS_FILE" ]; then
+  echo -e "${YELLOW}🔐 Verifying checksums...${NC}"
+
+  if command -v sha256sum &> /dev/null; then
+    if sha256sum -c "$CHECKSUMS_FILE" 2>/dev/null; then
+      echo -e "  ${GREEN}✓ Checksums verified${NC}"
     else
-        echo -e "${RED}Error: Checksum verification failed${NC}"
-        echo "This could indicate a corrupted download or security issue"
-        exit 1
+      echo -e "  ${YELLOW}⚠️  Checksum verification failed${NC}"
+      echo -e "  ${YELLOW}   Files downloaded but may be corrupted${NC}"
     fi
-fi
-echo ""
-
-# Extract
-echo -e "${BLUE}Extracting...${NC}"
-tar -xzf tunnel-linux-amd64.tar.gz
-echo -e "${GREEN}✓ Extracted${NC}"
-echo ""
-
-# Install
-echo -e "${BLUE}Installing to $INSTALL_DIR...${NC}"
-if [ "$NEED_SUDO" = true ] && [ "$INSTALL_DIR" = "/usr/local/bin" ]; then
-    sudo mv tunnel "$INSTALL_DIR/"
-    sudo chmod +x "$INSTALL_DIR/tunnel"
-else
-    mv tunnel "$INSTALL_DIR/"
-    chmod +x "$INSTALL_DIR/tunnel"
-fi
-
-echo -e "${GREEN}✓ Installed${NC}"
-echo ""
-
-# Cleanup
-cd - > /dev/null
-rm -rf "$TEMP_DIR"
-
-# Verify installation
-echo -e "${BLUE}Verifying installation...${NC}"
-if command -v tunnel &> /dev/null; then
-    VERSION=$(tunnel --version 2>&1 || echo "unknown")
-    echo -e "${GREEN}✓ tunnel successfully installed!${NC}"
-    echo ""
-    echo -e "${BLUE}═══════════════════════════════════════${NC}"
-    echo -e "${GREEN}  Installation Complete!${NC}"
-    echo -e "${BLUE}═══════════════════════════════════════${NC}"
-    echo ""
-    echo "Installed to: $INSTALL_DIR/tunnel"
-    echo "Version: $VERSION"
-    echo ""
-    echo "Get started:"
-    echo "  tunnel --port 3000 --token YOUR_TOKEN"
-    echo ""
-    echo "For help:"
-    echo "  tunnel --help"
-else
-    echo -e "${YELLOW}Warning: tunnel command not found in PATH${NC}"
-    echo ""
-    echo "The binary was installed to: $INSTALL_DIR/tunnel"
-    echo ""
-    if [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then
-        echo "Add to your PATH by adding this line to ~/.bashrc or ~/.zshrc:"
-        echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-        echo ""
-        echo "Then reload your shell:"
-        echo "  source ~/.bashrc  # or source ~/.zshrc"
+  elif command -v shasum &> /dev/null; then
+    if shasum -a 256 -c "$CHECKSUMS_FILE" 2>/dev/null; then
+      echo -e "  ${GREEN}✓ Checksums verified${NC}"
+    else
+      echo -e "  ${YELLOW}⚠️  Checksum verification failed${NC}"
     fi
+  else
+    echo -e "  ${YELLOW}⚠️  sha256sum not found, skipping verification${NC}"
+  fi
+  echo ""
 fi
+
+# Extract archives
+echo -e "${YELLOW}📦 Extracting archives...${NC}"
+
+if [ "$EXT" = "tar.gz" ]; then
+  tar -xzf "$TUNNEL_FILE"
+  tar -xzf "$RELAY_FILE"
+  echo -e "  ${GREEN}✓ Extracted binaries${NC}"
+elif [ "$EXT" = "zip" ]; then
+  unzip -q "$TUNNEL_FILE"
+  unzip -q "$RELAY_FILE"
+  echo -e "  ${GREEN}✓ Extracted binaries${NC}"
+fi
+
+echo ""
+
+# Make binaries executable on Unix
+if [ "$PLATFORM" != "windows" ]; then
+  chmod +x tunnel tunnel-exit-node
+fi
+
+# Show installation instructions
+echo -e "${GREEN}═══════════════════════════════════════════════${NC}"
+echo -e "${GREEN}✅ Download complete!${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════════${NC}"
+echo ""
+echo -e "${YELLOW}📂 Files downloaded to:${NC} $(pwd)"
+echo ""
+echo -e "${YELLOW}📋 Next steps:${NC}"
+echo ""
+
+if [ "$PLATFORM" = "linux" ] || [ "$PLATFORM" = "macos" ]; then
+  echo -e "  ${BLUE}# Install to system:${NC}"
+  echo -e "  sudo mv tunnel /usr/local/bin/localup"
+  echo -e "  sudo mv tunnel-exit-node /usr/local/bin/localup-relay"
+  echo ""
+  echo -e "  ${BLUE}# Or run from current directory:${NC}"
+  echo -e "  ./tunnel --version"
+  echo -e "  ./tunnel-exit-node --version"
+else
+  echo -e "  ${BLUE}# Run binaries:${NC}"
+  echo -e "  .\\tunnel.exe --version"
+  echo -e "  .\\tunnel-exit-node.exe --version"
+  echo ""
+  echo -e "  ${BLUE}# Add to PATH or move to desired location${NC}"
+fi
+
+echo ""
+echo -e "${YELLOW}🚀 Quick start:${NC}"
+echo -e "  ${BLUE}# Start relay server${NC}"
+echo -e "  localup-relay"
+echo ""
+echo -e "  ${BLUE}# Create tunnel (in another terminal)${NC}"
+echo -e "  localup http --port 3000 --relay localhost:4443"
+echo ""

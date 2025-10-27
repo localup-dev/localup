@@ -2575,20 +2575,6 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.22.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf4ef73721ac7bcd79b2b315da7779d8fc09718c6b3d2d1b2d94850eb8c18432"
-dependencies = [
- "log",
- "ring",
- "rustls-pki-types",
- "rustls-webpki 0.102.8",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "rustls"
 version = "0.23.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd3c25631629d034ce7cd9940adc9d45762d46de2b0f57193c4443b92c6d4d40"
@@ -2689,17 +2675,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b6275d1ee7a1cd780b64aca7726599a1dbc893b1e64144529e55c3c2f745765"
 dependencies = [
  "ring",
- "untrusted",
-]
-
-[[package]]
-name = "rustls-webpki"
-version = "0.102.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64ca1bc8749bd4cf37b5ce386cc146580777b4e8572c7b97baf22c83f444bee9"
-dependencies = [
- "ring",
- "rustls-pki-types",
  "untrusted",
 ]
 
@@ -3900,7 +3875,7 @@ dependencies = [
  "instant-acme",
  "rand 0.8.5",
  "rcgen",
- "rustls 0.22.4",
+ "rustls 0.23.32",
  "rustls-pemfile 2.2.0",
  "serde",
  "thiserror 1.0.69",
@@ -3915,6 +3890,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rustls 0.23.32",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3963,7 +3939,7 @@ dependencies = [
  "bytes",
  "futures",
  "quinn",
- "rustls 0.22.4",
+ "rustls 0.23.32",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -4004,6 +3980,7 @@ dependencies = [
  "clap",
  "mime_guess",
  "rust-embed",
+ "rustls 0.23.32",
  "tokio",
  "tracing",
  "tracing-subscriber",

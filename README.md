@@ -15,14 +15,24 @@ A high-performance, QUIC-based tunnel system for exposing local servers through 
 
 ## 📦 Installation
 
-### Option 1: Homebrew (macOS/Linux) - Recommended
+### Quick Install (One-Liner)
+
+**Linux/macOS:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/localup-dev/localup/main/scripts/install.sh | bash
+```
+
+This auto-detects your platform, downloads the latest release, verifies checksums, and shows installation instructions.
+
+---
+
+### Option 1: Homebrew (macOS/Linux)
+
+**Note:** Formula must be updated after each release. Check [releases](https://github.com/localup-dev/localup/releases) for the latest version.
 
 ```bash
-# Add the tap
-brew tap localup-dev/localup
-
-# Install localup
-brew install localup
+# Stable release
+brew install https://raw.githubusercontent.com/localup-dev/localup/main/Formula/localup.rb
 
 # Verify installation
 localup --version
@@ -33,51 +43,105 @@ This installs two commands:
 - **`localup`** - Client CLI for creating tunnels
 - **`localup-relay`** - Relay server (exit node) for hosting
 
-### Option 2: Build from Source
+---
+
+### Option 2: Download Pre-built Binaries
+
+#### Linux (AMD64)
+```bash
+# Get latest version
+LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+
+# Download
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-linux-amd64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-exit-node-linux-amd64.tar.gz"
+
+# Extract
+tar -xzf tunnel-linux-amd64.tar.gz
+tar -xzf tunnel-exit-node-linux-amd64.tar.gz
+
+# Install
+sudo mv tunnel /usr/local/bin/localup
+sudo mv tunnel-exit-node /usr/local/bin/localup-relay
+sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
+```
+
+#### Linux (ARM64)
+```bash
+LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-linux-arm64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-exit-node-linux-arm64.tar.gz"
+tar -xzf tunnel-linux-arm64.tar.gz
+tar -xzf tunnel-exit-node-linux-arm64.tar.gz
+sudo mv tunnel /usr/local/bin/localup
+sudo mv tunnel-exit-node /usr/local/bin/localup-relay
+```
+
+#### macOS (Apple Silicon)
+```bash
+LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-macos-arm64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-exit-node-macos-arm64.tar.gz"
+tar -xzf tunnel-macos-arm64.tar.gz
+tar -xzf tunnel-exit-node-macos-arm64.tar.gz
+sudo mv tunnel /usr/local/bin/localup
+sudo mv tunnel-exit-node /usr/local/bin/localup-relay
+```
+
+#### macOS (Intel)
+```bash
+LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-macos-amd64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/tunnel-exit-node-macos-amd64.tar.gz"
+tar -xzf tunnel-macos-amd64.tar.gz
+tar -xzf tunnel-exit-node-macos-amd64.tar.gz
+sudo mv tunnel /usr/local/bin/localup
+sudo mv tunnel-exit-node /usr/local/bin/localup-relay
+```
+
+#### Windows (AMD64)
+```powershell
+# Get latest version
+$latestRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/localup-dev/localup/releases/latest"
+$version = $latestRelease.tag_name
+
+# Download
+Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/tunnel-windows-amd64.zip" -OutFile "tunnel-windows-amd64.zip"
+Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/tunnel-exit-node-windows-amd64.zip" -OutFile "tunnel-exit-node-windows-amd64.zip"
+
+# Extract
+Expand-Archive -Path "tunnel-windows-amd64.zip" -DestinationPath "."
+Expand-Archive -Path "tunnel-exit-node-windows-amd64.zip" -DestinationPath "."
+
+# Rename and add to PATH
+Rename-Item "tunnel.exe" "localup.exe"
+Rename-Item "tunnel-exit-node.exe" "localup-relay.exe"
+```
+
+---
+
+### Option 3: Build from Source
 
 **Prerequisites:**
-- **Rust**: 1.70+ (install from [rustup.rs](https://rustup.rs))
+- **Rust**: 1.90+ (install from [rustup.rs](https://rustup.rs))
+- **Bun**: For building webapps (install from [bun.sh](https://bun.sh))
 - **OpenSSL**: For TLS certificate generation
-- **Database** (optional): PostgreSQL with TimescaleDB or SQLite for relay servers
 
 ```bash
 # Clone the repository
 git clone https://github.com/localup-dev/localup.git
-cd localup-dev
+cd localup
 
-# Build relay server (exit node)
-cd crates/tunnel-exit-node
-cargo build --release
+# Build with automatic webapp compilation
+cargo build --release -p tunnel-cli -p tunnel-exit-node
 
-# Build client CLI
-cd ../tunnel-cli
-cargo build --release
-
-# Binaries will be at:
-# - target/release/tunnel-exit-node
-# - target/release/tunnel-cli
+# Install
+sudo cp target/release/tunnel-cli /usr/local/bin/localup
+sudo cp target/release/tunnel-exit-node /usr/local/bin/localup-relay
+sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
 ```
 
-### Option 3: Download Pre-built Binaries
-
-Download the latest release from [GitHub Releases](https://github.com/localup-dev/localup/releases):
-
-```bash
-# macOS ARM64 (Apple Silicon)
-curl -LO https://github.com/localup-dev/localup/releases/latest/download/localup-darwin-arm64.tar.gz
-tar -xzf localup-darwin-arm64.tar.gz
-sudo mv tunnel-cli /usr/local/bin/localup
-sudo mv tunnel-exit-node /usr/local/bin/localup-relay
-
-# macOS AMD64 (Intel)
-curl -LO https://github.com/localup-dev/localup/releases/latest/download/localup-darwin-amd64.tar.gz
-
-# Linux AMD64
-curl -LO https://github.com/localup-dev/localup/releases/latest/download/localup-linux-amd64.tar.gz
-
-# Linux ARM64
-curl -LO https://github.com/localup-dev/localup/releases/latest/download/localup-linux-arm64.tar.gz
-```
+---
 
 ### Option 4: Use as Rust Library
 
@@ -85,8 +149,114 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tunnel-lib = { path = "path/to/localup-dev/crates/tunnel-lib" }
+tunnel-lib = { path = "path/to/localup/crates/tunnel-lib" }
 tokio = { version = "1", features = ["full"] }
+```
+
+---
+
+### Verify Installation
+
+After installation, verify the binaries:
+
+```bash
+# Check versions
+localup --version
+localup-relay --version
+
+# Check help
+localup --help
+localup-relay --help
+```
+
+**Expected output:**
+```
+tunnel-cli 0.1.0
+tunnel-exit-node 0.1.0
+```
+
+---
+
+### Troubleshooting Installation
+
+**Binary not found after installation (Linux/macOS):**
+```bash
+# Check if /usr/local/bin is in PATH
+echo $PATH | grep /usr/local/bin
+
+# If not, add to ~/.bashrc or ~/.zshrc:
+export PATH="/usr/local/bin:$PATH"
+source ~/.bashrc  # or ~/.zshrc
+```
+
+**Permission denied:**
+```bash
+# Make binaries executable
+chmod +x /usr/local/bin/localup
+chmod +x /usr/local/bin/localup-relay
+```
+
+**macOS Security Warning:**
+
+If you get "cannot be opened because it is from an unidentified developer":
+```bash
+# Remove quarantine attribute
+xattr -d com.apple.quarantine /usr/local/bin/localup
+xattr -d com.apple.quarantine /usr/local/bin/localup-relay
+```
+
+**Windows SmartScreen Warning:**
+
+If Windows blocks the executable:
+1. Click "More info"
+2. Click "Run anyway"
+
+Or use PowerShell:
+```powershell
+Unblock-File -Path .\localup.exe
+Unblock-File -Path .\localup-relay.exe
+```
+
+---
+
+### Updating
+
+**Homebrew:**
+```bash
+brew upgrade localup
+```
+
+**Manual:**
+
+Download and install the latest version following the manual installation steps above.
+
+**From Source:**
+```bash
+cd localup
+git pull origin main
+cargo build --release -p tunnel-cli -p tunnel-exit-node
+sudo cp target/release/tunnel-cli /usr/local/bin/localup
+sudo cp target/release/tunnel-exit-node /usr/local/bin/localup-relay
+```
+
+---
+
+### Uninstalling
+
+**Homebrew:**
+```bash
+brew uninstall localup
+```
+
+**Manual:**
+```bash
+# Remove binaries
+sudo rm /usr/local/bin/localup
+sudo rm /usr/local/bin/localup-relay
+
+# Remove configuration (optional)
+rm -rf ~/.config/localup
+rm -rf ~/.localup
 ```
 
 ## 🚀 Quick Start
@@ -658,4 +828,4 @@ at your option.
 
 ---
 
-**Built with ❤️ in Rust** | [Documentation](docs/) | [Examples](examples/) | [Installation Guide](INSTALL.md)
+**Built with ❤️ in Rust** | [Documentation](docs/) | [Examples](examples/) | [Installation Guide](docs/INSTALLATION.md)

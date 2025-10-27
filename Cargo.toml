@@ -44,8 +44,8 @@ http-body-util = "0.1"
 quinn = "0.11"
 
 # TLS
-rustls = { version = "0.22", features = ["ring"] }
-tokio-rustls = "0.25"
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
 rustls-pemfile = "2.0"
 webpki-roots = "0.26"
 
