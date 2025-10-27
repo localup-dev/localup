@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "tunnel"
+name = "localup"
 path = "src/main.rs"
 
 [dependencies]

@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "tunnel-exit-node"
+name = "localup-relay"
 path = "src/main.rs"
 
 [dependencies]

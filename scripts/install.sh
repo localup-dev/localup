@@ -78,8 +78,8 @@ echo -e "  Latest version: ${GREEN}$LATEST_VERSION${NC}"
 echo ""
 
 # Construct download URLs
-TUNNEL_FILE="tunnel-${PLATFORM}-${ARCH_NAME}.${EXT}"
-RELAY_FILE="tunnel-exit-node-${PLATFORM}-${ARCH_NAME}.${EXT}"
+TUNNEL_FILE="localup-${PLATFORM}-${ARCH_NAME}.${EXT}"
+RELAY_FILE="localup-relay-${PLATFORM}-${ARCH_NAME}.${EXT}"
 CHECKSUMS_FILE="checksums-${PLATFORM}-${ARCH_NAME}.txt"
 
 BASE_URL="https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}"
@@ -161,7 +161,7 @@ echo ""
 
 # Make binaries executable on Unix
 if [ "$PLATFORM" != "windows" ]; then
-  chmod +x tunnel tunnel-exit-node
+  chmod +x localup localup-relay
 fi
 
 # Show installation instructions
@@ -176,16 +176,15 @@ echo ""
 
 if [ "$PLATFORM" = "linux" ] || [ "$PLATFORM" = "macos" ]; then
   echo -e "  ${BLUE}# Install to system:${NC}"
-  echo -e "  sudo mv tunnel /usr/local/bin/localup"
-  echo -e "  sudo mv tunnel-exit-node /usr/local/bin/localup-relay"
+  echo -e "  sudo mv localup localup-relay /usr/local/bin/"
   echo ""
   echo -e "  ${BLUE}# Or run from current directory:${NC}"
-  echo -e "  ./tunnel --version"
-  echo -e "  ./tunnel-exit-node --version"
+  echo -e "  ./localup --version"
+  echo -e "  ./localup-relay --version"
 else
   echo -e "  ${BLUE}# Run binaries:${NC}"
-  echo -e "  .\\tunnel.exe --version"
-  echo -e "  .\\tunnel-exit-node.exe --version"
+  echo -e "  .\\localup.exe --version"
+  echo -e "  .\\localup-relay.exe --version"
   echo ""
   echo -e "  ${BLUE}# Add to PATH or move to desired location${NC}"
 fi
