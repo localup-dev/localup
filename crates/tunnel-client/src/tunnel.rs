@@ -191,7 +191,8 @@ impl TunnelConnector {
                     subdomain: subdomain.clone(),
                 },
                 ProtocolConfig::Tcp { remote_port, .. } => Protocol::Tcp {
-                    port: remote_port.unwrap_or(8080),
+                    // 0 means auto-allocate, specific port means request that port
+                    port: remote_port.unwrap_or(0),
                 },
                 ProtocolConfig::Tls {
                     subdomain,
@@ -255,16 +256,22 @@ impl TunnelConnector {
                 })
             }
             Ok(Some(TunnelMessage::Disconnect { reason })) => {
-                error!("Tunnel rejected: {}", reason);
-
-                // Check if this is an authentication error
+                // Check for specific error types and provide user-friendly messages
                 if reason.contains("Authentication failed")
                     || reason.contains("JWT")
                     || reason.contains("InvalidToken")
                     || reason.contains("authentication")
                 {
+                    error!("❌ Authentication failed: {}", reason);
                     Err(TunnelError::AuthenticationFailed(reason))
+                } else if reason.contains("Subdomain is already in use")
+                    || reason.contains("Route already exists")
+                {
+                    error!("❌ {}", reason);
+                    error!("💡 Tip: Try specifying a different subdomain with --subdomain or wait a moment and retry");
+                    Err(TunnelError::ConnectionError(reason))
                 } else {
+                    error!("❌ Tunnel rejected: {}", reason);
                     Err(TunnelError::ConnectionError(reason))
                 }
             }

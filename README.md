@@ -262,7 +262,7 @@ rm -rf ~/.localup
 ### 1. Install Localup
 
 ```bash
-brew tap localup-dev/localup
+brew tap localup-dev/tap
 brew install localup
 ```
 

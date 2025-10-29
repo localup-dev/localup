@@ -144,7 +144,7 @@ async fn test_user_provided_subdomain() {
 
             assert_eq!(
                 endpoint.public_url,
-                format!("http://{}.localhost", user_subdomain),
+                format!("https://{}.localhost", user_subdomain),
                 "Public URL should match user-provided subdomain"
             );
             info!("✅ Public URL correct: {}", endpoint.public_url);
@@ -262,8 +262,8 @@ async fn test_auto_generated_subdomain() {
 
             // Public URL should be valid
             assert!(
-                endpoint.public_url.starts_with("http://"),
-                "Public URL should start with http://"
+                endpoint.public_url.starts_with("https://"),
+                "Public URL should start with https://"
             );
             assert!(
                 endpoint.public_url.contains(".localhost"),

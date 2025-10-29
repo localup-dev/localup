@@ -622,7 +622,7 @@ impl PortAllocator {
 }
 
 impl PortAllocatorTrait for PortAllocator {
-    fn allocate(&self, tunnel_id: &str) -> Result<u16, String> {
+    fn allocate(&self, tunnel_id: &str, requested_port: Option<u16>) -> Result<u16, String> {
         let mut available = self.available_ports.lock().unwrap();
         let mut allocated = self.allocated_ports.lock().unwrap();
 
@@ -646,7 +646,40 @@ impl PortAllocatorTrait for PortAllocator {
             return Ok(port);
         }
 
-        // Try to allocate deterministic port based on tunnel_id hash
+        // If user requested a specific port, try to allocate it
+        if let Some(req_port) = requested_port {
+            if available.contains(&req_port) && Self::is_port_available(req_port) {
+                // Requested port is available!
+                available.remove(&req_port);
+                allocated.insert(
+                    tunnel_id.to_string(),
+                    PortAllocation {
+                        port: req_port,
+                        state: AllocationState::Active,
+                    },
+                );
+                info!(
+                    "✅ Allocated requested port {} for tunnel {}",
+                    req_port, tunnel_id
+                );
+                return Ok(req_port);
+            } else if available.contains(&req_port) && !Self::is_port_available(req_port) {
+                // Port in our pool but in use by another process
+                available.remove(&req_port);
+                return Err(format!(
+                    "Requested port {} is in use by another process",
+                    req_port
+                ));
+            } else {
+                // Port not in our allocation range
+                return Err(format!(
+                    "Requested port {} is not available (already allocated or out of range)",
+                    req_port
+                ));
+            }
+        }
+
+        // No specific port requested, try to allocate deterministic port based on tunnel_id hash
         let preferred_port = self.hash_to_port(tunnel_id);
 
         if available.contains(&preferred_port) && Self::is_port_available(preferred_port) {

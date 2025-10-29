@@ -13,7 +13,10 @@ use crate::pending_requests::PendingRequests;
 
 /// Trait for port allocation (TCP tunnels)
 pub trait PortAllocator: Send + Sync {
-    fn allocate(&self, tunnel_id: &str) -> Result<u16, String>;
+    /// Allocate a port for the given tunnel_id
+    /// If requested_port is Some, try to allocate that specific port
+    /// If requested_port is None or unavailable, allocate any available port
+    fn allocate(&self, tunnel_id: &str, requested_port: Option<u16>) -> Result<u16, String>;
     fn deallocate(&self, tunnel_id: &str);
     fn get_allocated_port(&self, tunnel_id: &str) -> Option<u16>;
 }
@@ -115,7 +118,8 @@ impl TunnelHandler {
                 }
 
                 // Build endpoints based on requested protocols
-                let mut endpoints = self.build_endpoints(&tunnel_id, &protocols, &config);
+                let mut endpoints =
+                    self.build_endpoints(&tunnel_id, &protocols, &config, peer_addr);
                 debug!(
                     "Built {} endpoints for tunnel {}",
                     endpoints.len(),
@@ -304,14 +308,21 @@ impl TunnelHandler {
         info!("Tunnel {} disconnected", tunnel_id);
     }
 
-    /// Generate a deterministic subdomain from tunnel_id hash
-    /// This ensures the same tunnel_id always gets the same subdomain
-    fn generate_subdomain(tunnel_id: &str) -> String {
+    /// Generate a deterministic subdomain from tunnel_id and peer IP hash
+    /// This ensures uniqueness even when multiple users use the same local port
+    /// by incorporating the client's IP address into the hash
+    fn generate_subdomain(tunnel_id: &str, peer_addr: std::net::SocketAddr) -> String {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
+
+        // Hash tunnel_id
         tunnel_id.hash(&mut hasher);
+
+        // Hash peer IP (not port, since that can vary on reconnect)
+        peer_addr.ip().to_string().hash(&mut hasher);
+
         let hash = hasher.finish();
 
         // Convert to base36 (lowercase letters + digits)
@@ -334,6 +345,7 @@ impl TunnelHandler {
         tunnel_id: &str,
         protocols: &[Protocol],
         _config: &tunnel_proto::TunnelConfig,
+        peer_addr: std::net::SocketAddr,
     ) -> Vec<Endpoint> {
         let mut endpoints = Vec::new();
 
@@ -347,7 +359,7 @@ impl TunnelHandler {
                             s.clone()
                         }
                         _ => {
-                            let generated = Self::generate_subdomain(tunnel_id);
+                            let generated = Self::generate_subdomain(tunnel_id, peer_addr);
                             info!(
                                 "🎯 Auto-generated subdomain '{}' for tunnel {} (http)",
                                 generated, tunnel_id
@@ -365,7 +377,8 @@ impl TunnelHandler {
 
                     endpoints.push(Endpoint {
                         protocol: endpoint_protocol,
-                        public_url: format!("http://{}", host),
+                        // HTTP tunnels use HTTPS (TLS termination at exit node)
+                        public_url: format!("https://{}", host),
                         port: None,
                     });
                 }
@@ -377,7 +390,7 @@ impl TunnelHandler {
                             s.clone()
                         }
                         _ => {
-                            let generated = Self::generate_subdomain(tunnel_id);
+                            let generated = Self::generate_subdomain(tunnel_id, peer_addr);
                             info!(
                                 "🎯 Auto-generated subdomain '{}' for tunnel {} (https)",
                                 generated, tunnel_id
@@ -449,11 +462,21 @@ impl TunnelHandler {
             Protocol::Tcp { port } => {
                 if let Some(ref allocator) = self.port_allocator {
                     // Allocate a port for this TCP tunnel
-                    let allocated_port = allocator.allocate(tunnel_id)?;
-                    info!(
-                        "Allocated TCP port {} for tunnel {} (local port: {})",
-                        allocated_port, tunnel_id, port
-                    );
+                    // If port is 0, auto-allocate; otherwise try to allocate the specific port
+                    let requested_port = if *port == 0 { None } else { Some(*port) };
+                    let allocated_port = allocator.allocate(tunnel_id, requested_port)?;
+
+                    if requested_port.is_some() {
+                        info!(
+                            "✅ Allocated requested TCP port {} for tunnel {}",
+                            allocated_port, tunnel_id
+                        );
+                    } else {
+                        info!(
+                            "🎯 Auto-allocated TCP port {} for tunnel {}",
+                            allocated_port, tunnel_id
+                        );
+                    }
 
                     // Spawn TCP proxy server if spawner is configured
                     if let Some(ref spawner) = self.tcp_proxy_spawner {
@@ -518,11 +541,12 @@ mod tests {
     #[test]
     fn test_generate_subdomain_deterministic() {
         let tunnel_id = "my-tunnel-123";
+        let peer_addr = "192.168.1.100:50000".parse().unwrap();
 
-        // Generate subdomain multiple times - should be identical
-        let subdomain1 = TunnelHandler::generate_subdomain(tunnel_id);
-        let subdomain2 = TunnelHandler::generate_subdomain(tunnel_id);
-        let subdomain3 = TunnelHandler::generate_subdomain(tunnel_id);
+        // Generate subdomain multiple times - should be identical with same tunnel_id and peer_addr
+        let subdomain1 = TunnelHandler::generate_subdomain(tunnel_id, peer_addr);
+        let subdomain2 = TunnelHandler::generate_subdomain(tunnel_id, peer_addr);
+        let subdomain3 = TunnelHandler::generate_subdomain(tunnel_id, peer_addr);
 
         assert_eq!(subdomain1, subdomain2);
         assert_eq!(subdomain2, subdomain3);
@@ -530,8 +554,9 @@ mod tests {
 
     #[test]
     fn test_generate_subdomain_different_ids() {
-        let subdomain1 = TunnelHandler::generate_subdomain("tunnel-1");
-        let subdomain2 = TunnelHandler::generate_subdomain("tunnel-2");
+        let peer_addr = "192.168.1.100:50000".parse().unwrap();
+        let subdomain1 = TunnelHandler::generate_subdomain("tunnel-1", peer_addr);
+        let subdomain2 = TunnelHandler::generate_subdomain("tunnel-2", peer_addr);
 
         // Different tunnel IDs should produce different subdomains
         assert_ne!(subdomain1, subdomain2);
@@ -539,7 +564,8 @@ mod tests {
 
     #[test]
     fn test_generate_subdomain_length_and_charset() {
-        let subdomain = TunnelHandler::generate_subdomain("test-tunnel");
+        let peer_addr = "192.168.1.100:50000".parse().unwrap();
+        let subdomain = TunnelHandler::generate_subdomain("test-tunnel", peer_addr);
 
         // Should be 6 characters
         assert_eq!(subdomain.len(), 6);
@@ -548,6 +574,23 @@ mod tests {
         assert!(subdomain
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn test_generate_subdomain_different_ips() {
+        let tunnel_id = "tunnel-with-port-3000";
+        let peer_addr1 = "192.168.1.100:50000".parse().unwrap();
+        let peer_addr2 = "192.168.1.101:50000".parse().unwrap();
+
+        // Same tunnel_id but different peer IPs should produce different subdomains
+        let subdomain1 = TunnelHandler::generate_subdomain(tunnel_id, peer_addr1);
+        let subdomain2 = TunnelHandler::generate_subdomain(tunnel_id, peer_addr2);
+
+        // This ensures multiple users with same local port (e.g., port 3000) get unique subdomains
+        assert_ne!(
+            subdomain1, subdomain2,
+            "Different IPs should produce different subdomains"
+        );
     }
 
     #[test]
@@ -570,10 +613,11 @@ mod tests {
         }];
         let config = TunnelConfig::default();
 
-        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config);
+        let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config, mock_peer_addr);
 
         assert_eq!(endpoints.len(), 1);
-        assert_eq!(endpoints[0].public_url, "http://custom.tunnel.test");
+        assert_eq!(endpoints[0].public_url, "https://custom.tunnel.test");
         assert!(
             matches!(endpoints[0].protocol, Protocol::Http { subdomain: Some(ref s) } if s == "custom")
         );
@@ -597,7 +641,8 @@ mod tests {
         let protocols = vec![Protocol::Http { subdomain: None }]; // Auto-generate subdomain
         let config = TunnelConfig::default();
 
-        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config);
+        let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config, mock_peer_addr);
 
         assert_eq!(endpoints.len(), 1);
 
@@ -633,7 +678,8 @@ mod tests {
         }];
         let config = TunnelConfig::default();
 
-        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config);
+        let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config, mock_peer_addr);
 
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].public_url, "https://secure.tunnel.test");
@@ -660,7 +706,8 @@ mod tests {
         let protocols = vec![Protocol::Tcp { port: 8080 }];
         let config = TunnelConfig::default();
 
-        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config);
+        let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config, mock_peer_addr);
 
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].public_url, "tcp://tunnel.test:8080");
@@ -693,10 +740,11 @@ mod tests {
         ];
         let config = TunnelConfig::default();
 
-        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config);
+        let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config, mock_peer_addr);
 
         assert_eq!(endpoints.len(), 3);
-        assert_eq!(endpoints[0].public_url, "http://http.tunnel.test");
+        assert_eq!(endpoints[0].public_url, "https://http.tunnel.test");
         assert_eq!(endpoints[1].public_url, "https://https.tunnel.test");
         assert_eq!(endpoints[2].public_url, "tcp://tunnel.test:8080");
     }
@@ -722,7 +770,8 @@ mod tests {
         }];
         let config = TunnelConfig::default();
 
-        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config);
+        let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let endpoints = handler.build_endpoints(tunnel_id, &protocols, &config, mock_peer_addr);
 
         assert_eq!(endpoints.len(), 1);
         assert!(endpoints[0].public_url.contains("tls://"));
@@ -733,7 +782,11 @@ mod tests {
     fn test_handler_with_port_allocator() {
         struct MockPortAllocator;
         impl PortAllocator for MockPortAllocator {
-            fn allocate(&self, _tunnel_id: &str) -> Result<u16, String> {
+            fn allocate(
+                &self,
+                _tunnel_id: &str,
+                _requested_port: Option<u16>,
+            ) -> Result<u16, String> {
                 Ok(9000)
             }
             fn deallocate(&self, _tunnel_id: &str) {}
@@ -797,7 +850,7 @@ mod tests {
             protocol: Protocol::Http {
                 subdomain: Some("test".to_string()),
             },
-            public_url: "http://test.tunnel.test".to_string(),
+            public_url: "https://test.tunnel.test".to_string(),
             port: None,
         };
 
@@ -869,7 +922,11 @@ mod tests {
     fn test_register_route_tcp_with_allocator() {
         struct MockPortAllocator;
         impl PortAllocator for MockPortAllocator {
-            fn allocate(&self, _tunnel_id: &str) -> Result<u16, String> {
+            fn allocate(
+                &self,
+                _tunnel_id: &str,
+                _requested_port: Option<u16>,
+            ) -> Result<u16, String> {
                 Ok(9000)
             }
             fn deallocate(&self, _tunnel_id: &str) {}
@@ -922,7 +979,7 @@ mod tests {
             protocol: Protocol::Http {
                 subdomain: Some("test".to_string()),
             },
-            public_url: "http://test.tunnel.test".to_string(),
+            public_url: "https://test.tunnel.test".to_string(),
             port: None,
         };
 
@@ -941,7 +998,11 @@ mod tests {
             deallocated: Arc<tokio::sync::Mutex<bool>>,
         }
         impl PortAllocator for MockPortAllocator {
-            fn allocate(&self, _tunnel_id: &str) -> Result<u16, String> {
+            fn allocate(
+                &self,
+                _tunnel_id: &str,
+                _requested_port: Option<u16>,
+            ) -> Result<u16, String> {
                 Ok(9000)
             }
             fn deallocate(&self, _tunnel_id: &str) {

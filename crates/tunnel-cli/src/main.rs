@@ -3,6 +3,7 @@
 use anyhow::Result;
 use clap::Parser;
 use std::net::SocketAddr;
+use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -207,9 +208,26 @@ async fn main() -> Result<()> {
                 if !cli.no_metrics && !metrics_server_started {
                     let metrics = client.metrics().clone();
                     let endpoints = client.endpoints().to_vec();
-                    let metrics_addr: SocketAddr = format!("127.0.0.1:{}", cli.metrics_port)
-                        .parse()
-                        .expect("Invalid metrics port");
+
+                    // Try to bind to requested port, fallback to any available port
+                    let requested_addr = format!("127.0.0.1:{}", cli.metrics_port);
+                    let listener = match TcpListener::bind(&requested_addr).await {
+                        Ok(listener) => listener,
+                        Err(_) => {
+                            warn!(
+                                "Port {} already in use, finding available port...",
+                                cli.metrics_port
+                            );
+                            // Bind to port 0 to let OS choose available port
+                            TcpListener::bind("127.0.0.1:0")
+                                .await
+                                .expect("Failed to bind to any port")
+                        }
+                    };
+
+                    let metrics_addr = listener.local_addr().expect("Failed to get local address");
+                    let actual_port = metrics_addr.port();
+                    drop(listener); // Release the port for the server to bind
 
                     // Local upstream URL for replay functionality
                     let local_upstream = format!("http://localhost:{}", cli.port);
@@ -222,10 +240,7 @@ async fn main() -> Result<()> {
                         }
                     });
 
-                    println!(
-                        "📊 Metrics dashboard: http://127.0.0.1:{}",
-                        cli.metrics_port
-                    );
+                    println!("📊 Metrics dashboard: http://127.0.0.1:{}", actual_port);
                     println!();
                     metrics_server_started = true;
                 }
