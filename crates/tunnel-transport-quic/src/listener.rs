@@ -22,6 +22,9 @@ pub struct QuicListener {
 
 impl QuicListener {
     pub fn new(bind_addr: SocketAddr, config: Arc<QuicConfig>) -> TransportResult<Self> {
+        // Ensure rustls crypto provider is initialized
+        crate::ensure_crypto_provider();
+
         TransportConfig::validate(&*config)?;
 
         let server_config = config.build_server_config()?;
@@ -94,6 +97,9 @@ pub struct QuicConnector {
 
 impl QuicConnector {
     pub fn new(config: Arc<QuicConfig>) -> TransportResult<Self> {
+        // Ensure rustls crypto provider is initialized
+        crate::ensure_crypto_provider();
+
         TransportConfig::validate(&*config)?;
 
         let client_config = config.build_client_config()?;

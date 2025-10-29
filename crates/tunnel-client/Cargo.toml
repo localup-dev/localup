@@ -12,6 +12,10 @@ tunnel-connection = { path = "../tunnel-connection" }
 tunnel-auth = { path = "../tunnel-auth" }
 tunnel-transport = { path = "../tunnel-transport" }
 tunnel-transport-quic = { path = "../tunnel-transport-quic" }
+tunnel-relay-db = { path = "../tunnel-relay-db", optional = true }
+
+# Database (optional)
+sea-orm = { workspace = true, optional = true }
 
 # Async runtime
 tokio = { workspace = true }
@@ -49,6 +53,11 @@ hdrhistogram = "7.5"
 # Static asset embedding
 rust-embed = "8.5"
 mime_guess = "2.0"
+
+[features]
+default = []
+# Enable database-backed metrics storage
+db-metrics = ["tunnel-relay-db", "sea-orm"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

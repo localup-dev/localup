@@ -123,102 +123,257 @@ function App() {
   const tcpStats = viewMode === 'tcp' ? getTcpStats() : null;
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-dark-bg">
       {/* Header */}
-      <header className="bg-white shadow">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+      <header className="bg-dark-surface border-b border-dark-border">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
           <div className="flex items-center justify-between flex-wrap gap-4">
             <div>
-              <h1 className="text-2xl font-bold text-gray-900">Tunnel Metrics Dashboard</h1>
+              <h1 className="text-3xl font-bold text-dark-text-primary">Tunnels</h1>
+              <p className="text-dark-text-secondary mt-1">Manage and monitor your tunnels</p>
               {tunnelInfo.length > 0 && (
-                <div className="mt-1 flex items-center gap-4 text-sm text-gray-600">
+                <div className="mt-3 flex items-center gap-4 text-sm">
                   {tunnelInfo.map((endpoint, i) => (
                     <div key={i} className="flex items-center gap-2">
-                      <span className="font-medium">
-                        {endpoint.protocol.Tcp && `TCP:${endpoint.protocol.Tcp.port}`}
+                      <span className="text-dark-text-secondary">🌐</span>
+                      <span className="text-dark-text-primary font-medium">
+                        {endpoint.protocol.Tcp && `localhost`}
+                        {endpoint.protocol.Http && `localhost`}
+                        {endpoint.protocol.Https && `localhost`}
+                      </span>
+                      <span className="text-dark-text-muted">🛡️</span>
+                      <span className="text-dark-text-primary font-medium">
+                        {endpoint.protocol.Tcp && `TCP`}
                         {endpoint.protocol.Http && `HTTP`}
                         {endpoint.protocol.Https && `HTTPS`}
                       </span>
-                      <span className="text-gray-400">→</span>
-                      <code className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded font-mono text-xs">
-                        {endpoint.public_url}
-                      </code>
                     </div>
                   ))}
                 </div>
               )}
             </div>
-            <div className="flex gap-2 bg-gray-100 p-1 rounded-lg">
-              <button
-                onClick={() => setViewMode('http')}
-                className={`px-4 py-2 rounded-md font-medium transition ${
-                  viewMode === 'http'
-                    ? 'bg-white text-blue-600 shadow'
-                    : 'text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                HTTP Requests
-              </button>
-              <button
-                onClick={() => setViewMode('tcp')}
-                className={`px-4 py-2 rounded-md font-medium transition ${
-                  viewMode === 'tcp'
-                    ? 'bg-white text-blue-600 shadow'
-                    : 'text-gray-600 hover:text-gray-900'
-                }`}
-              >
-                TCP Connections
-              </button>
-            </div>
+            <button className="px-6 py-2.5 bg-accent-blue hover:bg-accent-blue-light text-white rounded-lg font-medium transition-all shadow-glow-blue">
+              + New Tunnel
+            </button>
           </div>
         </div>
       </header>
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Tunnel List Section */}
+        <div className="mb-8">
+          <div className="card-dark p-6">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-xl font-semibold text-dark-text-primary">All Tunnels</h2>
+            </div>
+            {tunnelInfo.length > 0 ? (
+              <div className="space-y-3">
+                {tunnelInfo.map((endpoint, i) => (
+                  <div key={i} className="card-dark-hover p-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-4">
+                        <div className="w-10 h-10 bg-accent-blue/10 rounded-lg flex items-center justify-center">
+                          <span className="text-accent-blue text-xl">📊</span>
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h3 className="text-lg font-semibold text-dark-text-primary">Test</h3>
+                            <span className="status-badge-green">● connected</span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-1 text-sm text-dark-text-secondary">
+                            <span>🌐 localhost</span>
+                            <span>•</span>
+                            <span>🛡️ {endpoint.protocol.Tcp && 'TCP'}{endpoint.protocol.Http && 'HTTP'}{endpoint.protocol.Https && 'HTTPS'}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <button className="p-2 hover:bg-dark-surface-light rounded-lg transition-colors">
+                          <span className="text-dark-text-secondary">☐</span>
+                        </button>
+                        <button className="p-2 hover:bg-dark-surface-light rounded-lg transition-colors">
+                          <span className="text-dark-text-secondary">🗑️</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div className="mt-4 pt-4 border-t border-dark-border">
+                      <div className="flex items-center gap-2 text-sm">
+                        <span className="text-dark-text-secondary">Public Endpoints:</span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-2">
+                        <span className="text-accent-blue">🔗</span>
+                        <code className="text-sm font-mono text-dark-text-primary bg-dark-surface-light px-3 py-1.5 rounded-lg border border-dark-border">
+                          {endpoint.public_url}
+                        </code>
+                        <button className="text-accent-blue hover:text-accent-blue-light transition-colors">
+                          <span className="text-sm">🔗</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-12 text-dark-text-secondary">
+                No tunnels configured yet
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex gap-2 mb-6 border-b border-dark-border">
+          <button
+            onClick={() => setViewMode('http')}
+            className={`px-6 py-3 font-medium transition-colors relative ${
+              viewMode === 'http'
+                ? 'text-accent-blue'
+                : 'text-dark-text-secondary hover:text-dark-text-primary'
+            }`}
+          >
+            📊 Overview
+            {viewMode === 'http' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent-blue"></div>
+            )}
+          </button>
+          <button
+            onClick={() => setViewMode('http')}
+            className={`px-6 py-3 font-medium transition-colors relative ${
+              viewMode === 'http'
+                ? 'text-accent-blue'
+                : 'text-dark-text-secondary hover:text-dark-text-primary'
+            }`}
+          >
+            📈 Metrics
+            {viewMode === 'http' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent-blue"></div>
+            )}
+          </button>
+          <button
+            onClick={() => setViewMode('tcp')}
+            className={`px-6 py-3 font-medium transition-colors relative ${
+              viewMode === 'tcp'
+                ? 'text-accent-blue'
+                : 'text-dark-text-secondary hover:text-dark-text-primary'
+            }`}
+          >
+            📡 Traffic
+            {viewMode === 'tcp' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent-blue"></div>
+            )}
+          </button>
+        </div>
+
         {/* Stats Section */}
         {viewMode === 'http' && stats ? (
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="text-sm font-medium text-gray-500">Total Requests</h3>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{stats.total_requests}</p>
+            <div className="card-dark p-6">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-12 h-12 bg-accent-blue/10 rounded-xl flex items-center justify-center">
+                  <span className="text-2xl">📊</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-dark-text-secondary">Total Requests</h3>
+                  <p className="text-3xl font-bold text-dark-text-primary mt-1">{stats.total_requests}</p>
+                </div>
+              </div>
             </div>
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="text-sm font-medium text-gray-500">Successful</h3>
-              <p className="text-2xl font-bold text-green-600 mt-1">{stats.successful_requests}</p>
+            <div className="card-dark p-6">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-12 h-12 bg-accent-green/10 rounded-xl flex items-center justify-center">
+                  <span className="text-2xl">✓</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-dark-text-secondary">Successful</h3>
+                  <p className="text-3xl font-bold text-accent-green mt-1">{stats.successful_requests}</p>
+                  <p className="text-xs text-dark-text-muted mt-1">
+                    {stats.total_requests > 0 ? ((stats.successful_requests / stats.total_requests) * 100).toFixed(1) : '0.0'}% success rate
+                  </p>
+                </div>
+              </div>
             </div>
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="text-sm font-medium text-gray-500">Failed</h3>
-              <p className="text-2xl font-bold text-red-600 mt-1">{stats.failed_requests}</p>
+            <div className="card-dark p-6">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-12 h-12 bg-accent-red/10 rounded-xl flex items-center justify-center">
+                  <span className="text-2xl">✗</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-dark-text-secondary">Failed</h3>
+                  <p className="text-3xl font-bold text-accent-red mt-1">{stats.failed_requests}</p>
+                </div>
+              </div>
             </div>
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="text-sm font-medium text-gray-500">Avg Duration</h3>
-              <p className="text-2xl font-bold text-gray-900 mt-1">
-                {stats.avg_duration_ms ? formatDuration(stats.avg_duration_ms) : 'N/A'}
-              </p>
+            <div className="card-dark p-6">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-12 h-12 bg-accent-purple/10 rounded-xl flex items-center justify-center">
+                  <span className="text-2xl">⏱️</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-dark-text-secondary">Avg Duration</h3>
+                  <p className="text-3xl font-bold text-dark-text-primary mt-1">
+                    {stats.avg_duration_ms ? formatDuration(stats.avg_duration_ms) : 'N/A'}
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
         ) : viewMode === 'tcp' && tcpStats ? (
           <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-6">
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="text-sm font-medium text-gray-500">Total Connections</h3>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{tcpStats.total_connections}</p>
+            <div className="card-dark p-6">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-accent-blue/10 rounded-xl flex items-center justify-center">
+                  <span className="text-2xl">🔌</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-dark-text-secondary">Total Connections</h3>
+                  <p className="text-3xl font-bold text-dark-text-primary mt-1">{tcpStats.total_connections}</p>
+                </div>
+              </div>
             </div>
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="text-sm font-medium text-gray-500">Active</h3>
-              <p className="text-2xl font-bold text-green-600 mt-1">{tcpStats.active_connections}</p>
+            <div className="card-dark p-6">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-accent-green/10 rounded-xl flex items-center justify-center">
+                  <span className="text-2xl">●</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-dark-text-secondary">Active</h3>
+                  <p className="text-3xl font-bold text-accent-green mt-1">{tcpStats.active_connections}</p>
+                </div>
+              </div>
             </div>
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="text-sm font-medium text-gray-500">Closed</h3>
-              <p className="text-2xl font-bold text-gray-600 mt-1">{tcpStats.closed_connections}</p>
+            <div className="card-dark p-6">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-dark-text-muted/10 rounded-xl flex items-center justify-center">
+                  <span className="text-2xl">○</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-dark-text-secondary">Closed</h3>
+                  <p className="text-3xl font-bold text-dark-text-muted mt-1">{tcpStats.closed_connections}</p>
+                </div>
+              </div>
             </div>
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="text-sm font-medium text-gray-500">Total Sent</h3>
-              <p className="text-2xl font-bold text-blue-600 mt-1">{formatBytes(tcpStats.total_bytes_sent)}</p>
+            <div className="card-dark p-6">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-accent-blue/10 rounded-xl flex items-center justify-center">
+                  <span className="text-2xl">↑</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-dark-text-secondary">Total Sent</h3>
+                  <p className="text-3xl font-bold text-accent-blue mt-1">{formatBytes(tcpStats.total_bytes_sent)}</p>
+                </div>
+              </div>
             </div>
-            <div className="bg-white rounded-lg shadow p-4">
-              <h3 className="text-sm font-medium text-gray-500">Total Received</h3>
-              <p className="text-2xl font-bold text-purple-600 mt-1">{formatBytes(tcpStats.total_bytes_received)}</p>
+            <div className="card-dark p-6">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 bg-accent-purple/10 rounded-xl flex items-center justify-center">
+                  <span className="text-2xl">↓</span>
+                </div>
+                <div>
+                  <h3 className="text-sm font-medium text-dark-text-secondary">Total Received</h3>
+                  <p className="text-3xl font-bold text-accent-purple mt-1">{formatBytes(tcpStats.total_bytes_received)}</p>
+                </div>
+              </div>
             </div>
           </div>
         ) : null}
@@ -226,20 +381,20 @@ function App() {
         {/* Content Area */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* List Panel */}
-          <div className="bg-white rounded-lg shadow">
-            <div className="p-4 border-b border-gray-200 flex items-center justify-between">
-              <h2 className="text-lg font-semibold">
+          <div className="card-dark">
+            <div className="p-4 border-b border-dark-border flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-dark-text-primary">
                 {viewMode === 'http' ? 'HTTP Requests' : 'TCP Connections'}
               </h2>
-              <span className="text-sm text-gray-500">
+              <span className="text-sm text-dark-text-secondary">
                 {currentItems.length} total
               </span>
             </div>
-            <div className="divide-y divide-gray-200 max-h-[600px] overflow-y-auto">
+            <div className="divide-y divide-dark-border max-h-[600px] overflow-y-auto scrollbar-dark">
               {loading ? (
-                <div className="p-8 text-center text-gray-500">Loading...</div>
+                <div className="p-8 text-center text-dark-text-secondary">Loading...</div>
               ) : paginatedItems.length === 0 ? (
-                <div className="p-8 text-center text-gray-500">
+                <div className="p-8 text-center text-dark-text-secondary">
                   No {viewMode === 'http' ? 'HTTP requests' : 'TCP connections'} yet
                 </div>
               ) : viewMode === 'http' ? (
@@ -247,28 +402,28 @@ function App() {
                   <button
                     key={metric.id}
                     onClick={() => setSelectedItem(metric)}
-                    className={`w-full p-4 hover:bg-gray-50 text-left transition ${
-                      selectedItem && 'id' in selectedItem && selectedItem.id === metric.id ? 'bg-blue-50' : ''
+                    className={`w-full p-4 hover:bg-dark-surface-light text-left transition ${
+                      selectedItem && 'id' in selectedItem && selectedItem.id === metric.id ? 'bg-dark-surface-light border-l-2 border-accent-blue' : ''
                     }`}
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-3">
-                        <span className="font-mono text-sm font-semibold text-blue-600">
+                        <span className="font-mono text-sm font-semibold text-accent-blue">
                           {metric.method}
                         </span>
-                        <span className="text-sm text-gray-900 truncate">{metric.uri}</span>
+                        <span className="text-sm text-dark-text-primary truncate">{metric.uri}</span>
                       </div>
                       <span
                         className={`text-sm font-medium ${
                           metric.response_status && metric.response_status >= 200 && metric.response_status < 300
-                            ? 'text-green-600'
-                            : 'text-red-600'
+                            ? 'text-accent-green'
+                            : 'text-accent-red'
                         }`}
                       >
                         {metric.response_status || 'ERR'}
                       </span>
                     </div>
-                    <div className="mt-1 text-xs text-gray-500">
+                    <div className="mt-1 text-xs text-dark-text-secondary">
                       {formatDuration(metric.duration_ms)} • {new Date(metric.timestamp).toLocaleTimeString()}
                     </div>
                   </button>
@@ -278,26 +433,26 @@ function App() {
                   <button
                     key={metric.id}
                     onClick={() => setSelectedItem(metric)}
-                    className={`w-full p-4 hover:bg-gray-50 text-left transition ${
-                      selectedItem && 'id' in selectedItem && selectedItem.id === metric.id ? 'bg-blue-50' : ''
+                    className={`w-full p-4 hover:bg-dark-surface-light text-left transition ${
+                      selectedItem && 'id' in selectedItem && selectedItem.id === metric.id ? 'bg-dark-surface-light border-l-2 border-accent-blue' : ''
                     }`}
                   >
                     <div className="flex items-center justify-between">
                       <div>
-                        <span className="text-sm font-medium text-gray-900">{metric.remote_addr}</span>
-                        <div className="mt-1 text-xs text-gray-500">
+                        <span className="text-sm font-medium text-dark-text-primary">{metric.remote_addr}</span>
+                        <div className="mt-1 text-xs text-dark-text-secondary">
                           {metric.local_addr}
                         </div>
                       </div>
                       <span
                         className={`text-sm font-medium capitalize ${
-                          metric.state === 'active' ? 'text-green-600' : 'text-gray-600'
+                          metric.state === 'active' ? 'text-accent-green' : 'text-dark-text-muted'
                         }`}
                       >
                         {metric.state}
                       </span>
                     </div>
-                    <div className="mt-1 text-xs text-gray-500">
+                    <div className="mt-1 text-xs text-dark-text-secondary">
                       ↓ {formatBytes(metric.bytes_received)} • ↑ {formatBytes(metric.bytes_sent)}
                       {metric.duration_ms && ` • ${formatDuration(metric.duration_ms)}`}
                     </div>
@@ -308,21 +463,21 @@ function App() {
 
             {/* Pagination */}
             {totalPages > 1 && (
-              <div className="p-4 border-t border-gray-200 flex items-center justify-between">
+              <div className="p-4 border-t border-dark-border flex items-center justify-between">
                 <button
                   onClick={() => goToPage(currentPage - 1)}
                   disabled={currentPage === 1}
-                  className="px-3 py-1 text-sm border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-4 py-2 text-sm bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary hover:bg-dark-surface disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   Previous
                 </button>
-                <span className="text-sm text-gray-600">
+                <span className="text-sm text-dark-text-secondary">
                   Page {currentPage} of {totalPages}
                 </span>
                 <button
                   onClick={() => goToPage(currentPage + 1)}
                   disabled={currentPage === totalPages}
-                  className="px-3 py-1 text-sm border rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="px-4 py-2 text-sm bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary hover:bg-dark-surface disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   Next
                 </button>
@@ -331,47 +486,57 @@ function App() {
           </div>
 
           {/* Detail Panel */}
-          <div className="bg-white rounded-lg shadow">
-            <div className="p-4 border-b border-gray-200">
-              <h2 className="text-lg font-semibold">Details</h2>
+          <div className="card-dark">
+            <div className="p-4 border-b border-dark-border">
+              <h2 className="text-lg font-semibold text-dark-text-primary">Details</h2>
             </div>
-            <div className="p-4 max-h-[700px] overflow-y-auto">
+            <div className="p-4 max-h-[700px] overflow-y-auto scrollbar-dark">
               {!selectedItem ? (
-                <div className="text-center text-gray-500 py-12">
+                <div className="text-center text-dark-text-secondary py-12">
                   Select an item to view details
                 </div>
               ) : 'method' in selectedItem ? (
                 // HTTP Request Details
                 <div className="space-y-4">
                   <div>
-                    <h3 className="text-sm font-medium text-gray-500">Request</h3>
+                    <h3 className="text-sm font-medium text-dark-text-secondary">Request</h3>
                     <div className="mt-1 flex items-center gap-2">
-                      <span className="font-mono text-sm font-semibold">{selectedItem.method}</span>
-                      <span className="text-sm">{selectedItem.uri}</span>
+                      <span className="font-mono text-sm font-semibold text-accent-blue">{selectedItem.method}</span>
+                      <span className="text-sm text-dark-text-primary">{selectedItem.uri}</span>
                     </div>
                   </div>
                   <div>
-                    <h3 className="text-sm font-medium text-gray-500">Status</h3>
-                    <p className="mt-1 text-sm">{selectedItem.response_status || 'Error'}</p>
+                    <h3 className="text-sm font-medium text-dark-text-secondary">Status</h3>
+                    <p className={`mt-1 text-sm font-medium ${
+                      selectedItem.response_status && selectedItem.response_status >= 200 && selectedItem.response_status < 300
+                        ? 'text-accent-green'
+                        : 'text-accent-red'
+                    }`}>
+                      {selectedItem.response_status || 'Error'}
+                    </p>
                   </div>
                   <div>
-                    <h3 className="text-sm font-medium text-gray-500">Duration</h3>
-                    <p className="mt-1 text-sm">{formatDuration(selectedItem.duration_ms)}</p>
+                    <h3 className="text-sm font-medium text-dark-text-secondary">Duration</h3>
+                    <p className="mt-1 text-sm text-dark-text-primary">{formatDuration(selectedItem.duration_ms)}</p>
                   </div>
                   <div>
-                    <h3 className="text-sm font-medium text-gray-500">Request Headers</h3>
-                    <div className="mt-1 bg-gray-50 rounded p-2 text-xs font-mono max-h-40 overflow-y-auto">
+                    <h3 className="text-sm font-medium text-dark-text-secondary">Request Headers</h3>
+                    <div className="mt-1 bg-dark-surface-light rounded-lg p-3 text-xs font-mono max-h-40 overflow-y-auto scrollbar-dark border border-dark-border">
                       {selectedItem.request_headers.map(([key, value]: [string, string], i: number) => (
-                        <div key={i}><span className="text-gray-600">{key}:</span> {value}</div>
+                        <div key={i} className="py-0.5">
+                          <span className="text-accent-blue">{key}:</span> <span className="text-dark-text-primary">{value}</span>
+                        </div>
                       ))}
                     </div>
                   </div>
                   {selectedItem.response_headers && (
                     <div>
-                      <h3 className="text-sm font-medium text-gray-500">Response Headers</h3>
-                      <div className="mt-1 bg-gray-50 rounded p-2 text-xs font-mono max-h-40 overflow-y-auto">
+                      <h3 className="text-sm font-medium text-dark-text-secondary">Response Headers</h3>
+                      <div className="mt-1 bg-dark-surface-light rounded-lg p-3 text-xs font-mono max-h-40 overflow-y-auto scrollbar-dark border border-dark-border">
                         {selectedItem.response_headers.map(([key, value]: [string, string], i: number) => (
-                          <div key={i}><span className="text-gray-600">{key}:</span> {value}</div>
+                          <div key={i} className="py-0.5">
+                            <span className="text-accent-green">{key}:</span> <span className="text-dark-text-primary">{value}</span>
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -381,45 +546,53 @@ function App() {
                 // TCP Connection Details
                 <div className="space-y-4">
                   <div>
-                    <h3 className="text-sm font-medium text-gray-500">State</h3>
-                    <p className="mt-1 text-sm capitalize">{selectedItem.state}</p>
+                    <h3 className="text-sm font-medium text-dark-text-secondary">State</h3>
+                    <p className={`mt-1 text-sm capitalize font-medium ${
+                      selectedItem.state === 'active' ? 'text-accent-green' : 'text-dark-text-muted'
+                    }`}>
+                      {selectedItem.state}
+                    </p>
                   </div>
                   <div>
-                    <h3 className="text-sm font-medium text-gray-500">Remote Address</h3>
-                    <p className="mt-1 text-sm font-mono">{selectedItem.remote_addr}</p>
+                    <h3 className="text-sm font-medium text-dark-text-secondary">Remote Address</h3>
+                    <p className="mt-1 text-sm font-mono text-dark-text-primary bg-dark-surface-light px-3 py-2 rounded-lg border border-dark-border">
+                      {selectedItem.remote_addr}
+                    </p>
                   </div>
                   <div>
-                    <h3 className="text-sm font-medium text-gray-500">Local Address</h3>
-                    <p className="mt-1 text-sm font-mono">{selectedItem.local_addr}</p>
+                    <h3 className="text-sm font-medium text-dark-text-secondary">Local Address</h3>
+                    <p className="mt-1 text-sm font-mono text-dark-text-primary bg-dark-surface-light px-3 py-2 rounded-lg border border-dark-border">
+                      {selectedItem.local_addr}
+                    </p>
                   </div>
                   <div>
-                    <h3 className="text-sm font-medium text-gray-500">Bytes Received</h3>
-                    <p className="mt-1 text-sm">{formatBytes(selectedItem.bytes_received)}</p>
+                    <h3 className="text-sm font-medium text-dark-text-secondary">Bytes Received</h3>
+                    <p className="mt-1 text-sm text-accent-purple font-medium">{formatBytes(selectedItem.bytes_received)}</p>
                   </div>
                   <div>
-                    <h3 className="text-sm font-medium text-gray-500">Bytes Sent</h3>
-                    <p className="mt-1 text-sm">{formatBytes(selectedItem.bytes_sent)}</p>
+                    <h3 className="text-sm font-medium text-dark-text-secondary">Bytes Sent</h3>
+                    <p className="mt-1 text-sm text-accent-blue font-medium">{formatBytes(selectedItem.bytes_sent)}</p>
                   </div>
                   {selectedItem.duration_ms && (
                     <div>
-                      <h3 className="text-sm font-medium text-gray-500">Duration</h3>
-                      <p className="mt-1 text-sm">{formatDuration(selectedItem.duration_ms)}</p>
+                      <h3 className="text-sm font-medium text-dark-text-secondary">Duration</h3>
+                      <p className="mt-1 text-sm text-dark-text-primary">{formatDuration(selectedItem.duration_ms)}</p>
                     </div>
                   )}
                   {selectedItem.error && (
                     <div>
-                      <h3 className="text-sm font-medium text-gray-500">Error</h3>
-                      <p className="mt-1 text-sm text-red-600">{selectedItem.error}</p>
+                      <h3 className="text-sm font-medium text-dark-text-secondary">Error</h3>
+                      <p className="mt-1 text-sm text-accent-red font-medium">{selectedItem.error}</p>
                     </div>
                   )}
                   <div>
-                    <h3 className="text-sm font-medium text-gray-500">Timestamp</h3>
-                    <p className="mt-1 text-sm">{new Date(selectedItem.timestamp).toLocaleString()}</p>
+                    <h3 className="text-sm font-medium text-dark-text-secondary">Timestamp</h3>
+                    <p className="mt-1 text-sm text-dark-text-primary">{new Date(selectedItem.timestamp).toLocaleString()}</p>
                   </div>
                   {selectedItem.closed_at && (
                     <div>
-                      <h3 className="text-sm font-medium text-gray-500">Closed At</h3>
-                      <p className="mt-1 text-sm">{new Date(selectedItem.closed_at).toLocaleString()}</p>
+                      <h3 className="text-sm font-medium text-dark-text-secondary">Closed At</h3>
+                      <p className="mt-1 text-sm text-dark-text-primary">{new Date(selectedItem.closed_at).toLocaleString()}</p>
                     </div>
                   )}
                 </div>

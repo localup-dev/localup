@@ -80,6 +80,22 @@ pub enum TunnelMessage {
         chunk: Vec<u8>,
         is_final: bool,
     },
+
+    // Transparent HTTP/HTTPS streaming (for WebSocket, HTTP/2, SSE, etc.)
+    HttpStreamConnect {
+        stream_id: u32,
+        host: String, // For routing only
+        #[serde(with = "serde_bytes")]
+        initial_data: Vec<u8>, // Raw HTTP request bytes (including headers)
+    },
+    HttpStreamData {
+        stream_id: u32,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    HttpStreamClose {
+        stream_id: u32,
+    },
 }
 
 // Custom serde helpers for optional bytes

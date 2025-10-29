@@ -163,6 +163,9 @@ pub struct MetricsStore {
     duration_histogram: Arc<RwLock<Histogram<u64>>>,
     /// Last time stats were broadcast (for debouncing)
     last_stats_broadcast: Arc<RwLock<Option<Instant>>>,
+    /// Optional database backend for persistent storage
+    #[cfg(feature = "db-metrics")]
+    db_store: Arc<RwLock<Option<crate::metrics_db::DbMetricsStore>>>,
 }
 
 impl MetricsStore {
@@ -192,7 +195,16 @@ impl MetricsStore {
             })),
             duration_histogram: Arc::new(RwLock::new(histogram)),
             last_stats_broadcast: Arc::new(RwLock::new(None)),
+            #[cfg(feature = "db-metrics")]
+            db_store: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Attach a database backend for persistent storage
+    #[cfg(feature = "db-metrics")]
+    pub async fn attach_db(&self, db_store: crate::metrics_db::DbMetricsStore) {
+        let mut store = self.db_store.write().await;
+        *store = Some(db_store);
     }
 
     /// Subscribe to metrics updates for SSE
@@ -281,6 +293,14 @@ impl MetricsStore {
 
         drop(metrics); // Release lock
 
+        // Save to database if attached
+        #[cfg(feature = "db-metrics")]
+        {
+            if let Some(db) = self.db_store.read().await.as_ref() {
+                let _ = db.save_http_metric(&metric).await; // Ignore errors
+            }
+        }
+
         // Broadcast the new request event
         let _ = self.update_tx.send(MetricsEvent::Request { metric });
 
@@ -350,7 +370,22 @@ impl MetricsStore {
             }
             drop(histogram);
             drop(stats);
-            drop(metrics);
+
+            // Update in database if attached
+            #[cfg(feature = "db-metrics")]
+            {
+                let updated_metric = metric.clone();
+                drop(metrics);
+
+                if let Some(db) = self.db_store.read().await.as_ref() {
+                    let _ = db.save_http_metric(&updated_metric).await; // Upsert
+                }
+            }
+
+            #[cfg(not(feature = "db-metrics"))]
+            {
+                drop(metrics);
+            }
 
             // Broadcast the response event with full data
             let _ = self.update_tx.send(MetricsEvent::Response {
@@ -518,6 +553,40 @@ impl MetricsStore {
         }
     }
 
+    /// Get metrics from database (if attached), otherwise falls back to in-memory
+    #[cfg(feature = "db-metrics")]
+    pub async fn get_paginated_db(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<HttpMetric>, String> {
+        if let Some(db) = self.db_store.read().await.as_ref() {
+            db.get_http_metrics(offset, limit)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            // Fallback to in-memory
+            Ok(self.get_paginated(offset, limit).await)
+        }
+    }
+
+    /// Get TCP metrics from database (if attached), otherwise falls back to in-memory
+    #[cfg(feature = "db-metrics")]
+    pub async fn get_tcp_connections_paginated_db(
+        &self,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<TcpMetric>, String> {
+        if let Some(db) = self.db_store.read().await.as_ref() {
+            db.get_tcp_metrics(offset, limit)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            // Fallback to in-memory
+            Ok(self.get_tcp_connections_paginated(offset, limit).await)
+        }
+    }
+
     // ========== TCP Connection Tracking ==========
 
     /// Record a new TCP connection
@@ -670,6 +739,14 @@ impl MetricsStore {
     pub async fn clear(&self) {
         self.metrics.write().await.clear();
         self.tcp_connections.write().await.clear();
+
+        // Clear database if attached
+        #[cfg(feature = "db-metrics")]
+        {
+            if let Some(db) = self.db_store.read().await.as_ref() {
+                let _ = db.clear_metrics().await;
+            }
+        }
 
         // Reset histogram
         let mut histogram = self.duration_histogram.write().await;

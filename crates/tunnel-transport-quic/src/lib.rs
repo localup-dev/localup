@@ -32,6 +32,22 @@
 //! # }
 //! ```
 
+// Initialize rustls crypto provider once globally
+// This MUST be called before any rustls/QUIC operations
+static CRYPTO_PROVIDER_INIT: std::sync::Once = std::sync::Once::new();
+
+fn ensure_crypto_provider() {
+    CRYPTO_PROVIDER_INIT.call_once(|| {
+        if rustls::crypto::ring::default_provider()
+            .install_default()
+            .is_err()
+        {
+            // Provider already installed by another crate, this is fine
+            tracing::debug!("Rustls crypto provider already installed");
+        }
+    });
+}
+
 pub mod config;
 pub mod connection;
 pub mod listener;
@@ -40,7 +56,7 @@ pub mod stream;
 pub use config::QuicConfig;
 pub use connection::QuicConnection;
 pub use listener::{QuicConnector, QuicListener};
-pub use stream::QuicStream;
+pub use stream::{QuicRecvHalf, QuicSendHalf, QuicStream};
 
 use async_trait::async_trait;
 use std::net::SocketAddr;

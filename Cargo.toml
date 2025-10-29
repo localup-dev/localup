@@ -18,6 +18,7 @@ members = [
     "crates/tunnel-relay-db",
     "crates/tunnel-transport",
     "crates/tunnel-transport-quic",
+    "tauri-tunnel-app/src-tauri",  # Tauri desktop application
 ]
 
 resolver = "2"

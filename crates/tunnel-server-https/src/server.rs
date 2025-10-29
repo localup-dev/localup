@@ -238,12 +238,12 @@ impl HttpsServer {
     async fn handle_tunnel_request(
         mut tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
         tunnel_manager: Arc<TunnelConnectionManager>,
-        _pending_requests: Arc<PendingRequests>, // Not needed with multi-stream
+        _pending_requests: Arc<PendingRequests>,
         tunnel_id: &str,
-        request: &str,
+        _request: &str,
         request_bytes: &[u8],
     ) -> Result<(), HttpsServerError> {
-        debug!("Forwarding HTTPS request through tunnel: {}", tunnel_id);
+        debug!("Transparent HTTPS streaming for tunnel: {}", tunnel_id);
 
         // Get tunnel connection
         let connection = match tunnel_manager.get(tunnel_id).await {
@@ -257,72 +257,10 @@ impl HttpsServer {
             }
         };
 
-        // Get peer address for X-Forwarded-For
-        let peer_addr = tls_stream.get_ref().0.peer_addr().ok();
-
         // Generate stream ID
         let stream_id = rand::random::<u32>();
 
-        // Parse HTTP request (same as HTTP server)
-        let mut lines = request.lines();
-        let request_line = lines.next().unwrap_or("");
-        let mut parts = request_line.split_whitespace();
-        let method = parts.next().unwrap_or("GET").to_string();
-        let uri = parts.next().unwrap_or("/").to_string();
-
-        // Parse headers
-        let mut headers = Vec::new();
-        let mut body_start = 0;
-        let mut original_host = String::new();
-
-        for (i, line) in request.lines().enumerate() {
-            if i == 0 {
-                continue; // Skip request line
-            }
-            if line.is_empty() {
-                // Calculate body start
-                if let Some(pos) = request.find("\r\n\r\n") {
-                    body_start = pos + 4;
-                } else if let Some(pos) = request.find("\n\n") {
-                    body_start = pos + 2;
-                }
-                break;
-            }
-            if let Some(colon_pos) = line.find(':') {
-                let name = line[..colon_pos].trim().to_string();
-                let value = line[colon_pos + 1..].trim().to_string();
-
-                // Capture original Host header
-                if name.to_lowercase() == "host" {
-                    original_host = value.clone();
-                }
-
-                headers.push((name, value));
-            }
-        }
-
-        // Add X-Forwarded-* headers
-        if let Some(addr) = peer_addr {
-            // X-Forwarded-For: client IP address
-            headers.push(("X-Forwarded-For".to_string(), addr.ip().to_string()));
-        }
-
-        // X-Forwarded-Proto: always "https" for HTTPS server
-        headers.push(("X-Forwarded-Proto".to_string(), "https".to_string()));
-
-        // X-Forwarded-Host: original Host header
-        if !original_host.is_empty() {
-            headers.push(("X-Forwarded-Host".to_string(), original_host));
-        }
-
-        // Extract body
-        let body = if body_start < request_bytes.len() {
-            Some(request_bytes[body_start..].to_vec())
-        } else {
-            None
-        };
-
-        // Open a new QUIC stream for this HTTPS request
+        // Open a new QUIC stream for transparent proxying
         let stream = match connection.open_stream().await {
             Ok(s) => s,
             Err(e) => {
@@ -334,122 +272,109 @@ impl HttpsServer {
             }
         };
 
-        // Split stream for bidirectional communication without mutexes
-        let (mut quic_send, mut quic_recv) = stream.split();
+        // Split stream for bidirectional communication
+        let (mut quic_send, quic_recv) = stream.split();
 
-        // Send HTTP request through tunnel
-        let http_request = TunnelMessage::HttpRequest {
+        // Send initial HTTP request data through tunnel (transparent)
+        // We already extracted the host for routing, now send ALL raw bytes
+        let connect_msg = TunnelMessage::HttpStreamConnect {
             stream_id,
-            method,
-            uri,
-            headers,
-            body,
+            host: tunnel_id.to_string(), // Use tunnel_id as host identifier
+            initial_data: request_bytes.to_vec(),
         };
 
-        if let Err(e) = quic_send.send_message(&http_request).await {
-            error!("Failed to send HTTPS request to tunnel: {}", e);
+        if let Err(e) = quic_send.send_message(&connect_msg).await {
+            error!("Failed to send HTTPS stream connect: {}", e);
             let response = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 12\r\n\r\nTunnel error";
             tls_stream.write_all(response).await?;
             return Ok(());
         }
 
-        debug!("HTTPS request sent to tunnel client (stream {})", stream_id);
+        debug!(
+            "HTTPS transparent stream established (stream {})",
+            stream_id
+        );
 
-        // Wait for response (with timeout)
-        let response =
-            tokio::time::timeout(std::time::Duration::from_secs(30), quic_recv.recv_message())
-                .await;
+        // Now enter bidirectional streaming loop
+        Self::proxy_transparent_stream(tls_stream, quic_send, quic_recv, stream_id).await?;
 
-        match response {
-            Ok(Ok(Some(TunnelMessage::HttpResponse {
-                stream_id: _,
-                status,
-                headers: resp_headers,
-                body: resp_body,
-            }))) => {
-                // Build HTTP response
-                let status_text = match status {
-                    200 => "OK",
-                    201 => "Created",
-                    204 => "No Content",
-                    301 => "Moved Permanently",
-                    302 => "Found",
-                    304 => "Not Modified",
-                    400 => "Bad Request",
-                    401 => "Unauthorized",
-                    403 => "Forbidden",
-                    404 => "Not Found",
-                    500 => "Internal Server Error",
-                    502 => "Bad Gateway",
-                    503 => "Service Unavailable",
-                    _ => "Unknown",
-                };
+        Ok(())
+    }
 
-                let response_line = format!("HTTP/1.1 {} {}\r\n", status, status_text);
-                tls_stream.write_all(response_line.as_bytes()).await?;
+    /// Bidirectional transparent streaming proxy
+    async fn proxy_transparent_stream(
+        mut tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
+        mut quic_send: tunnel_transport_quic::QuicSendHalf,
+        mut quic_recv: tunnel_transport_quic::QuicRecvHalf,
+        stream_id: u32,
+    ) -> Result<(), HttpsServerError> {
+        let mut client_buffer = vec![0u8; 16384];
 
-                // Forward headers (skip Content-Length, we'll add our own)
-                for (name, value) in resp_headers {
-                    if name.to_lowercase() == "content-length" {
-                        continue;
+        loop {
+            tokio::select! {
+                // Client → Tunnel
+                result = tls_stream.read(&mut client_buffer) => {
+                    match result {
+                        Ok(0) => {
+                            debug!("Client closed connection (stream {})", stream_id);
+                            let _ = quic_send.send_message(&TunnelMessage::HttpStreamClose { stream_id }).await;
+                            break;
+                        }
+                        Ok(n) => {
+                            debug!("Forwarding {} bytes from client to tunnel (stream {})", n, stream_id);
+                            let data_msg = TunnelMessage::HttpStreamData {
+                                stream_id,
+                                data: client_buffer[..n].to_vec(),
+                            };
+                            if let Err(e) = quic_send.send_message(&data_msg).await {
+                                warn!("Failed to send data to tunnel: {}", e);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Client read error (stream {}): {}", stream_id, e);
+                            let _ = quic_send.send_message(&TunnelMessage::HttpStreamClose { stream_id }).await;
+                            break;
+                        }
                     }
-                    tls_stream
-                        .write_all(format!("{}: {}\r\n", name, value).as_bytes())
-                        .await?;
                 }
 
-                // Write body with correct Content-Length
-                if let Some(body) = resp_body {
-                    tls_stream
-                        .write_all(format!("Content-Length: {}\r\n", body.len()).as_bytes())
-                        .await?;
-                    tls_stream.write_all(b"\r\n").await?;
-                    tls_stream.write_all(&body).await?;
-                } else {
-                    tls_stream.write_all(b"Content-Length: 0\r\n\r\n").await?;
+                // Tunnel → Client
+                result = quic_recv.recv_message() => {
+                    match result {
+                        Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
+                            debug!("Forwarding {} bytes from tunnel to client (stream {})", data.len(), stream_id);
+                            if let Err(e) = tls_stream.write_all(&data).await {
+                                warn!("Failed to write to client: {}", e);
+                                break;
+                            }
+                            if let Err(e) = tls_stream.flush().await {
+                                warn!("Failed to flush to client: {}", e);
+                                break;
+                            }
+                        }
+                        Ok(Some(TunnelMessage::HttpStreamClose { .. })) => {
+                            debug!("Tunnel closed stream {}", stream_id);
+                            break;
+                        }
+                        Ok(None) => {
+                            debug!("Tunnel stream ended (stream {})", stream_id);
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Tunnel read error (stream {}): {}", stream_id, e);
+                            break;
+                        }
+                        _ => {
+                            warn!("Unexpected message type from tunnel (stream {})", stream_id);
+                        }
+                    }
                 }
-
-                // Flush the TLS stream to ensure all data is sent
-                tls_stream.flush().await?;
-
-                debug!(
-                    "HTTPS response forwarded to client: {} {}",
-                    status, status_text
-                );
-            }
-            Ok(Ok(Some(msg))) => {
-                warn!("Unexpected message from tunnel: {:?}", msg);
-                let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 20\r\n\r\nUnexpected response\n";
-                tls_stream.write_all(response).await?;
-                tls_stream.flush().await?;
-            }
-            Ok(Ok(None)) => {
-                warn!("Tunnel stream closed before sending response");
-                let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 14\r\n\r\nTunnel closed\n";
-                tls_stream.write_all(response).await?;
-                tls_stream.flush().await?;
-            }
-            Ok(Err(e)) => {
-                warn!("Error reading from tunnel: {}", e);
-                let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 14\r\n\r\nTunnel error\n";
-                tls_stream.write_all(response).await?;
-                tls_stream.flush().await?;
-            }
-            Err(_) => {
-                warn!("Timeout waiting for tunnel response (stream {})", stream_id);
-                let response =
-                    b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 15\r\n\r\nTunnel timeout\n";
-                tls_stream.write_all(response).await?;
-                tls_stream.flush().await?;
             }
         }
 
-        // Gracefully shutdown TLS connection
+        debug!("Transparent stream proxy ended (stream {})", stream_id);
         let _ = tls_stream.shutdown().await;
-
         Ok(())
     }
 }

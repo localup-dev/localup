@@ -473,6 +473,26 @@ impl TunnelConnection {
                                 )
                                 .await;
                             }
+                            Ok(Some(TunnelMessage::HttpStreamConnect {
+                                stream_id,
+                                host,
+                                initial_data,
+                            })) => {
+                                debug!(
+                                    "HTTP transparent stream on stream {}: {} ({} bytes initial data)",
+                                    stream.stream_id(),
+                                    host,
+                                    initial_data.len()
+                                );
+                                Self::handle_http_transparent_stream(
+                                    stream,
+                                    &config_clone,
+                                    &metrics_clone,
+                                    stream_id,
+                                    initial_data,
+                                )
+                                .await;
+                            }
                             Ok(Some(TunnelMessage::TcpConnect {
                                 stream_id,
                                 remote_addr,
@@ -564,6 +584,157 @@ impl TunnelConnection {
     }
 
     /// Handle a TCP connection on a dedicated QUIC stream
+    /// Handle transparent HTTP stream (for WebSocket, HTTP/2, SSE, etc.)
+    async fn handle_http_transparent_stream(
+        mut stream: tunnel_transport_quic::QuicStream,
+        config: &TunnelConfig,
+        _metrics: &MetricsStore,
+        stream_id: u32,
+        initial_data: Vec<u8>,
+    ) {
+        // Get local HTTP/HTTPS port from protocols
+        let local_port = config.protocols.iter().find_map(|p| match p {
+            ProtocolConfig::Http { local_port, .. } => Some(*local_port),
+            ProtocolConfig::Https { local_port, .. } => Some(*local_port),
+            _ => None,
+        });
+
+        let local_port = match local_port {
+            Some(port) => port,
+            None => {
+                error!("No HTTP/HTTPS protocol configured for transparent streaming");
+                let _ = stream
+                    .send_message(&TunnelMessage::HttpStreamClose { stream_id })
+                    .await;
+                return;
+            }
+        };
+
+        // Connect to local HTTP service
+        let local_addr = format!("{}:{}", config.local_host, local_port);
+        let mut local_socket = match TcpStream::connect(&local_addr).await {
+            Ok(sock) => sock,
+            Err(e) => {
+                error!(
+                    "Failed to connect to local HTTP service at {}: {}",
+                    local_addr, e
+                );
+                let _ = stream
+                    .send_message(&TunnelMessage::HttpStreamClose { stream_id })
+                    .await;
+                return;
+            }
+        };
+
+        debug!(
+            "Connected to local HTTP service at {} for transparent stream {}",
+            local_addr, stream_id
+        );
+
+        // Write initial HTTP request data to local server
+        if let Err(e) = local_socket.write_all(&initial_data).await {
+            error!(
+                "Failed to write initial data to local server (stream {}): {}",
+                stream_id, e
+            );
+            let _ = stream
+                .send_message(&TunnelMessage::HttpStreamClose { stream_id })
+                .await;
+            return;
+        }
+
+        debug!(
+            "Wrote {} bytes initial data to local server (stream {})",
+            initial_data.len(),
+            stream_id
+        );
+
+        // Split streams for bidirectional communication
+        let (mut local_read, mut local_write) = local_socket.into_split();
+        let (mut quic_send, mut quic_recv) = stream.split();
+
+        // Task: Local → Tunnel (read from local server, send to tunnel)
+        let local_to_tunnel = tokio::spawn(async move {
+            let mut buffer = vec![0u8; 16384];
+            loop {
+                match local_read.read(&mut buffer).await {
+                    Ok(0) => {
+                        debug!("Local HTTP server closed connection (stream {})", stream_id);
+                        let _ = quic_send
+                            .send_message(&TunnelMessage::HttpStreamClose { stream_id })
+                            .await;
+                        break;
+                    }
+                    Ok(n) => {
+                        debug!(
+                            "Read {} bytes from local HTTP server (stream {})",
+                            n, stream_id
+                        );
+                        let data_msg = TunnelMessage::HttpStreamData {
+                            stream_id,
+                            data: buffer[..n].to_vec(),
+                        };
+                        if let Err(e) = quic_send.send_message(&data_msg).await {
+                            error!("Failed to send HttpStreamData to tunnel: {}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "Error reading from local HTTP server (stream {}): {}",
+                            stream_id, e
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Task: Tunnel → Local (read from tunnel, send to local server)
+        let tunnel_to_local = tokio::spawn(async move {
+            loop {
+                match quic_recv.recv_message().await {
+                    Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
+                        debug!(
+                            "Received {} bytes from tunnel (stream {})",
+                            data.len(),
+                            stream_id
+                        );
+                        if let Err(e) = local_write.write_all(&data).await {
+                            error!(
+                                "Failed to write to local HTTP server (stream {}): {}",
+                                stream_id, e
+                            );
+                            break;
+                        }
+                    }
+                    Ok(Some(TunnelMessage::HttpStreamClose { .. })) => {
+                        debug!("Tunnel closed HTTP stream {}", stream_id);
+                        break;
+                    }
+                    Ok(None) => {
+                        debug!("QUIC stream ended (stream {})", stream_id);
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Error reading from tunnel (stream {}): {}", stream_id, e);
+                        break;
+                    }
+                    _ => {
+                        warn!(
+                            "Unexpected message type on HTTP transparent stream {}",
+                            stream_id
+                        );
+                    }
+                }
+            }
+        });
+
+        // Wait for both tasks to complete
+        let _ = tokio::join!(local_to_tunnel, tunnel_to_local);
+        debug!("Transparent HTTP stream {} ended", stream_id);
+    }
+
     async fn handle_tcp_stream(
         mut stream: tunnel_transport_quic::stream::QuicStream,
         config: &TunnelConfig,

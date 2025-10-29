@@ -52,7 +52,8 @@ pub use tunnel_transport_quic::{QuicConfig, QuicConnection, QuicConnector, QuicL
 
 // Re-export client types (primary API for tunnel clients)
 pub use tunnel_client::{
-    ExitNodeConfig, MetricsStore, ProtocolConfig, Region, TunnelClient, TunnelConfig, TunnelError,
+    BodyContent, BodyData, DbMetricsStore, ExitNodeConfig, HttpMetric, MetricsStats, MetricsStore,
+    ProtocolConfig, Region, TcpConnectionState, TcpMetric, TunnelClient, TunnelConfig, TunnelError,
 };
 
 // Re-export control plane types (for building custom relays)

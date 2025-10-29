@@ -102,7 +102,6 @@ function App() {
   };
 
   const deleteTunnel = async (tunnelId: string) => {
-    if (!confirm('Are you sure you want to delete this tunnel?')) return;
 
     try {
       const response = await fetch(`/api/tunnels/${tunnelId}`, {

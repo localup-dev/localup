@@ -7,7 +7,7 @@ authors.workspace = true
 
 [dependencies]
 tunnel-proto = { path = "../tunnel-proto" }
-tunnel-client = { path = "../tunnel-client" }
+tunnel-client = { path = "../tunnel-client", features = ["db-metrics"] }
 tunnel-auth = { path = "../tunnel-auth" }
 tunnel-router = { path = "../tunnel-router" }
 tunnel-server-tcp = { path = "../tunnel-server-tcp" }
