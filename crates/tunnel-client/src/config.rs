@@ -1,10 +1,11 @@
 //! Client configuration
 
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tunnel_proto::ExitNodeConfig;
 
 /// Protocol-specific configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProtocolConfig {
     Tcp {
         local_port: u16,
@@ -27,14 +28,36 @@ pub enum ProtocolConfig {
 }
 
 /// Tunnel configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunnelConfig {
     pub local_host: String,
     pub protocols: Vec<ProtocolConfig>,
     pub auth_token: String,
     pub exit_node: ExitNodeConfig,
     pub failover: bool,
+    #[serde(with = "duration_secs")]
     pub connection_timeout: Duration,
+}
+
+/// Helper module for serializing Duration as seconds
+mod duration_secs {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(duration.as_secs())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
 }
 
 impl Default for TunnelConfig {

@@ -2,3 +2,9 @@
 *.db
 node_modules
 .vscode
+
+# Custom relay configurations (keep private)
+relays-*.yaml
+*-relays.yaml
+my-relays.yaml
+custom-relays.yaml

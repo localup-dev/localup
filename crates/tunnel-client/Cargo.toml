@@ -29,6 +29,7 @@ bincode = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = "0.9"
 bytes = { workspace = true }
 
 # HTTP client for replay

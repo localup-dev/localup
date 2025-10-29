@@ -48,6 +48,41 @@ fn build_webapp(workspace_root: &Path, webapp_name: &str) {
     println!("cargo:warning={} build complete!", webapp_name);
 }
 
+fn setup_relay_config(workspace_root: &Path) {
+    // Get relay config path from environment variable or use default
+    let relay_config_path = env::var("LOCALUP_RELAYS_CONFIG").unwrap_or_else(|_| {
+        // Default to workspace root relays.yaml
+        workspace_root.join("relays.yaml").display().to_string()
+    });
+
+    // Verify the file exists
+    let config_path = PathBuf::from(&relay_config_path);
+    if !config_path.exists() {
+        eprintln!(
+            "\n❌ ERROR: Relay configuration file not found at: {}",
+            relay_config_path
+        );
+        eprintln!("Set LOCALUP_RELAYS_CONFIG environment variable to specify a custom path.");
+        eprintln!("Example: LOCALUP_RELAYS_CONFIG=/path/to/custom-relays.yaml cargo build");
+        std::process::exit(1);
+    }
+
+    // Pass the path to the compiler as an environment variable
+    println!("cargo:rustc-env=RELAY_CONFIG_PATH={}", relay_config_path);
+
+    // Rebuild if the relay config file changes
+    println!("cargo:rerun-if-changed={}", relay_config_path);
+
+    // Rebuild if the env variable changes
+    println!("cargo:rerun-if-env-changed=LOCALUP_RELAYS_CONFIG");
+
+    // Print info message (only visible during build)
+    println!(
+        "cargo:warning=📡 Using relay configuration from: {}",
+        relay_config_path
+    );
+}
+
 fn main() {
     // Get the workspace root (two levels up from crates/tunnel-client)
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -57,6 +92,9 @@ fn main() {
         .parent()
         .unwrap()
         .to_path_buf();
+
+    // Setup relay configuration
+    setup_relay_config(&workspace_root);
 
     // Check if bun is available
     let bun_check = Command::new("bun").arg("--version").output();
