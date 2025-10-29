@@ -61,3 +61,11 @@ db-metrics = ["tunnel-relay-db", "sea-orm"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+tracing-subscriber = "0.3"
+rustls = { workspace = true }
+tokio-rustls = "0.26"
+rcgen = "0.12"
+hyper = { workspace = true }
+hyper-util = { workspace = true }
