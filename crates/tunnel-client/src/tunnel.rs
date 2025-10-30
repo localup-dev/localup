@@ -2,6 +2,7 @@
 
 use crate::config::{ProtocolConfig, TunnelConfig};
 use crate::metrics::MetricsStore;
+use crate::relay_discovery::RelayDiscovery;
 use crate::TunnelError;
 use std::sync::Arc;
 use std::time::Instant;
@@ -138,11 +139,51 @@ impl TunnelConnector {
     pub async fn connect(self) -> Result<TunnelConnection, TunnelError> {
         // Parse relay address from config
         let relay_addr_str = match &self.config.exit_node {
-            tunnel_proto::ExitNodeConfig::Custom(addr) => addr.clone(),
-            _ => {
-                return Err(TunnelError::ConnectionError(
-                    "No custom relay specified. Use --relay flag.".to_string(),
-                ))
+            tunnel_proto::ExitNodeConfig::Custom(addr) => {
+                info!("Using custom relay: {}", addr);
+                addr.clone()
+            }
+            tunnel_proto::ExitNodeConfig::Auto
+            | tunnel_proto::ExitNodeConfig::Nearest
+            | tunnel_proto::ExitNodeConfig::Specific(_)
+            | tunnel_proto::ExitNodeConfig::MultiRegion(_) => {
+                info!("Using automatic relay selection");
+
+                // Initialize relay discovery
+                let discovery = RelayDiscovery::new().map_err(|e| {
+                    TunnelError::ConnectionError(format!(
+                        "Failed to initialize relay discovery: {}",
+                        e
+                    ))
+                })?;
+
+                // Determine protocol for relay selection based on tunnel protocol
+                let relay_protocol = match self.config.protocols.first() {
+                    Some(ProtocolConfig::Http { .. }) | Some(ProtocolConfig::Https { .. }) => {
+                        "https"
+                    }
+                    Some(ProtocolConfig::Tcp { .. }) | Some(ProtocolConfig::Tls { .. }) => "tcp",
+                    None => {
+                        return Err(TunnelError::ConnectionError(
+                            "No protocol configured".to_string(),
+                        ))
+                    }
+                };
+
+                // Select relay using auto policy
+                // TODO: Implement region-aware selection for Nearest, Specific, MultiRegion variants
+                let relay_addr =
+                    discovery
+                        .select_relay(relay_protocol, None, None)
+                        .map_err(|e| {
+                            TunnelError::ConnectionError(format!("Failed to select relay: {}", e))
+                        })?;
+
+                info!(
+                    "Auto-selected relay: {} (protocol: {})",
+                    relay_addr, relay_protocol
+                );
+                relay_addr
             }
         };
 
