@@ -18,8 +18,6 @@ members = [
     "crates/tunnel-relay-db",
     "crates/tunnel-transport",
     "crates/tunnel-transport-quic",
-    "tauri-tunnel-app/src-tauri",  # Tauri desktop application
-    "localup-saas-example",  # Example SaaS application using tunnel-lib
 ]
 
 resolver = "2"
