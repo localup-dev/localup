@@ -14,9 +14,13 @@ base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Async
+async-trait = { workspace = true }
+
 # Utilities
 thiserror = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
 clap = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

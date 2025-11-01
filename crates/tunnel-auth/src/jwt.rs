@@ -1,9 +1,12 @@
 //! JWT (JSON Web Token) handling
 
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::validator::{AuthError, AuthResult, AuthValidator};
 
 /// JWT claims for tunnel authentication
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -84,6 +87,7 @@ pub struct JwtValidator {
 }
 
 impl JwtValidator {
+    /// Create a new JWT validator using HMAC-SHA256 (symmetric secret)
     pub fn new(secret: &[u8]) -> Self {
         let mut validation = Validation::new(Algorithm::HS256);
         validation.validate_exp = true;
@@ -92,6 +96,20 @@ impl JwtValidator {
             decoding_key: DecodingKey::from_secret(secret),
             validation,
         }
+    }
+
+    /// Create a new JWT validator using RSA public key (asymmetric)
+    ///
+    /// The public key should be in PEM format (begins with "-----BEGIN PUBLIC KEY-----")
+    pub fn from_rsa_pem(public_key_pem: &[u8]) -> Result<Self, JwtError> {
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.validate_exp = true;
+
+        Ok(Self {
+            decoding_key: DecodingKey::from_rsa_pem(public_key_pem)
+                .map_err(JwtError::EncodingError)?,
+            validation,
+        })
     }
 
     pub fn with_audience(mut self, audience: String) -> Self {
@@ -114,11 +132,49 @@ impl JwtValidator {
         Ok(token_data.claims)
     }
 
+    /// Encode JWT using HMAC-SHA256 (symmetric secret)
     pub fn encode(secret: &[u8], claims: &JwtClaims) -> Result<String, JwtError> {
         let header = Header::new(Algorithm::HS256);
         let encoding_key = EncodingKey::from_secret(secret);
 
         Ok(encode(&header, claims, &encoding_key)?)
+    }
+
+    /// Encode JWT using RSA private key (asymmetric)
+    ///
+    /// The private key should be in PEM format (begins with "-----BEGIN RSA PRIVATE KEY-----")
+    pub fn encode_rsa(private_key_pem: &[u8], claims: &JwtClaims) -> Result<String, JwtError> {
+        let header = Header::new(Algorithm::RS256);
+        let encoding_key =
+            EncodingKey::from_rsa_pem(private_key_pem).map_err(JwtError::EncodingError)?;
+
+        Ok(encode(&header, claims, &encoding_key)?)
+    }
+}
+
+/// Implement AuthValidator trait for JwtValidator
+#[async_trait]
+impl AuthValidator for JwtValidator {
+    async fn validate(&self, token: &str) -> Result<AuthResult, AuthError> {
+        // Validate JWT using existing method
+        let claims = self.validate(token).map_err(|e| match e {
+            JwtError::TokenExpired => AuthError::TokenExpired,
+            JwtError::InvalidToken => AuthError::InvalidToken("Invalid JWT".to_string()),
+            JwtError::EncodingError(e) => AuthError::AuthenticationFailed(e.to_string()),
+        })?;
+
+        // Convert JWT claims to AuthResult
+        let mut result = AuthResult::new(claims.sub.clone())
+            .with_protocols(claims.protocols.clone())
+            .with_regions(claims.regions.clone());
+
+        // Add issuer and audience as metadata
+        result = result
+            .with_metadata("iss".to_string(), claims.iss.clone())
+            .with_metadata("aud".to_string(), claims.aud.clone())
+            .with_metadata("exp".to_string(), claims.exp.to_string());
+
+        Ok(result)
     }
 }
 

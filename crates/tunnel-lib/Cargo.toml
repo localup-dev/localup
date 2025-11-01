@@ -18,12 +18,16 @@ tunnel-cert = { path = "../tunnel-cert" }
 tunnel-control = { path = "../tunnel-control" }
 tunnel-transport = { path = "../tunnel-transport" }
 tunnel-transport-quic = { path = "../tunnel-transport-quic" }
-tunnel-relay-db = { path = "../tunnel-relay-db" }
+tunnel-relay-db = { path = "../tunnel-relay-db", optional = true }
 
 tokio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[features]
+default = ["db"]
+db = ["tunnel-relay-db"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

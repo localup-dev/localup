@@ -8,3 +8,6 @@ relays-*.yaml
 *-relays.yaml
 my-relays.yaml
 custom-relays.yaml
+private_key.pem
+
+localup-saas-example

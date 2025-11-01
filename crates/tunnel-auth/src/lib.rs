@@ -2,9 +2,12 @@
 
 pub mod jwt;
 pub mod token;
+pub mod validator;
 
 pub use jwt::{JwtClaims, JwtError, JwtValidator};
 pub use token::{Token, TokenError, TokenGenerator};
+pub use validator::{AuthError, AuthResult, AuthValidator};
 
 // Re-export useful types
+pub use async_trait::async_trait;
 pub use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation};

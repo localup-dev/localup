@@ -1,0 +1,91 @@
+# Example Custom Relay Configuration for LocalUp
+#
+# Copy this file and customize it for your deployment:
+#   cp relays.example.yaml my-relays.yaml
+#
+# Then build with:
+#   LOCALUP_RELAYS_CONFIG=my-relays.yaml cargo build --release -p tunnel-cli
+
+version: 1
+
+# Global relay configuration
+config:
+  # Default protocol to use if not specified
+  default_protocol: https
+  # Connection timeout in seconds
+  connection_timeout: 30
+  # Health check interval in seconds
+  health_check_interval: 60
+
+# Relay servers
+relays:
+  # Example: Production relay
+  - id: my-relay-1
+    name: My Production Relay
+    region: us-west
+    location:
+      city: San Francisco
+      state: California
+      country: US
+      continent: North America
+    endpoints:
+      # HTTPS endpoint (with TLS termination)
+      - protocol: https
+        address: relay.example.com:443
+        capacity: 1000  # Max concurrent connections
+        priority: 1     # Lower number = higher priority
+      # TCP endpoint (raw TCP proxy)
+      - protocol: tcp
+        address: relay.example.com:8080
+        capacity: 1000
+        priority: 1
+    status: active
+    tags:
+      - production
+      - primary
+
+  # Example: Staging relay (optional)
+  - id: my-relay-staging
+    name: My Staging Relay
+    region: us-west
+    location:
+      city: San Francisco
+      state: California
+      country: US
+      continent: North America
+    endpoints:
+      - protocol: https
+        address: staging-relay.example.com:443
+        capacity: 100
+        priority: 10
+      - protocol: tcp
+        address: staging-relay.example.com:8080
+        capacity: 100
+        priority: 10
+    status: active
+    tags:
+      - staging
+
+# Region groups for fallback
+region_groups:
+  - name: North America
+    regions:
+      - us-west
+    fallback_order:
+      - us-west
+
+# Selection policies
+selection_policies:
+  # Automatic selection (default)
+  auto:
+    # Prefer relays in same region as client
+    prefer_same_region: true
+    # Fallback to nearest region if same region unavailable
+    fallback_to_nearest: false
+    # Consider relay capacity when selecting
+    consider_capacity: true
+    # Only use active relays
+    only_active: true
+    # Include production tags
+    include_tags:
+      - production
