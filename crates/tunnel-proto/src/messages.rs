@@ -96,6 +96,71 @@ pub enum TunnelMessage {
     HttpStreamClose {
         stream_id: u32,
     },
+
+    // Reverse tunnel messages (agent-based)
+    /// Agent registers with relay and declares what specific address it forwards to
+    AgentRegister {
+        agent_id: String,
+        auth_token: String,
+        target_address: String, // Specific address to forward to, e.g., "192.168.1.100:8080"
+        metadata: AgentMetadata,
+    },
+    /// Relay confirms agent registration
+    AgentRegistered {
+        agent_id: String,
+    },
+    /// Agent registration rejected (invalid token, etc.)
+    AgentRejected {
+        reason: String,
+    },
+
+    /// Client requests reverse tunnel to remote address through an agent
+    ReverseTunnelRequest {
+        tunnel_id: String,
+        remote_address: String, // IP:port format
+        agent_id: String,       // Which agent to route through
+    },
+    /// Relay accepts reverse tunnel and tells client where to bind locally
+    ReverseTunnelAccept {
+        tunnel_id: String,
+        local_address: String, // Where client should listen
+    },
+    /// Relay rejects reverse tunnel request
+    ReverseTunnelReject {
+        tunnel_id: String,
+        reason: String,
+    },
+
+    /// Relay asks agent to forward connection to remote address
+    ForwardRequest {
+        tunnel_id: String,
+        stream_id: u32,
+        remote_address: String,
+    },
+    /// Agent accepts forward request
+    ForwardAccept {
+        tunnel_id: String,
+        stream_id: u32,
+    },
+    /// Agent rejects forward request (not in allowlist, etc.)
+    ForwardReject {
+        tunnel_id: String,
+        stream_id: u32,
+        reason: String,
+    },
+
+    /// Data forwarding for reverse tunnels (bidirectional)
+    ReverseData {
+        tunnel_id: String,
+        stream_id: u32,
+        #[serde(with = "serde_bytes")]
+        data: Vec<u8>,
+    },
+    /// Close reverse tunnel stream
+    ReverseClose {
+        tunnel_id: String,
+        stream_id: u32,
+    },
 }
 
 // Custom serde helpers for optional bytes
@@ -183,6 +248,29 @@ impl Default for TunnelConfig {
             ip_allowlist: Vec::new(),
             enable_compression: false,
             enable_multiplexing: true,
+        }
+    }
+}
+
+/// Agent metadata for identification and monitoring
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentMetadata {
+    pub hostname: String,
+    pub platform: String,         // e.g., "linux", "macos", "windows"
+    pub version: String,          // Agent software version
+    pub location: Option<String>, // Optional location info
+}
+
+impl Default for AgentMetadata {
+    fn default() -> Self {
+        Self {
+            hostname: hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .unwrap_or_else(|| "unknown".to_string()),
+            platform: std::env::consts::OS.to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            location: None,
         }
     }
 }

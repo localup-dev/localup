@@ -161,11 +161,14 @@ pub use tunnel_transport_quic::{QuicConfig, QuicConnection, QuicConnector, QuicL
 // Re-export client types (primary API for tunnel clients)
 pub use tunnel_client::{
     BodyContent, BodyData, DbMetricsStore, ExitNodeConfig, HttpMetric, MetricsStats, MetricsStore,
-    ProtocolConfig, Region, TcpConnectionState, TcpMetric, TunnelClient, TunnelConfig, TunnelError,
+    ProtocolConfig, Region, ReverseTunnelClient, ReverseTunnelConfig, ReverseTunnelError,
+    TcpConnectionState, TcpMetric, TunnelClient, TunnelConfig, TunnelError,
 };
 
 // Re-export control plane types (for building custom relays)
-pub use tunnel_control::{PendingRequests, TunnelConnectionManager, TunnelHandler};
+pub use tunnel_control::{
+    AgentRegistry, PendingRequests, RegisteredAgent, TunnelConnectionManager, TunnelHandler,
+};
 
 // Re-export server types (for building custom relays/exit nodes)
 pub use tunnel_server_https::{HttpsServer, HttpsServerConfig};

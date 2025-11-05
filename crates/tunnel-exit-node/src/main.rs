@@ -12,7 +12,9 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use tunnel_auth::{JwtClaims, JwtValidator};
-use tunnel_control::{PortAllocator as PortAllocatorTrait, TunnelConnectionManager, TunnelHandler};
+use tunnel_control::{
+    AgentRegistry, PortAllocator as PortAllocatorTrait, TunnelConnectionManager, TunnelHandler,
+};
 use tunnel_router::RouteRegistry;
 use tunnel_server_https::{HttpsServer, HttpsServerConfig};
 use tunnel_server_tcp::{TcpServer, TcpServerConfig};
@@ -47,6 +49,21 @@ enum Commands {
         /// Token validity in hours (default: 24)
         #[arg(long, default_value = "24")]
         hours: i64,
+
+        /// Enable reverse tunnel access (allows client to request agent-to-client connections)
+        #[arg(long)]
+        reverse_tunnel: bool,
+
+        /// Allowed agent IDs for reverse tunnels (repeatable, e.g., --agent agent-1 --agent agent-2)
+        /// If not specified, all agents are allowed
+        #[arg(long = "agent")]
+        allowed_agents: Vec<String>,
+
+        /// Allowed target addresses for reverse tunnels (repeatable, format: host:port)
+        /// Example: --address 192.168.1.100:8080 --address 10.0.0.5:22
+        /// If not specified, all addresses are allowed
+        #[arg(long = "address")]
+        allowed_addresses: Vec<String>,
     },
 }
 
@@ -115,16 +132,37 @@ struct ServerArgs {
     insecure: bool,
 }
 
-fn generate_token(secret: &str, tunnel_id: &str, hours: i64) -> Result<()> {
+fn generate_token(
+    secret: &str,
+    tunnel_id: &str,
+    hours: i64,
+    reverse_tunnel: bool,
+    allowed_agents: Vec<String>,
+    allowed_addresses: Vec<String>,
+) -> Result<()> {
     use chrono::Duration;
 
     // Create JWT claims
-    let claims = JwtClaims::new(
+    // Token is issued by exit node (issuer) for clients/agents (audience)
+    let mut claims = JwtClaims::new(
         tunnel_id.to_string(),
-        "tunnel-client".to_string(),
-        "tunnel-exit-node".to_string(),
+        "tunnel-exit-node".to_string(), // issuer
+        "tunnel-client".to_string(),    // audience
         Duration::hours(hours),
     );
+
+    // Add reverse tunnel claims if specified
+    if reverse_tunnel {
+        claims = claims.with_reverse_tunnel(true);
+
+        if !allowed_agents.is_empty() {
+            claims = claims.with_allowed_agents(allowed_agents.clone());
+        }
+
+        if !allowed_addresses.is_empty() {
+            claims = claims.with_allowed_addresses(allowed_addresses.clone());
+        }
+    }
 
     // Encode the token
     let token = JwtValidator::encode(secret.as_bytes(), &claims)
@@ -132,9 +170,27 @@ fn generate_token(secret: &str, tunnel_id: &str, hours: i64) -> Result<()> {
 
     // Print success message
     println!("\n✅ JWT Token generated successfully!\n");
-    println!("Tunnel ID:  {}", tunnel_id);
-    println!("Valid for:  {} hours", hours);
-    println!("Expires:    {}", claims.exp_formatted());
+    println!("Tunnel ID:     {}", tunnel_id);
+    println!("Valid for:     {} hours", hours);
+    println!("Expires:       {}", claims.exp_formatted());
+
+    // Print reverse tunnel information
+    if reverse_tunnel {
+        println!("\n🔄 Reverse Tunnel Access: ENABLED");
+        if allowed_agents.is_empty() {
+            println!("   Allowed agents:   ALL");
+        } else {
+            println!("   Allowed agents:   {}", allowed_agents.join(", "));
+        }
+        if allowed_addresses.is_empty() {
+            println!("   Allowed addresses: ALL");
+        } else {
+            println!("   Allowed addresses: {}", allowed_addresses.join(", "));
+        }
+    } else {
+        println!("\n🔄 Reverse Tunnel Access: DISABLED");
+    }
+
     println!("\n{}", "=".repeat(70));
     println!("TOKEN:");
     println!("{}", "=".repeat(70));
@@ -173,7 +229,17 @@ async fn main() -> Result<()> {
                 secret,
                 tunnel_id,
                 hours,
-            } => generate_token(&secret, &tunnel_id, hours),
+                reverse_tunnel,
+                allowed_agents,
+                allowed_addresses,
+            } => generate_token(
+                &secret,
+                &tunnel_id,
+                hours,
+                reverse_tunnel,
+                allowed_agents,
+                allowed_addresses,
+            ),
         };
     }
 
@@ -235,11 +301,12 @@ async fn main() -> Result<()> {
     info!("Routes will be registered automatically when tunnels connect");
 
     // Create JWT validator for tunnel authentication
+    // Token is issued by exit node for clients/agents (aud=tunnel-client, iss=tunnel-exit-node)
     let jwt_validator = if let Some(jwt_secret) = args.jwt_secret {
         let validator = Arc::new(
             JwtValidator::new(jwt_secret.as_bytes())
-                .with_audience("tunnel-exit-node".to_string())
-                .with_issuer("tunnel-client".to_string()),
+                .with_audience("tunnel-client".to_string())
+                .with_issuer("tunnel-exit-node".to_string()),
         );
         info!("✅ JWT authentication enabled");
         Some(validator)
@@ -250,6 +317,10 @@ async fn main() -> Result<()> {
 
     // Create tunnel connection manager
     let tunnel_manager = Arc::new(TunnelConnectionManager::new());
+
+    // Create agent registry for reverse tunnels
+    let agent_registry = Arc::new(AgentRegistry::new());
+    info!("✅ Agent registry initialized (reverse tunnels enabled)");
 
     // Create pending requests tracker (shared between HTTP server and tunnel handler)
     let pending_requests = Arc::new(tunnel_control::PendingRequests::new());
@@ -318,7 +389,8 @@ async fn main() -> Result<()> {
         jwt_validator.clone(),
         args.domain.clone(),
         pending_requests.clone(),
-    );
+    )
+    .with_agent_registry(agent_registry.clone());
 
     // Add port allocator if TCP range was provided
     if let Some(ref allocator) = port_allocator {

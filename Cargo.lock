@@ -1271,6 +1271,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a56f203cd1c76362b69e3863fd987520ac36cf70a8c92627449b2f64a8cf7d65"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link 0.1.3",
+]
+
+[[package]]
 name = "http"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1636,6 +1647,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
 
 [[package]]
+name = "ipnetwork"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf466541e9d546596ee94f9f69590f89473455f88372423e0008fc1a7daf100e"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1786,6 +1806,36 @@ name = "litemap"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "241eaef5fd12c88705a01fc1066c48c4b36e0dd4377dcdc7ec3942cea7a69956"
+
+[[package]]
+name = "localup"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tunnel-agent",
+ "uuid",
+]
+
+[[package]]
+name = "localup-agent-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ipnet",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tunnel-agent",
+ "tunnel-proto",
+ "tunnel-transport",
+ "tunnel-transport-quic",
+]
 
 [[package]]
 name = "lock_api"
@@ -4001,6 +4051,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "tunnel-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "ipnetwork",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "tunnel-proto",
+ "tunnel-transport",
+ "tunnel-transport-quic",
+ "uuid",
+]
+
+[[package]]
 name = "tunnel-api"
 version = "0.1.0"
 dependencies = [
@@ -4098,6 +4167,7 @@ dependencies = [
  "reqwest",
  "rust-embed",
  "rustls 0.23.32",
+ "scopeguard",
  "sea-orm",
  "serde",
  "serde_json",
@@ -4222,6 +4292,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "bytes",
+ "hostname",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

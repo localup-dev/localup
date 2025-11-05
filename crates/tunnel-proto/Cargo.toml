@@ -19,5 +19,8 @@ tracing = { workspace = true }
 # UUID
 uuid = { workspace = true }
 
+# System information
+hostname = "0.4"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

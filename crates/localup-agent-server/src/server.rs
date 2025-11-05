@@ -1,0 +1,324 @@
+//! Agent-server implementation
+//!
+//! Combines relay and agent functionality in a single server.
+//! Accepts client connections and forwards to internal targets with access control.
+
+use crate::access_control::AccessControl;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tracing::{debug, error, info, warn};
+use tunnel_agent::TcpForwarder;
+use tunnel_proto::TunnelMessage;
+use tunnel_transport::{TransportConnection, TransportListener, TransportStream};
+use tunnel_transport_quic::{QuicConfig, QuicListener};
+
+/// Agent-server configuration
+#[derive(Debug, Clone)]
+pub struct AgentServerConfig {
+    /// Listen address for QUIC server
+    pub listen_addr: SocketAddr,
+    /// TLS certificate path
+    pub cert_path: String,
+    /// TLS key path
+    pub key_path: String,
+    /// Access control rules
+    pub access_control: AccessControl,
+    /// Optional JWT secret for authentication
+    pub jwt_secret: Option<String>,
+}
+
+/// Agent-server
+pub struct AgentServer {
+    config: AgentServerConfig,
+    listener: QuicListener,
+    forwarder: Arc<TcpForwarder>,
+}
+
+impl AgentServer {
+    /// Create new agent-server
+    pub fn new(config: AgentServerConfig) -> anyhow::Result<Self> {
+        info!("Initializing agent-server on {}", config.listen_addr);
+
+        // Create QUIC config
+        let quic_config = Arc::new(QuicConfig::server_default(
+            &config.cert_path,
+            &config.key_path,
+        )?);
+
+        // Create QUIC listener
+        let listener = QuicListener::new(config.listen_addr, quic_config)?;
+
+        // Create TCP forwarder
+        let forwarder = Arc::new(TcpForwarder::new());
+
+        Ok(Self {
+            config,
+            listener,
+            forwarder,
+        })
+    }
+
+    /// Start the server
+    pub async fn run(self) -> anyhow::Result<()> {
+        info!("🚀 Agent-server listening on {}", self.config.listen_addr);
+        info!(
+            "Access control: {} CIDR ranges, {} port ranges",
+            if self.config.access_control.allowed_cidrs.is_empty() {
+                "ALL".to_string()
+            } else {
+                self.config.access_control.allowed_cidrs.len().to_string()
+            },
+            if self.config.access_control.allowed_ports.is_empty() {
+                "ALL".to_string()
+            } else {
+                self.config.access_control.allowed_ports.len().to_string()
+            }
+        );
+
+        let config = self.config.clone();
+        let forwarder = self.forwarder.clone();
+
+        loop {
+            match self.listener.accept().await {
+                Ok((connection, peer_addr)) => {
+                    info!("New connection from {}", peer_addr);
+
+                    let config_clone = config.clone();
+                    let forwarder_clone = forwarder.clone();
+
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_connection(
+                            Arc::new(connection),
+                            peer_addr,
+                            config_clone,
+                            forwarder_clone,
+                        )
+                        .await
+                        {
+                            error!("Connection error from {}: {}", peer_addr, e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Failed to accept connection: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Handle a single client connection
+    async fn handle_connection(
+        connection: Arc<tunnel_transport_quic::QuicConnection>,
+        peer_addr: SocketAddr,
+        config: AgentServerConfig,
+        forwarder: Arc<TcpForwarder>,
+    ) -> anyhow::Result<()> {
+        // Accept control stream
+        let mut control_stream = match connection.accept_stream().await? {
+            Some(stream) => stream,
+            None => {
+                error!("Connection closed before control stream");
+                return Ok(());
+            }
+        };
+
+        // Read first message (should be AgentRegister)
+        let first_message = match control_stream.recv_message().await? {
+            Some(msg) => msg,
+            None => {
+                error!("Connection closed before first message");
+                return Ok(());
+            }
+        };
+
+        match first_message {
+            TunnelMessage::AgentRegister {
+                agent_id,
+                auth_token: _,
+                target_address,
+                metadata,
+            } => {
+                info!(
+                    "Agent registration from {}: agent_id={}, target={}, hostname={}",
+                    peer_addr, agent_id, target_address, metadata.hostname
+                );
+
+                // Validate target address against access control
+                match config.access_control.validate_target(&target_address) {
+                    Ok(target_addr) => {
+                        // Send acceptance
+                        control_stream
+                            .send_message(&TunnelMessage::AgentRegistered {
+                                agent_id: agent_id.clone(),
+                            })
+                            .await?;
+
+                        info!("✅ Agent registered: {} -> {}", agent_id, target_addr);
+
+                        // Handle agent's forwarding requests
+                        Self::handle_agent_forwarding(
+                            control_stream,
+                            connection,
+                            agent_id,
+                            target_addr,
+                            forwarder,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        warn!("Access denied for agent {}: {}", agent_id, e);
+                        control_stream
+                            .send_message(&TunnelMessage::Disconnect {
+                                reason: format!("Access denied: {}", e),
+                            })
+                            .await?;
+                    }
+                }
+            }
+            _ => {
+                error!("Unexpected first message: {:?}", first_message);
+                control_stream
+                    .send_message(&TunnelMessage::Disconnect {
+                        reason: "Expected AgentRegister".to_string(),
+                    })
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle agent forwarding requests
+    async fn handle_agent_forwarding(
+        mut control_stream: tunnel_transport_quic::QuicStream,
+        _connection: Arc<tunnel_transport_quic::QuicConnection>,
+        agent_id: String,
+        _target_addr: SocketAddr,
+        _forwarder: Arc<TcpForwarder>,
+    ) {
+        info!("Agent {} connected and ready for forwarding", agent_id);
+
+        // Keep the agent connected with heartbeat
+        loop {
+            match control_stream.recv_message().await {
+                Ok(Some(TunnelMessage::Ping { timestamp })) => {
+                    debug!("Received Ping from agent {} at {}", agent_id, timestamp);
+                    if let Err(e) = control_stream
+                        .send_message(&TunnelMessage::Pong { timestamp })
+                        .await
+                    {
+                        error!("Failed to send Pong to agent {}: {}", agent_id, e);
+                        break;
+                    }
+                }
+                Ok(Some(TunnelMessage::Disconnect { reason })) => {
+                    info!("Agent {} disconnected: {}", agent_id, reason);
+                    break;
+                }
+                Ok(None) => {
+                    info!("Agent {} control stream closed", agent_id);
+                    break;
+                }
+                Err(e) => {
+                    error!("Error reading from agent {}: {}", agent_id, e);
+                    break;
+                }
+                Ok(Some(msg)) => {
+                    warn!("Unexpected message from agent {}: {:?}", agent_id, msg);
+                }
+            }
+        }
+
+        info!("Agent {} session ended", agent_id);
+    }
+
+    /// Handle a single TCP connection to target (unused for now, reserved for future use)
+    #[allow(dead_code)]
+    async fn handle_tcp_connection(
+        tcp_stream: TcpStream,
+        mut rx: tokio::sync::mpsc::Receiver<TunnelMessage>,
+        control_send: Arc<tokio::sync::Mutex<tunnel_transport_quic::QuicSendHalf>>,
+        tunnel_id: String,
+        stream_id: u32,
+    ) -> anyhow::Result<()> {
+        let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+        // Task: TCP → Client
+        let tunnel_id_clone = tunnel_id.clone();
+        let control_send_clone = control_send.clone();
+        let tcp_to_client = tokio::spawn(async move {
+            let mut buffer = vec![0u8; 8192];
+            loop {
+                match tcp_read.read(&mut buffer).await {
+                    Ok(0) => {
+                        debug!("TCP connection closed (stream {})", stream_id);
+                        let mut send = control_send_clone.lock().await;
+                        let _ = send
+                            .send_message(&TunnelMessage::ReverseClose {
+                                tunnel_id: tunnel_id_clone.clone(),
+                                stream_id,
+                            })
+                            .await;
+                        break;
+                    }
+                    Ok(n) => {
+                        debug!("Read {} bytes from target (stream {})", n, stream_id);
+                        let mut send = control_send_clone.lock().await;
+                        if let Err(e) = send
+                            .send_message(&TunnelMessage::ReverseData {
+                                tunnel_id: tunnel_id_clone.clone(),
+                                stream_id,
+                                data: buffer[..n].to_vec(),
+                            })
+                            .await
+                        {
+                            error!("Failed to send to client: {}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error reading from target (stream {}): {}", stream_id, e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Task: Client → TCP
+        let client_to_tcp = tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Some(TunnelMessage::ReverseData { data, .. }) => {
+                        debug!(
+                            "Received {} bytes from client (stream {})",
+                            data.len(),
+                            stream_id
+                        );
+                        if let Err(e) = tcp_write.write_all(&data).await {
+                            error!("Failed to write to target (stream {}): {}", stream_id, e);
+                            break;
+                        }
+                    }
+                    Some(TunnelMessage::ReverseClose { .. }) => {
+                        debug!("Client closed stream {}", stream_id);
+                        break;
+                    }
+                    None => {
+                        debug!("Message channel closed (stream {})", stream_id);
+                        break;
+                    }
+                    Some(msg) => {
+                        warn!("Unexpected message for stream {}: {:?}", stream_id, msg);
+                    }
+                }
+            }
+        });
+
+        let _ = tokio::join!(tcp_to_client, client_to_tcp);
+        debug!("TCP connection handler finished (stream {})", stream_id);
+
+        Ok(())
+    }
+}

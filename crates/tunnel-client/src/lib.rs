@@ -24,3 +24,6 @@ pub use tunnel_proto::{Endpoint, ExitNodeConfig, Protocol, Region};
 
 pub mod tunnel;
 pub use tunnel::{TunnelConnection, TunnelConnector};
+
+pub mod reverse_tunnel;
+pub use reverse_tunnel::{ReverseTunnelClient, ReverseTunnelConfig, ReverseTunnelError};

@@ -31,6 +31,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = "0.9"
 bytes = { workspace = true }
+scopeguard = "1.2"
 
 # HTTP client for replay
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }

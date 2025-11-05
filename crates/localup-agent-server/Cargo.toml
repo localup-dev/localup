@@ -1,0 +1,32 @@
+[package]
+name = "localup-agent-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "localup-agent-server"
+path = "src/main.rs"
+
+[dependencies]
+# Internal dependencies
+tunnel-proto = { path = "../tunnel-proto" }
+tunnel-transport = { path = "../tunnel-transport" }
+tunnel-transport-quic = { path = "../tunnel-transport-quic" }
+tunnel-agent = { path = "../tunnel-agent" }
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+
+# CLI
+clap = { workspace = true, features = ["derive", "env"] }
+
+# Utilities
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+# Network utilities
+ipnet = "2.10"  # CIDR parsing

@@ -18,9 +18,33 @@ members = [
     "crates/tunnel-relay-db",
     "crates/tunnel-transport",
     "crates/tunnel-transport-quic",
+    "crates/tunnel-agent",
+    "crates/localup-agent-server",
+    # "crates/localup-agent",
 ]
 
 resolver = "2"
+
+[package]
+name = "localup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "localup"
+path = "src/main.rs"
+
+
+[dependencies]
+tunnel-agent = { path = "crates/tunnel-agent" }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
 
 [workspace.package]
 version = "0.1.0"

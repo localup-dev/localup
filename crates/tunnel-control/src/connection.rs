@@ -104,6 +104,68 @@ impl Default for TunnelConnectionManager {
     }
 }
 
+/// Represents an active agent connection
+pub struct AgentConnection {
+    pub agent_id: String,
+    pub connection: Arc<QuicConnection>,
+}
+
+/// Manages all active agent connections for reverse tunnels
+pub struct AgentConnectionManager {
+    connections: Arc<RwLock<HashMap<String, AgentConnection>>>,
+}
+
+impl AgentConnectionManager {
+    pub fn new() -> Self {
+        Self {
+            connections: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Register a new agent connection
+    pub async fn register(&self, agent_id: String, connection: Arc<QuicConnection>) {
+        let agent_conn = AgentConnection {
+            agent_id: agent_id.clone(),
+            connection,
+        };
+
+        tracing::debug!("Agent connection registered: {}", agent_id);
+
+        self.connections.write().await.insert(agent_id, agent_conn);
+    }
+
+    /// Unregister an agent connection
+    pub async fn unregister(&self, agent_id: &str) {
+        self.connections.write().await.remove(agent_id);
+        tracing::debug!("Agent connection unregistered: {}", agent_id);
+    }
+
+    /// Get an agent connection by ID
+    pub async fn get(&self, agent_id: &str) -> Option<Arc<QuicConnection>> {
+        self.connections
+            .read()
+            .await
+            .get(agent_id)
+            .map(|conn| conn.connection.clone())
+    }
+
+    /// List all connected agent IDs
+    pub async fn list_agents(&self) -> Vec<String> {
+        self.connections.read().await.keys().cloned().collect()
+    }
+
+    /// Get the count of connected agents
+    pub async fn count(&self) -> usize {
+        self.connections.read().await.len()
+    }
+}
+
+impl Default for AgentConnectionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
