@@ -24,6 +24,8 @@
 //!         auth_token: "your-token".to_string(),
 //!         target_address: "192.168.1.100:8080".to_string(),
 //!         insecure: false,
+//!         local_address: None,
+//!         jwt_secret: None,
 //!     };
 //!
 //!     let mut agent = Agent::new(config)?;

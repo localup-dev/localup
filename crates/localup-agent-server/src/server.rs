@@ -105,6 +105,7 @@ impl AgentServer {
 
         let config = self.config.clone();
         let forwarder = self.forwarder.clone();
+        let jwt_secret = config.jwt_secret.clone();
 
         // If relay is configured, spawn relay connection task with exponential backoff
         if let Some(relay_config) = &config.relay_config {
@@ -133,7 +134,7 @@ impl AgentServer {
                         target_address: relay_config.target_address.clone(),
                         local_address: None, // We don't need local listener when acting as relay agent
                         insecure: true,      // Use insecure mode for self-signed relay certificates
-                        jwt_secret: config.jwt_secret.clone(),
+                        jwt_secret: jwt_secret.clone(),
                     };
 
                     match tunnel_agent::Agent::new(agent_config) {
