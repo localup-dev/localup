@@ -30,3 +30,6 @@ thiserror = { workspace = true }
 
 # Network utilities
 ipnet = "2.10"  # CIDR parsing
+
+[build-dependencies]
+chrono = { workspace = true }

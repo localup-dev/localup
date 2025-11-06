@@ -13,7 +13,8 @@ use tunnel_agent::{Agent, AgentConfig};
 #[derive(Parser, Debug)]
 #[command(name = "localup")]
 #[command(about = "LocalUp - Tunnel your local services through remote relays")]
-#[command(version)]
+#[command(version = env!("GIT_TAG"))]
+#[command(long_version = concat!(env!("GIT_TAG"), "\nCommit: ", env!("GIT_HASH"), "\nBuilt: ", env!("BUILD_TIME")))]
 struct Cli {
     /// Enable verbose logging
     #[arg(short, long, global = true)]

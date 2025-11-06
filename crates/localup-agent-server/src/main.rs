@@ -12,7 +12,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[command(
     name = "localup-agent-server",
     about = "Standalone agent-server for reverse tunnels",
-    version,
+    version = env!("GIT_TAG"),
+    long_version = concat!(env!("GIT_TAG"), "\nCommit: ", env!("GIT_HASH"), "\nBuilt: ", env!("BUILD_TIME"), "\n\nAgent-server combines relay and agent functionality in a single binary.\nPerfect for VPN scenarios where you want to expose internal services\nwithout running a separate relay.\n\nTLS certificates are auto-generated if not provided (stored in ~/.localup/)."),
     long_about = "Agent-server combines relay and agent functionality in a single binary.\n\
                   Perfect for VPN scenarios where you want to expose internal services\n\
                   without running a separate relay.\n\n\
