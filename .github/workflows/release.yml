@@ -138,7 +138,7 @@ jobs:
           CC_aarch64_unknown_linux_gnu: ${{ matrix.cross == true && 'aarch64-linux-gnu-gcc' || '' }}
           AR_aarch64_unknown_linux_gnu: ${{ matrix.cross == true && 'aarch64-linux-gnu-ar' || '' }}
         run: |
-          cargo build --release --target ${{ matrix.target }}
+          cargo build --release --target ${{ matrix.target }} -p localup -p localup-agent-server -p tunnel-exit-node
 
       # Strip binaries (Unix only)
       - name: Strip binaries (Unix)
