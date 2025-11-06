@@ -12,6 +12,7 @@ path = "src/main.rs"
 tunnel-proto = { path = "../tunnel-proto" }
 tunnel-transport = { path = "../tunnel-transport" }
 tunnel-transport-quic = { path = "../tunnel-transport-quic" }
+tunnel-auth = { path = "../tunnel-auth" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

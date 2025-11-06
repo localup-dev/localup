@@ -62,6 +62,13 @@ struct Args {
     #[arg(long, env = "LOCALUP_INSECURE")]
     insecure: bool,
 
+    /// JWT secret for validating agent tokens (optional)
+    ///
+    /// If set, the agent will validate tokens in ForwardRequest messages.
+    /// This provides an additional layer of security.
+    #[arg(long, env = "LOCALUP_JWT_SECRET")]
+    jwt_secret: Option<String>,
+
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, env = "RUST_LOG", default_value = "info")]
     log_level: String,
@@ -145,5 +152,7 @@ fn load_config(args: Args) -> Result<AgentConfig> {
         auth_token: args.token,
         target_address: args.target_address,
         insecure: args.insecure,
+        local_address: None,
+        jwt_secret: args.jwt_secret,
     })
 }

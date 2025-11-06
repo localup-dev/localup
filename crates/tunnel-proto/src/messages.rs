@@ -117,8 +117,9 @@ pub enum TunnelMessage {
     /// Client requests reverse tunnel to remote address through an agent
     ReverseTunnelRequest {
         tunnel_id: String,
-        remote_address: String, // IP:port format
-        agent_id: String,       // Which agent to route through
+        remote_address: String,      // IP:port format
+        agent_id: String,            // Which agent to route through
+        agent_token: Option<String>, // Optional JWT token for agent authentication
     },
     /// Relay accepts reverse tunnel and tells client where to bind locally
     ReverseTunnelAccept {
@@ -131,11 +132,24 @@ pub enum TunnelMessage {
         reason: String,
     },
 
+    /// Relay validates agent token before accepting tunnel
+    /// (used for early validation, not per-stream)
+    ValidateAgentToken {
+        agent_token: Option<String>,
+    },
+    /// Agent confirms token is valid
+    ValidateAgentTokenOk,
+    /// Agent rejects token
+    ValidateAgentTokenReject {
+        reason: String,
+    },
+
     /// Relay asks agent to forward connection to remote address
     ForwardRequest {
         tunnel_id: String,
         stream_id: u32,
         remote_address: String,
+        agent_token: Option<String>, // Optional JWT token for agent authentication
     },
     /// Agent accepts forward request
     ForwardAccept {
@@ -156,10 +170,12 @@ pub enum TunnelMessage {
         #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
-    /// Close reverse tunnel stream
+    /// Close reverse tunnel stream (with optional error reason)
     ReverseClose {
         tunnel_id: String,
         stream_id: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
 }
 

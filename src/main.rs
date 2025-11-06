@@ -226,6 +226,7 @@ async fn main() -> Result<()> {
                 target_address: remote_address.clone(),
                 local_address: local_address.clone(),
                 insecure,
+                jwt_secret: None,
             };
 
             // Log configuration

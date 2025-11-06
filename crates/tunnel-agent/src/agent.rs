@@ -59,6 +59,10 @@ pub struct AgentConfig {
 
     /// Whether to skip certificate verification (insecure, for development only)
     pub insecure: bool,
+
+    /// JWT secret for validating agent tokens from clients (optional)
+    /// If set, agent will validate tokens in ForwardRequest messages
+    pub jwt_secret: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -70,6 +74,7 @@ impl Default for AgentConfig {
             target_address: "localhost:8080".to_string(),
             local_address: None,
             insecure: false,
+            jwt_secret: None,
         }
     }
 }
@@ -104,8 +109,11 @@ pub struct Agent {
     /// Used by local listener to check if relay is available
     connection_active: Arc<AtomicBool>,
 
-    /// Configuration (for insecure flag)
+    /// Configuration (for insecure flag and jwt_secret)
     config: AgentConfig,
+
+    /// JWT secret for validating agent tokens (optional)
+    jwt_secret: Option<String>,
 }
 
 impl Agent {
@@ -132,6 +140,7 @@ impl Agent {
             )));
         }
 
+        let jwt_secret = config.jwt_secret.clone();
         let connection = Arc::new(Mutex::new(None));
         let forwarder = Arc::new(TcpForwarder::new());
         let connection_manager = ConnectionManager::new();
@@ -147,6 +156,7 @@ impl Agent {
             running: Arc::new(Mutex::new(false)),
             connection_active: Arc::new(AtomicBool::new(false)),
             config,
+            jwt_secret,
         })
     }
 
@@ -525,15 +535,27 @@ impl Agent {
                 Ok(stream) // Return the control stream to keep it alive
             }
             Some(TunnelMessage::AgentRejected { reason }) => {
+                tracing::error!(agent_id = %self.agent_id, reason = %reason, "Registration rejected");
                 Err(AgentError::RegistrationFailed(reason))
             }
-            Some(msg) => Err(AgentError::RegistrationFailed(format!(
-                "Unexpected response: {:?}",
-                msg
-            ))),
-            None => Err(AgentError::RegistrationFailed(
-                "Stream closed unexpectedly".to_string(),
-            )),
+            Some(TunnelMessage::Disconnect { reason }) => {
+                tracing::error!(agent_id = %self.agent_id, reason = %reason, "Registration rejected (disconnected)");
+                Err(AgentError::RegistrationFailed(reason))
+            }
+            Some(msg) => {
+                let msg_type = format!("{:?}", msg);
+                tracing::error!(agent_id = %self.agent_id, response = %msg_type, "Unexpected registration response");
+                Err(AgentError::RegistrationFailed(format!(
+                    "Unexpected response: {}",
+                    msg_type
+                )))
+            }
+            None => {
+                tracing::error!(agent_id = %self.agent_id, "Registration stream closed");
+                Err(AgentError::RegistrationFailed(
+                    "Stream closed unexpectedly".to_string(),
+                ))
+            }
         }
     }
 
@@ -547,6 +569,7 @@ impl Agent {
         // Spawn task to handle control stream (heartbeat Ping/Pong)
         let agent_id_heartbeat = self.agent_id.clone();
         let running_clone = self.running.clone();
+        let jwt_secret_for_heartbeat = self.jwt_secret.clone();
         let heartbeat_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             interval.tick().await; // First tick completes immediately
@@ -587,12 +610,97 @@ impl Agent {
                     // Receive messages from relay
                     msg_result = control_stream.recv_message() => {
                         match msg_result {
+                            Ok(Some(TunnelMessage::Ping { timestamp })) => {
+                                tracing::debug!(
+                                    agent_id = %agent_id_heartbeat,
+                                    timestamp = %timestamp,
+                                    "Received ping from relay, responding with pong"
+                                );
+                                // Respond to relay's ping
+                                if let Err(e) = control_stream
+                                    .send_message(&TunnelMessage::Pong { timestamp })
+                                    .await
+                                {
+                                    tracing::error!(
+                                        agent_id = %agent_id_heartbeat,
+                                        error = %e,
+                                        "Failed to send pong response"
+                                    );
+                                    break;
+                                }
+                            }
                             Ok(Some(TunnelMessage::Pong { timestamp })) => {
                                 tracing::debug!(
                                     agent_id = %agent_id_heartbeat,
                                     timestamp = %timestamp,
                                     "Received pong"
                                 );
+                            }
+                            Ok(Some(TunnelMessage::ValidateAgentToken { agent_token })) => {
+                                tracing::info!(
+                                    agent_id = %agent_id_heartbeat,
+                                    "Validating agent token"
+                                );
+
+                                // Validate token
+                                let response = if let Some(ref secret) = jwt_secret_for_heartbeat {
+                                    match &agent_token {
+                                        Some(token) => {
+                                            use tunnel_auth::JwtValidator;
+                                            let validator = JwtValidator::new(secret.as_bytes());
+
+                                            match validator.validate(token) {
+                                                Ok(_claims) => {
+                                                    tracing::info!(
+                                                        agent_id = %agent_id_heartbeat,
+                                                        "Agent token validated successfully"
+                                                    );
+                                                    TunnelMessage::ValidateAgentTokenOk
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        agent_id = %agent_id_heartbeat,
+                                                        error = %e,
+                                                        "Agent token validation failed"
+                                                    );
+                                                    TunnelMessage::ValidateAgentTokenReject {
+                                                        reason: format!(
+                                                            "Authentication failed: invalid agent token: {}",
+                                                            e
+                                                        ),
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                agent_id = %agent_id_heartbeat,
+                                                "Agent token is missing but jwt_secret is configured"
+                                            );
+                                            TunnelMessage::ValidateAgentTokenReject {
+                                                reason: "Authentication failed: agent token is required"
+                                                    .to_string(),
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // No jwt_secret configured, token validation skipped
+                                    tracing::debug!(
+                                        agent_id = %agent_id_heartbeat,
+                                        "No JWT secret configured, skipping validation"
+                                    );
+                                    TunnelMessage::ValidateAgentTokenOk
+                                };
+
+                                // Send response
+                                if let Err(e) = control_stream.send_message(&response).await {
+                                    tracing::error!(
+                                        agent_id = %agent_id_heartbeat,
+                                        error = %e,
+                                        "Failed to send token validation response"
+                                    );
+                                    break;
+                                }
                             }
                             Ok(Some(TunnelMessage::Disconnect { reason })) => {
                                 tracing::info!(
@@ -674,6 +782,7 @@ impl Agent {
             let forwarder = self.forwarder.clone();
             let target_address = self.target_address.clone();
             let connection_manager = self.connection_manager.clone();
+            let jwt_secret = self.jwt_secret.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_stream(
@@ -682,6 +791,7 @@ impl Agent {
                     forwarder,
                     target_address,
                     connection_manager,
+                    jwt_secret,
                 )
                 .await
                 {
@@ -703,6 +813,7 @@ impl Agent {
         forwarder: Arc<TcpForwarder>,
         target_address: String,
         connection_manager: ConnectionManager,
+        jwt_secret: Option<String>,
     ) -> Result<(), AgentError> {
         let stream_id = stream.stream_id() as u32;
 
@@ -720,6 +831,7 @@ impl Agent {
                 tunnel_id,
                 stream_id,
                 remote_address,
+                agent_token,
             }) => {
                 tracing::info!(
                     agent_id = %agent_id,
@@ -729,6 +841,72 @@ impl Agent {
                     target_address = %target_address,
                     "Received forward request"
                 );
+
+                // Validate agent token if jwt_secret is configured
+                if let Some(ref secret) = jwt_secret {
+                    match &agent_token {
+                        Some(token) => {
+                            // Validate the JWT token
+                            use tunnel_auth::JwtValidator;
+                            let validator = JwtValidator::new(secret.as_bytes());
+
+                            match validator.validate(token) {
+                                Ok(claims) => {
+                                    tracing::info!(
+                                        agent_id = %agent_id,
+                                        stream_id = stream_id,
+                                        tunnel_id = %claims.sub,
+                                        "Agent token validated successfully"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        agent_id = %agent_id,
+                                        stream_id = stream_id,
+                                        error = %e,
+                                        "Agent token validation failed"
+                                    );
+
+                                    // Send reject message
+                                    let reject_msg = TunnelMessage::ForwardReject {
+                                        tunnel_id: tunnel_id.clone(),
+                                        stream_id,
+                                        reason: format!(
+                                            "Authentication failed: invalid agent token: {}",
+                                            e
+                                        ),
+                                    };
+                                    let _ = stream.send_message(&reject_msg).await;
+
+                                    return Err(AgentError::MessageHandling(format!(
+                                        "Token validation failed: {}",
+                                        e
+                                    )));
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                stream_id = stream_id,
+                                "Agent token is missing but jwt_secret is configured"
+                            );
+
+                            // Send reject message
+                            let reject_msg = TunnelMessage::ForwardReject {
+                                tunnel_id: tunnel_id.clone(),
+                                stream_id,
+                                reason: "Authentication failed: agent token is required"
+                                    .to_string(),
+                            };
+                            let _ = stream.send_message(&reject_msg).await;
+
+                            return Err(AgentError::MessageHandling(
+                                "Agent token is required but not provided".to_string(),
+                            ));
+                        }
+                    }
+                }
 
                 // Check exact address match
                 if remote_address != target_address {

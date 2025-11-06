@@ -4,7 +4,7 @@
 
 use clap::Parser;
 use ipnet::IpNet;
-use localup_agent_server::{AccessControl, AgentServer, AgentServerConfig, PortRange};
+use localup_agent_server::{AccessControl, AgentServer, AgentServerConfig, PortRange, RelayConfig};
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -16,13 +16,15 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
     long_about = "Agent-server combines relay and agent functionality in a single binary.\n\
                   Perfect for VPN scenarios where you want to expose internal services\n\
                   without running a separate relay.\n\n\
+                  TLS certificates are auto-generated if not provided (stored in ~/.localup/).\n\n\
                   Examples:\n  \
-                  # Allow any address and port\n  \
+                  # Auto-generate certificates and allow any address/port\n  \
+                  localup-agent-server --listen 0.0.0.0:4443\n\n  \
+                  # Use custom certificates\n  \
                   localup-agent-server --listen 0.0.0.0:4443 --cert server.crt --key server.key\n\n  \
                   # Only allow private networks and specific ports\n  \
                   localup-agent-server \\\n    \
                   --listen 0.0.0.0:4443 \\\n    \
-                  --cert server.crt --key server.key \\\n    \
                   --allow-cidr 10.0.0.0/8 \\\n    \
                   --allow-cidr 192.168.0.0/16 \\\n    \
                   --allow-port 22 \\\n    \
@@ -39,13 +41,13 @@ struct Cli {
     )]
     listen: SocketAddr,
 
-    /// TLS certificate path
-    #[arg(long, default_value = "server.crt", env = "LOCALUP_CERT")]
-    cert: String,
+    /// TLS certificate path (optional, auto-generated if not provided)
+    #[arg(long, env = "LOCALUP_CERT")]
+    cert: Option<String>,
 
-    /// TLS key path
-    #[arg(long, default_value = "server.key", env = "LOCALUP_KEY")]
-    key: String,
+    /// TLS key path (optional, auto-generated if not provided)
+    #[arg(long, env = "LOCALUP_KEY")]
+    key: Option<String>,
 
     /// Allowed CIDR ranges (can be specified multiple times)
     /// If not specified, all addresses are allowed
@@ -61,6 +63,29 @@ struct Cli {
     /// JWT secret for authentication (optional)
     #[arg(long, env = "LOCALUP_JWT_SECRET")]
     jwt_secret: Option<String>,
+
+    /// Relay server address to connect to (optional)
+    /// If set, this server will register itself with the relay
+    /// Format: IP:PORT or hostname:PORT
+    /// Example: relay.example.com:4443
+    #[arg(long, env = "LOCALUP_RELAY_ADDR")]
+    relay_addr: Option<String>,
+
+    /// Server ID on the relay (required if relay_addr is set)
+    /// This is the ID that clients will use to connect to this server through the relay
+    /// Example: my-internal-server
+    #[arg(long, env = "LOCALUP_RELAY_ID")]
+    relay_id: Option<String>,
+
+    /// Authentication token for relay server (optional)
+    #[arg(long, env = "LOCALUP_RELAY_TOKEN")]
+    relay_token: Option<String>,
+
+    /// Target address for relay forwarding (required if relay_addr is set)
+    /// This is the backend service address that the relay will route traffic to
+    /// Example: 127.0.0.1:5432 for PostgreSQL, 192.168.1.100:8080 for a web service
+    #[arg(long, env = "LOCALUP_TARGET_ADDRESS")]
+    target_address: Option<String>,
 
     /// Enable verbose logging
     #[arg(short, long)]
@@ -92,8 +117,18 @@ async fn main() -> anyhow::Result<()> {
     // Print configuration
     tracing::info!("🚀 Starting LocalUp Agent-Server");
     tracing::info!("Listen: {}", cli.listen);
-    tracing::info!("Certificate: {}", cli.cert);
-    tracing::info!("Key: {}", cli.key);
+
+    if let Some(ref cert) = cli.cert {
+        tracing::info!("Certificate: {} (custom)", cert);
+    } else {
+        tracing::info!("Certificate: (auto-generated)");
+    }
+
+    if let Some(ref key) = cli.key {
+        tracing::info!("Key: {} (custom)", key);
+    } else {
+        tracing::info!("Key: (auto-generated)");
+    }
 
     if cli.allowed_cidrs.is_empty() {
         tracing::warn!("⚠️  No CIDR restrictions - allowing ALL IP addresses");
@@ -123,6 +158,58 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("⚠️  No JWT authentication - allowing all clients");
     }
 
+    // Parse relay configuration if provided
+    let relay_config = if let Some(relay_addr_str) = &cli.relay_addr {
+        let relay_id = match &cli.relay_id {
+            Some(id) => id.clone(),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Relay ID (--relay-id) is required when relay address (--relay-addr) is set"
+                ));
+            }
+        };
+
+        let target_address = match &cli.target_address {
+            Some(addr) => addr.clone(),
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Target address (--target-address) is required when relay address (--relay-addr) is set.\n\
+                    This is the backend service address the relay should route traffic to.\n\
+                    Example: 127.0.0.1:5432 (PostgreSQL), 192.168.1.100:8080 (Web service)"
+                ));
+            }
+        };
+
+        match relay_addr_str.parse::<SocketAddr>() {
+            Ok(relay_addr) => {
+                tracing::info!("🔄 Relay server enabled: {}", relay_addr);
+                tracing::info!("Server ID on relay: {}", relay_id);
+                tracing::info!("Backend target address: {}", target_address);
+                if cli.relay_token.is_some() {
+                    tracing::info!("✅ Relay authentication enabled");
+                } else {
+                    tracing::warn!("⚠️  No relay authentication token");
+                }
+                Some(RelayConfig {
+                    relay_addr,
+                    server_id: relay_id,
+                    target_address,
+                    relay_token: cli.relay_token,
+                })
+            }
+            Err(e) => {
+                tracing::error!("Failed to parse relay address '{}': {}", relay_addr_str, e);
+                return Err(anyhow::anyhow!("Invalid relay address: {}", e));
+            }
+        }
+    } else if cli.relay_id.is_some() {
+        return Err(anyhow::anyhow!(
+            "Relay address (--relay-addr) is required when relay ID (--relay-id) is set"
+        ));
+    } else {
+        None
+    };
+
     // Create access control
     let access_control = AccessControl::new(cli.allowed_cidrs, cli.allowed_ports);
 
@@ -133,6 +220,7 @@ async fn main() -> anyhow::Result<()> {
         key_path: cli.key,
         access_control,
         jwt_secret: cli.jwt_secret,
+        relay_config,
     };
 
     // Create and run server

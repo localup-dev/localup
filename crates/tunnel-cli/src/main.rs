@@ -77,9 +77,9 @@ enum Commands {
         /// Protocol (http, https, tcp, tls)
         #[arg(long, default_value = "http")]
         protocol: String,
-        /// Authentication token
+        /// Authentication token (optional if relay has no auth)
         #[arg(short, long, env = "TUNNEL_AUTH_TOKEN")]
-        token: String,
+        token: Option<String>,
         /// Subdomain for HTTP/HTTPS/TLS tunnels
         #[arg(short, long)]
         subdomain: Option<String>,
@@ -146,9 +146,13 @@ enum Commands {
         #[arg(long)]
         local_address: Option<String>,
 
-        /// Authentication token (JWT)
+        /// Authentication token for relay (JWT)
         #[arg(long, env = "LOCALUP_AUTH_TOKEN")]
         token: Option<String>,
+
+        /// Authentication token for agent server (JWT)
+        #[arg(long, env = "LOCALUP_AGENT_TOKEN")]
+        agent_token: Option<String>,
 
         /// Skip TLS certificate verification (INSECURE - dev only)
         #[arg(long)]
@@ -232,6 +236,7 @@ async fn main() -> Result<()> {
             agent_id,
             local_address,
             token,
+            agent_token,
             insecure,
         }) => {
             handle_connect_command(
@@ -240,6 +245,7 @@ async fn main() -> Result<()> {
                 agent_id,
                 local_address,
                 token,
+                agent_token,
                 insecure,
             )
             .await
@@ -315,7 +321,7 @@ fn handle_add_tunnel(
     name: String,
     port: u16,
     protocol: String,
-    token: String,
+    token: Option<String>,
     subdomain: Option<String>,
     domain: Option<String>,
     relay: Option<String>,
@@ -339,7 +345,7 @@ fn handle_add_tunnel(
     let config = TunnelConfig {
         local_host: "localhost".to_string(),
         protocols: vec![protocol_config],
-        auth_token: token,
+        auth_token: token.unwrap_or_default(),
         exit_node,
         failover: true,
         connection_timeout: Duration::from_secs(30),
@@ -795,6 +801,7 @@ async fn handle_connect_command(
     agent_id: String,
     local_address: Option<String>,
     token: Option<String>,
+    agent_token: Option<String>,
     insecure: bool,
 ) -> Result<()> {
     info!("🚀 Connecting to reverse tunnel...");
@@ -814,115 +821,177 @@ async fn handle_connect_command(
         config = config.with_auth_token(token_value);
     }
 
+    if let Some(agent_token_value) = agent_token {
+        config = config.with_agent_token(agent_token_value);
+    }
+
     if let Some(local_addr) = local_address {
         config = config.with_local_bind_address(local_addr);
     }
 
-    // Connect to reverse tunnel
-    let client = match ReverseTunnelClient::connect(config).await {
-        Ok(client) => client,
-        Err(e) => {
-            error!("❌ Failed to connect to reverse tunnel: {}", e);
-            match e {
-                tunnel_client::ReverseTunnelError::AgentNotAvailable(msg) => {
-                    eprintln!();
-                    eprintln!("Agent not available:");
-                    eprintln!("  {}", msg);
-                    eprintln!();
-                    eprintln!("Make sure the agent is:");
-                    eprintln!("  1. Running on the target network");
-                    eprintln!("  2. Connected to the relay server ({})", relay);
-                    eprintln!("  3. Using the correct agent ID ({})", agent_id);
-                    std::process::exit(1);
-                }
-                tunnel_client::ReverseTunnelError::ConnectionFailed(msg) => {
-                    eprintln!();
-                    eprintln!("Connection failed:");
-                    eprintln!("  {}", msg);
-                    eprintln!();
-                    eprintln!("Check that:");
-                    eprintln!("  1. The relay server is reachable at {}", relay);
-                    eprintln!("  2. The relay server is running");
-                    eprintln!("  3. Your network allows outbound QUIC/UDP connections");
-                    std::process::exit(1);
-                }
-                tunnel_client::ReverseTunnelError::Rejected(msg) => {
-                    eprintln!();
-                    eprintln!("Reverse tunnel rejected:");
-                    eprintln!("  {}", msg);
-                    eprintln!();
-                    if msg.contains("auth") || msg.contains("token") {
-                        eprintln!(
-                            "Authentication may be required. Use --token to provide credentials."
-                        );
+    // Exponential backoff parameters for reconnection
+    let initial_backoff = std::time::Duration::from_secs(1);
+    let max_backoff = std::time::Duration::from_secs(60);
+    let backoff_multiplier = 2.0;
+
+    let mut current_backoff = initial_backoff;
+    let mut attempt = 0;
+    let mut first_connection = true;
+
+    // Try to connect with automatic reconnection on disconnect
+    loop {
+        attempt += 1;
+
+        // Connect to reverse tunnel
+        let client = match ReverseTunnelClient::connect(config.clone()).await {
+            Ok(client) => client,
+            Err(e) => {
+                error!(
+                    "❌ Failed to connect to reverse tunnel (attempt {}): {}",
+                    attempt, e
+                );
+
+                // Only show detailed errors on first attempt
+                if first_connection {
+                    match &e {
+                        tunnel_client::ReverseTunnelError::AgentNotAvailable(msg) => {
+                            eprintln!();
+                            eprintln!("Agent not available:");
+                            eprintln!("  {}", msg);
+                            eprintln!();
+                            eprintln!("Make sure the agent is:");
+                            eprintln!("  1. Running on the target network");
+                            eprintln!("  2. Connected to the relay server ({})", relay);
+                            eprintln!("  3. Using the correct agent ID ({})", agent_id);
+                            eprintln!();
+                            eprintln!("Retrying with exponential backoff...");
+                            eprintln!();
+                        }
+                        tunnel_client::ReverseTunnelError::ConnectionFailed(msg) => {
+                            eprintln!();
+                            eprintln!("Connection failed:");
+                            eprintln!("  {}", msg);
+                            eprintln!();
+                            eprintln!("Check that:");
+                            eprintln!("  1. The relay server is reachable at {}", relay);
+                            eprintln!("  2. The relay server is running");
+                            eprintln!("  3. Your network allows outbound QUIC/UDP connections");
+                            eprintln!();
+                            eprintln!("Retrying with exponential backoff...");
+                            eprintln!();
+                        }
+                        tunnel_client::ReverseTunnelError::Rejected(msg) => {
+                            eprintln!();
+                            eprintln!("Reverse tunnel rejected:");
+                            eprintln!("  {}", msg);
+                            eprintln!();
+                            if msg.contains("auth") || msg.contains("token") {
+                                eprintln!(
+                                    "Authentication may be required. Use --token to provide credentials."
+                                );
+                            }
+                            eprintln!("Retrying with exponential backoff...");
+                            eprintln!();
+                        }
+                        tunnel_client::ReverseTunnelError::Timeout(msg) => {
+                            eprintln!();
+                            eprintln!("Connection timeout:");
+                            eprintln!("  {}", msg);
+                            eprintln!();
+                            eprintln!("The relay server may be slow or unreachable.");
+                            eprintln!("Retrying with exponential backoff...");
+                            eprintln!();
+                        }
+                        _ => {
+                            eprintln!();
+                            eprintln!("Error: {}", e);
+                            eprintln!("Retrying with exponential backoff...");
+                            eprintln!();
+                        }
                     }
-                    std::process::exit(1);
                 }
-                tunnel_client::ReverseTunnelError::Timeout(msg) => {
-                    eprintln!();
-                    eprintln!("Connection timeout:");
-                    eprintln!("  {}", msg);
-                    eprintln!();
-                    eprintln!("The relay server may be slow or unreachable.");
-                    std::process::exit(1);
-                }
-                _ => {
-                    eprintln!();
-                    eprintln!("Error: {}", e);
-                    std::process::exit(1);
-                }
+
+                // Wait and retry with exponential backoff
+                info!(
+                    "Reconnecting in {}s (attempt {})...",
+                    current_backoff.as_secs(),
+                    attempt
+                );
+                tokio::time::sleep(current_backoff).await;
+
+                // Increase backoff for next attempt
+                let next_backoff = std::time::Duration::from_secs_f64(
+                    current_backoff.as_secs_f64() * backoff_multiplier,
+                );
+                current_backoff = next_backoff.min(max_backoff);
+                first_connection = false;
+                continue;
             }
-        }
-    };
+        };
 
-    // Print success output
-    println!();
-    println!("✅ Reverse tunnel established!");
-    println!();
-    println!("Local address:  {}", client.local_addr());
-    println!("Remote address: {}", client.remote_address());
-    println!("Agent ID:       {}", client.agent_id());
-    println!("Tunnel ID:      {}", client.tunnel_id());
-    println!();
-    println!(
-        "Connect to {} to access the remote service.",
-        client.local_addr()
-    );
-    println!();
-    println!("Press Ctrl+C to disconnect.");
-    println!();
-
-    // Create cancellation token for Ctrl+C
-    let (cancel_tx, mut cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
-
-    // Spawn Ctrl+C handler
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        info!("Shutting down reverse tunnel...");
-        cancel_tx.send(()).await.ok();
-    });
-
-    // Wait for tunnel to close or Ctrl+C
-    let wait_task = tokio::spawn(async move { client.wait().await });
-
-    tokio::select! {
-        wait_result = wait_task => {
-            match wait_result {
-                Ok(Ok(_)) => {
-                    info!("✅ Reverse tunnel closed gracefully");
-                }
-                Ok(Err(e)) => {
-                    error!("Reverse tunnel error: {}", e);
-                }
-                Err(e) => {
-                    error!("Reverse tunnel task panicked: {}", e);
-                }
-            }
-        }
-        _ = cancel_rx.recv() => {
-            info!("Shutdown requested, closing reverse tunnel...");
+        // Successfully connected - print appropriate message
+        if attempt > 1 {
             println!();
-            println!("🛑 Shutting down...");
+            println!("✅ Reconnected after {} attempts!", attempt - 1);
+        } else {
+            println!();
+            println!("✅ Reverse tunnel established!");
+        }
+        println!();
+        println!("Local address:  {}", client.local_addr());
+        println!("Remote address: {}", client.remote_address());
+        println!("Agent ID:       {}", client.agent_id());
+        println!("Tunnel ID:      {}", client.tunnel_id());
+        println!();
+        println!(
+            "Connect to {} to access the remote service.",
+            client.local_addr()
+        );
+        println!();
+        println!("Press Ctrl+C to disconnect.");
+        println!();
+
+        // Create cancellation token for Ctrl+C
+        let (cancel_tx, mut cancel_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+        // Spawn Ctrl+C handler
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Shutting down reverse tunnel...");
+            cancel_tx.send(()).await.ok();
+        });
+
+        // Wait for tunnel to close or Ctrl+C
+        let wait_task = tokio::spawn(async move { client.wait().await });
+
+        let tunnel_closed = tokio::select! {
+            wait_result = wait_task => {
+                match wait_result {
+                    Ok(Ok(_)) => {
+                        info!("Reverse tunnel closed gracefully");
+                        true
+                    }
+                    Ok(Err(e)) => {
+                        error!("Reverse tunnel error: {}", e);
+                        true
+                    }
+                    Err(e) => {
+                        error!("Reverse tunnel task panicked: {}", e);
+                        true
+                    }
+                }
+            }
+            _ = cancel_rx.recv() => {
+                info!("Shutdown requested, closing reverse tunnel...");
+                println!();
+                println!("🛑 Shutting down...");
+                false
+            }
+        };
+
+        // If user pressed Ctrl+C, exit; otherwise reconnect
+        if !tunnel_closed {
+            break;
         }
     }
 

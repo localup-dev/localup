@@ -6,6 +6,7 @@
 use crate::access_control::AccessControl;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
@@ -14,19 +15,38 @@ use tunnel_proto::TunnelMessage;
 use tunnel_transport::{TransportConnection, TransportListener, TransportStream};
 use tunnel_transport_quic::{QuicConfig, QuicListener};
 
+/// Relay connection configuration
+/// When set, this agent server will connect to a relay server and register itself
+/// Clients can then connect to the relay to reach this agent server
+#[derive(Debug, Clone)]
+pub struct RelayConfig {
+    /// Relay server address (the relay to connect to)
+    pub relay_addr: SocketAddr,
+    /// Agent server ID on the relay (how clients will identify this server)
+    pub server_id: String,
+    /// Target address where this agent will forward relay traffic
+    /// (e.g., "127.0.0.1:5432" for PostgreSQL, "192.168.1.100:8080" for web service)
+    pub target_address: String,
+    /// Authentication token for relay
+    pub relay_token: Option<String>,
+}
+
 /// Agent-server configuration
 #[derive(Debug, Clone)]
 pub struct AgentServerConfig {
     /// Listen address for QUIC server
     pub listen_addr: SocketAddr,
-    /// TLS certificate path
-    pub cert_path: String,
-    /// TLS key path
-    pub key_path: String,
+    /// TLS certificate path (optional, auto-generated if None)
+    pub cert_path: Option<String>,
+    /// TLS key path (optional, auto-generated if None)
+    pub key_path: Option<String>,
     /// Access control rules
     pub access_control: AccessControl,
     /// Optional JWT secret for authentication
     pub jwt_secret: Option<String>,
+    /// Optional relay connection configuration
+    /// If set, this server will register itself with the relay
+    pub relay_config: Option<RelayConfig>,
 }
 
 /// Agent-server
@@ -41,11 +61,17 @@ impl AgentServer {
     pub fn new(config: AgentServerConfig) -> anyhow::Result<Self> {
         info!("Initializing agent-server on {}", config.listen_addr);
 
-        // Create QUIC config
-        let quic_config = Arc::new(QuicConfig::server_default(
-            &config.cert_path,
-            &config.key_path,
-        )?);
+        // Create QUIC config with auto-generation if needed
+        let quic_config =
+            if let (Some(cert_path), Some(key_path)) = (&config.cert_path, &config.key_path) {
+                info!("🔐 Using custom TLS certificates for QUIC");
+                Arc::new(QuicConfig::server_default(cert_path, key_path)?)
+            } else {
+                info!("🔐 Auto-generating self-signed certificate for QUIC...");
+                let config = Arc::new(QuicConfig::server_self_signed()?);
+                info!("✅ Self-signed certificate generated (valid for 90 days)");
+                config
+            };
 
         // Create QUIC listener
         let listener = QuicListener::new(config.listen_addr, quic_config)?;
@@ -79,6 +105,73 @@ impl AgentServer {
 
         let config = self.config.clone();
         let forwarder = self.forwarder.clone();
+
+        // If relay is configured, spawn relay connection task with exponential backoff
+        if let Some(relay_config) = &config.relay_config {
+            let relay_config = relay_config.clone();
+            tokio::spawn(async move {
+                // Exponential backoff parameters (matching tunnel-client behavior)
+                let initial_backoff = Duration::from_secs(1);
+                let max_backoff = Duration::from_secs(60);
+                let backoff_multiplier = 2.0;
+
+                let mut current_backoff = initial_backoff;
+                let mut attempt = 0;
+
+                loop {
+                    attempt += 1;
+                    info!(
+                        "Connecting to relay at {} with agent ID: {} (attempt {})",
+                        relay_config.relay_addr, relay_config.server_id, attempt
+                    );
+
+                    // Create agent configuration for relay connection
+                    let agent_config = tunnel_agent::AgentConfig {
+                        agent_id: relay_config.server_id.clone(),
+                        relay_addr: format!("{}", relay_config.relay_addr),
+                        auth_token: relay_config.relay_token.clone().unwrap_or_default(),
+                        target_address: relay_config.target_address.clone(),
+                        local_address: None, // We don't need local listener when acting as relay agent
+                        insecure: true,      // Use insecure mode for self-signed relay certificates
+                        jwt_secret: config.jwt_secret.clone(),
+                    };
+
+                    match tunnel_agent::Agent::new(agent_config) {
+                        Ok(mut agent) => {
+                            info!("Agent created successfully, starting relay connection");
+                            // Reset backoff on successful connection
+                            current_backoff = initial_backoff;
+                            attempt = 0;
+
+                            match agent.start().await {
+                                Ok(_) => {
+                                    info!("Agent stopped gracefully");
+                                }
+                                Err(e) => {
+                                    error!("Agent error: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to create agent: {}", e);
+                        }
+                    }
+
+                    // Exponential backoff before reconnecting
+                    info!(
+                        "Relay connection ended, reconnecting in {}s (attempt {})...",
+                        current_backoff.as_secs(),
+                        attempt
+                    );
+                    tokio::time::sleep(current_backoff).await;
+
+                    // Increase backoff for next attempt
+                    let next_backoff =
+                        Duration::from_secs_f64(current_backoff.as_secs_f64() * backoff_multiplier);
+                    current_backoff = next_backoff.min(max_backoff);
+                }
+            });
+        }
 
         loop {
             match self.listener.accept().await {
@@ -170,7 +263,7 @@ impl AgentServer {
                     Err(e) => {
                         warn!("Access denied for agent {}: {}", agent_id, e);
                         control_stream
-                            .send_message(&TunnelMessage::Disconnect {
+                            .send_message(&TunnelMessage::AgentRejected {
                                 reason: format!("Access denied: {}", e),
                             })
                             .await?;
@@ -180,8 +273,8 @@ impl AgentServer {
             _ => {
                 error!("Unexpected first message: {:?}", first_message);
                 control_stream
-                    .send_message(&TunnelMessage::Disconnect {
-                        reason: "Expected AgentRegister".to_string(),
+                    .send_message(&TunnelMessage::AgentRejected {
+                        reason: "Expected AgentRegister message as first message".to_string(),
                     })
                     .await?;
             }
@@ -259,6 +352,7 @@ impl AgentServer {
                             .send_message(&TunnelMessage::ReverseClose {
                                 tunnel_id: tunnel_id_clone.clone(),
                                 stream_id,
+                                reason: None,
                             })
                             .await;
                         break;

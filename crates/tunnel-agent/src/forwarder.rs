@@ -183,6 +183,7 @@ impl TcpForwarder {
             let close_msg = TunnelMessage::ReverseClose {
                 tunnel_id: String::new(),
                 stream_id: stream_id as u32,
+                reason: None,
             };
             let _ = tunnel_send.send_message(&close_msg).await;
 

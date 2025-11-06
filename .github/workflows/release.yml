@@ -131,23 +131,14 @@ jobs:
           # Cache key includes: OS, target, Cargo.lock hash, and rust version
           # Automatically handles cross-platform paths (works on Windows/Linux/macOS)
 
-      # Build with cross-compilation environment for Linux ARM64
-      - name: Build binaries (Linux ARM64)
-        if: matrix.cross == true
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
-        run: |
-          cargo build --release --target ${{ matrix.target }} --bin localup
-          cargo build --release --target ${{ matrix.target }} --bin localup-relay
-
-      # Build normally for other platforms
+      # Build binaries from target directory
       - name: Build binaries
-        if: matrix.cross != true
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross == true && 'aarch64-linux-gnu-gcc' || '' }}
+          CC_aarch64_unknown_linux_gnu: ${{ matrix.cross == true && 'aarch64-linux-gnu-gcc' || '' }}
+          AR_aarch64_unknown_linux_gnu: ${{ matrix.cross == true && 'aarch64-linux-gnu-ar' || '' }}
         run: |
-          cargo build --release --target ${{ matrix.target }} --bin localup
-          cargo build --release --target ${{ matrix.target }} --bin localup-relay
+          cargo build --release --target ${{ matrix.target }} --bin localup --bin localup-relay
 
       # Strip binaries (Unix only)
       - name: Strip binaries (Unix)

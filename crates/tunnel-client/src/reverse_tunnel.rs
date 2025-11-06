@@ -61,7 +61,7 @@ pub struct ReverseTunnelConfig {
     /// Relay server address (e.g., "relay.example.com:4443" or "127.0.0.1:4443")
     pub relay_addr: String,
 
-    /// Optional JWT authentication token
+    /// Optional JWT authentication token for relay
     pub auth_token: Option<String>,
 
     /// Target address to connect to through the agent (e.g., "192.168.1.100:8080")
@@ -69,6 +69,9 @@ pub struct ReverseTunnelConfig {
 
     /// Specific agent ID to route through
     pub agent_id: String,
+
+    /// Optional JWT authentication token for agent server
+    pub agent_token: Option<String>,
 
     /// Local bind address (defaults to "127.0.0.1:0" for automatic port allocation)
     pub local_bind_address: Option<String>,
@@ -85,14 +88,21 @@ impl ReverseTunnelConfig {
             auth_token: None,
             remote_address,
             agent_id,
+            agent_token: None,
             local_bind_address: None,
             insecure: false,
         }
     }
 
-    /// Set authentication token
+    /// Set relay authentication token
     pub fn with_auth_token(mut self, token: String) -> Self {
         self.auth_token = Some(token);
+        self
+    }
+
+    /// Set agent authentication token
+    pub fn with_agent_token(mut self, token: String) -> Self {
+        self.agent_token = Some(token);
         self
     }
 
@@ -165,6 +175,7 @@ impl ReverseTunnelClient {
             tunnel_id: tunnel_id.clone(),
             remote_address: config.remote_address.clone(),
             agent_id: config.agent_id.clone(),
+            agent_token: config.agent_token.clone(),
         };
 
         control_stream
@@ -383,8 +394,12 @@ impl ReverseTunnelClient {
 
         let stream_map_clone = stream_map.clone();
 
+        // Create a channel to signal when control stream closes
+        let (control_closed_tx, mut control_closed_rx) = tokio::sync::mpsc::channel::<String>(1);
+
         // Spawn task to read from control stream and route to TCP connections
         let tunnel_id_clone = tunnel_id.clone();
+        let control_closed_tx_clone = control_closed_tx.clone();
         tokio::spawn(async move {
             loop {
                 match control_recv.recv_message().await {
@@ -409,24 +424,45 @@ impl ReverseTunnelClient {
                             warn!("No handler for stream_id {}", stream_id);
                         }
                     }
-                    Ok(Some(TunnelMessage::ReverseClose { stream_id, .. })) => {
-                        debug!("Received ReverseClose from relay for stream {}", stream_id);
+                    Ok(Some(TunnelMessage::ReverseClose {
+                        stream_id, reason, ..
+                    })) => {
+                        if let Some(ref err_reason) = reason {
+                            warn!(
+                                "Received ReverseClose from relay for stream {} with error: {}",
+                                stream_id, err_reason
+                            );
+                        } else {
+                            debug!("Received ReverseClose from relay for stream {}", stream_id);
+                        }
                         let map = stream_map_clone.read().await;
                         if let Some(tx) = map.get(&stream_id) {
                             let _ = tx
                                 .send(TunnelMessage::ReverseClose {
                                     tunnel_id: tunnel_id_clone.clone(),
                                     stream_id,
+                                    reason: None,
                                 })
                                 .await;
                         }
                     }
+                    Ok(Some(TunnelMessage::Disconnect { reason })) => {
+                        warn!("Agent disconnected from relay - closing tunnel: {}", reason);
+                        let _ = control_closed_tx_clone.send(reason).await;
+                        break;
+                    }
                     Ok(None) => {
                         error!("Control stream closed by relay");
+                        let _ = control_closed_tx_clone
+                            .send("Control stream closed by relay".to_string())
+                            .await;
                         break;
                     }
                     Err(e) => {
                         error!("Error reading from control stream: {}", e);
+                        let _ = control_closed_tx_clone
+                            .send(format!("Control stream error: {}", e))
+                            .await;
                         break;
                     }
                     Ok(Some(msg)) => {
@@ -443,6 +479,19 @@ impl ReverseTunnelClient {
                 // Check for shutdown signal
                 _ = shutdown_rx.recv() => {
                     info!("Shutdown signal received, stopping local server");
+                    break;
+                }
+
+                // Check if control stream has closed
+                result = control_closed_rx.recv() => {
+                    match result {
+                        Some(reason) => {
+                            error!("Control stream closed: {}", reason);
+                        }
+                        None => {
+                            error!("Control stream handler exited unexpectedly");
+                        }
+                    }
                     break;
                 }
 
@@ -535,6 +584,7 @@ impl ReverseTunnelClient {
                         let close_msg = TunnelMessage::ReverseClose {
                             tunnel_id: tunnel_id_clone.clone(),
                             stream_id,
+                            reason: None,
                         };
                         let mut send = control_send_clone.lock().await;
                         let _ = send.send_message(&close_msg).await;

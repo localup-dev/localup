@@ -167,6 +167,7 @@ impl TunnelHandler {
                 tunnel_id,
                 remote_address,
                 agent_id,
+                agent_token,
             } => {
                 info!(
                     "Reverse tunnel request from {}: tunnel={}, address={}, agent={}",
@@ -178,6 +179,7 @@ impl TunnelHandler {
                     tunnel_id,
                     remote_address,
                     agent_id,
+                    agent_token,
                     peer_addr,
                 )
                 .await;
@@ -404,6 +406,7 @@ impl TunnelHandler {
         tunnel_id: String,
         remote_address: String,
         agent_id: String,
+        agent_token: Option<String>,
         _peer_addr: std::net::SocketAddr,
     ) where
         C: TransportConnection + 'static,
@@ -413,6 +416,9 @@ impl TunnelHandler {
             "Processing reverse tunnel request: tunnel={}, address={}, agent={}",
             tunnel_id, remote_address, agent_id
         );
+
+        // Clone agent_token for use in async closure
+        let agent_token = agent_token.clone();
 
         // Check if agent registry is configured
         let Some(ref registry) = self.agent_registry else {
@@ -474,8 +480,102 @@ impl TunnelHandler {
             return;
         };
 
-        // Send ReverseTunnelAccept to client immediately
-        // We don't need to test agent connectivity first - we'll handle errors per-connection
+        // Validate agent token BEFORE accepting tunnel
+        // Open a stream to the agent for token validation
+        let mut validate_stream = match agent_connection.open_stream().await {
+            Ok(stream) => stream,
+            Err(e) => {
+                error!(
+                    "Failed to open stream to agent {} for token validation: {}",
+                    agent_id, e
+                );
+                let _ = control_stream
+                    .send_message(&TunnelMessage::ReverseTunnelReject {
+                        tunnel_id: tunnel_id.clone(),
+                        reason: "Failed to communicate with agent".to_string(),
+                    })
+                    .await;
+                return;
+            }
+        };
+
+        // Send ValidateAgentToken request
+        if let Err(e) = validate_stream
+            .send_message(&TunnelMessage::ValidateAgentToken {
+                agent_token: agent_token.clone(),
+            })
+            .await
+        {
+            error!(
+                "Failed to send token validation request to agent {}: {}",
+                agent_id, e
+            );
+            let _ = control_stream
+                .send_message(&TunnelMessage::ReverseTunnelReject {
+                    tunnel_id: tunnel_id.clone(),
+                    reason: "Failed to communicate with agent".to_string(),
+                })
+                .await;
+            return;
+        }
+
+        // Wait for agent's response
+        match validate_stream.recv_message().await {
+            Ok(Some(TunnelMessage::ValidateAgentTokenOk)) => {
+                info!("Agent {} approved token for tunnel {}", agent_id, tunnel_id);
+            }
+            Ok(Some(TunnelMessage::ValidateAgentTokenReject { reason })) => {
+                warn!(
+                    "Agent {} rejected token for tunnel {}: {}",
+                    agent_id, tunnel_id, reason
+                );
+                let _ = control_stream
+                    .send_message(&TunnelMessage::ReverseTunnelReject {
+                        tunnel_id: tunnel_id.clone(),
+                        reason: reason,
+                    })
+                    .await;
+                return;
+            }
+            Ok(Some(msg)) => {
+                error!(
+                    "Unexpected response from agent {} during token validation: {:?}",
+                    agent_id, msg
+                );
+                let _ = control_stream
+                    .send_message(&TunnelMessage::ReverseTunnelReject {
+                        tunnel_id: tunnel_id.clone(),
+                        reason: "Unexpected agent response".to_string(),
+                    })
+                    .await;
+                return;
+            }
+            Ok(None) => {
+                error!("Agent {} closed stream during token validation", agent_id);
+                let _ = control_stream
+                    .send_message(&TunnelMessage::ReverseTunnelReject {
+                        tunnel_id: tunnel_id.clone(),
+                        reason: "Agent connection closed".to_string(),
+                    })
+                    .await;
+                return;
+            }
+            Err(e) => {
+                error!(
+                    "Error receiving token validation response from agent {}: {}",
+                    agent_id, e
+                );
+                let _ = control_stream
+                    .send_message(&TunnelMessage::ReverseTunnelReject {
+                        tunnel_id: tunnel_id.clone(),
+                        reason: "Failed to validate token".to_string(),
+                    })
+                    .await;
+                return;
+            }
+        }
+
+        // Token validated! Send ReverseTunnelAccept to client
         if let Err(e) = control_stream
             .send_message(&TunnelMessage::ReverseTunnelAccept {
                 tunnel_id: tunnel_id.clone(),
@@ -498,6 +598,7 @@ impl TunnelHandler {
             agent_connection,
             tunnel_id,
             remote_address,
+            agent_token,
         )
         .await;
     }
@@ -510,6 +611,7 @@ impl TunnelHandler {
         agent_connection: Arc<tunnel_transport_quic::QuicConnection>,
         tunnel_id: String,
         remote_address: String,
+        agent_token: Option<String>,
     ) where
         S: TransportStream + 'static,
     {
@@ -558,6 +660,7 @@ impl TunnelHandler {
                                         tunnel_id: tunnel_id.clone(),
                                         stream_id,
                                         remote_address: remote_address.clone(),
+                                        agent_token: agent_token.clone(),
                                     };
 
                                     if let Err(e) = agent_stream.send_message(&forward_req).await {
@@ -570,12 +673,36 @@ impl TunnelHandler {
                                         Ok(Some(TunnelMessage::ForwardAccept { .. })) => {
                                             debug!("Agent accepted stream {}", stream_id);
                                         }
-                                        Ok(Some(TunnelMessage::ForwardReject { reason, .. })) => {
-                                            warn!("Agent rejected stream {}: {}", stream_id, reason);
+                                        Ok(Some(TunnelMessage::ForwardReject {
+                                            reason, ..
+                                        })) => {
+                                            warn!(
+                                                "Agent rejected stream {}: {}",
+                                                stream_id, reason
+                                            );
+                                            // Send error back to client
+                                            let _ = to_client_tx_main
+                                                .send(TunnelMessage::ReverseClose {
+                                                    tunnel_id: tunnel_id.clone(),
+                                                    stream_id,
+                                                    reason: Some(reason),
+                                                })
+                                                .await;
                                             continue;
                                         }
                                         _ => {
                                             error!("Unexpected agent response for stream {}", stream_id);
+                                            // Send generic error back to client
+                                            let _ = to_client_tx_main
+                                                .send(TunnelMessage::ReverseClose {
+                                                    tunnel_id: tunnel_id.clone(),
+                                                    stream_id,
+                                                    reason: Some(
+                                                        "Agent did not respond with ForwardAccept or ForwardReject"
+                                                            .to_string(),
+                                                    ),
+                                                })
+                                                .await;
                                             continue;
                                         }
                                     }
@@ -616,6 +743,7 @@ impl TunnelHandler {
                                                             let _ = agent_send.send_message(&TunnelMessage::ReverseClose {
                                                                 tunnel_id: tunnel_id_clone2.clone(),
                                                                 stream_id,
+                                                                reason: None,
                                                             }).await;
                                                             break;
                                                         }
@@ -638,6 +766,7 @@ impl TunnelHandler {
                                                             let _ = to_client_tx_clone.send(TunnelMessage::ReverseClose {
                                                                 tunnel_id: tunnel_id_clone2.clone(),
                                                                 stream_id,
+                                                                reason: None,
                                                             }).await;
                                                             break;
                                                         }
@@ -664,6 +793,12 @@ impl TunnelHandler {
                                 }
                                 Err(e) => {
                                     error!("Failed to open agent stream: {}", e);
+                                    // Agent connection is broken, notify client and exit
+                                    let disconnect_msg = TunnelMessage::Disconnect {
+                                        reason: format!("Agent disconnected: {}", e),
+                                    };
+                                    let _ = to_client_tx_main.send(disconnect_msg).await;
+                                    break; // Exit the main loop
                                 }
                             }
                         }
@@ -676,6 +811,7 @@ impl TunnelHandler {
                                 .send(TunnelMessage::ReverseClose {
                                     tunnel_id: tunnel_id.clone(),
                                     stream_id,
+                                    reason: None,
                                 })
                                 .await;
                         }
@@ -753,6 +889,7 @@ impl TunnelHandler {
                                 .send_message(&TunnelMessage::ReverseClose {
                                     tunnel_id: tunnel_id.clone(),
                                     stream_id,
+                                    reason: None,
                                 })
                                 .await;
                             break;
@@ -798,6 +935,7 @@ impl TunnelHandler {
                                 .send_message(&TunnelMessage::ReverseClose {
                                     tunnel_id: tunnel_id.clone(),
                                     stream_id,
+                                    reason: None,
                                 })
                                 .await;
                             break;
@@ -868,7 +1006,7 @@ impl TunnelHandler {
             return;
         };
 
-        // Register the agent
+        // Register the agent (or replace if reconnecting)
         let agent = RegisteredAgent {
             agent_id: agent_id.clone(),
             target_address: target_address.clone(),
@@ -876,20 +1014,30 @@ impl TunnelHandler {
             connected_at: chrono::Utc::now(),
         };
 
-        if let Err(e) = registry.register(agent) {
-            error!("Failed to register agent {}: {}", agent_id, e);
-            let _ = control_stream
-                .send_message(&TunnelMessage::AgentRejected {
-                    reason: format!("Registration failed: {}", e),
-                })
-                .await;
-            return;
+        match registry.register_or_replace(agent) {
+            Ok(old_agent) => {
+                if old_agent.is_some() {
+                    info!(
+                        "✅ Agent re-registered (reconnection): {} (target: {})",
+                        agent_id, target_address
+                    );
+                } else {
+                    info!(
+                        "✅ Agent registered: {} (target: {})",
+                        agent_id, target_address
+                    );
+                }
+            }
+            Err(e) => {
+                error!("Failed to register agent {}: {}", agent_id, e);
+                let _ = control_stream
+                    .send_message(&TunnelMessage::AgentRejected {
+                        reason: format!("Registration failed: {}", e),
+                    })
+                    .await;
+                return;
+            }
         }
-
-        info!(
-            "✅ Agent registered: {} (target: {})",
-            agent_id, target_address
-        );
 
         // Send AgentRegistered response
         if let Err(e) = control_stream
@@ -955,6 +1103,17 @@ impl TunnelHandler {
                     // Receive messages
                     result = control_stream.recv_message() => {
                         match result {
+                            Ok(Some(TunnelMessage::Ping { timestamp })) => {
+                                debug!("Received ping from agent {}, responding with pong", agent_id_heartbeat);
+                                // Respond to agent's heartbeat ping
+                                if let Err(e) = control_stream
+                                    .send_message(&TunnelMessage::Pong { timestamp })
+                                    .await
+                                {
+                                    error!("Failed to send pong to agent {}: {}", agent_id_heartbeat, e);
+                                    break;
+                                }
+                            }
                             Ok(Some(TunnelMessage::Pong { .. })) => {
                                 debug!("Received pong from agent {}", agent_id_heartbeat);
                                 waiting_for_pong = false;

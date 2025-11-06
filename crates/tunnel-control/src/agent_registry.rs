@@ -40,11 +40,49 @@ impl AgentRegistry {
         }
     }
 
-    /// Register a new agent
+    /// Register a new agent or re-register an existing one
+    ///
+    /// If an agent with the same ID is already registered, this will replace it.
+    /// This is useful for handling agent reconnections after temporary network issues.
+    ///
+    /// # Returns
+    ///
+    /// Ok if registration was successful. The return value is None if this was a new registration,
+    /// or Some(old_agent) if an existing agent was replaced.
+    pub fn register_or_replace(
+        &self,
+        agent: RegisteredAgent,
+    ) -> Result<Option<RegisteredAgent>, String> {
+        let mut agents = self.agents.write().unwrap();
+
+        let old_agent = agents.insert(agent.agent_id.clone(), agent.clone());
+
+        if let Some(ref replaced) = old_agent {
+            tracing::info!(
+                agent_id = %agent.agent_id,
+                hostname = %agent.metadata.hostname,
+                target_address = %agent.target_address,
+                old_connected_at = %replaced.connected_at,
+                "Re-registered existing agent (replaced stale connection)"
+            );
+        } else {
+            tracing::info!(
+                agent_id = %agent.agent_id,
+                hostname = %agent.metadata.hostname,
+                target_address = %agent.target_address,
+                "Registered new agent"
+            );
+        }
+
+        Ok(old_agent)
+    }
+
+    /// Register a new agent (fails if already registered)
     ///
     /// # Errors
     ///
     /// Returns an error if an agent with the same ID is already registered.
+    /// Use `register_or_replace` if you want to allow reconnections.
     pub fn register(&self, agent: RegisteredAgent) -> Result<(), String> {
         let mut agents = self.agents.write().unwrap();
 
@@ -313,5 +351,69 @@ mod tests {
         assert_eq!(retrieved.metadata.hostname, "test-host");
         assert_eq!(retrieved.metadata.platform, "macos");
         assert_eq!(retrieved.metadata.version, "2.0.0");
+    }
+
+    #[test]
+    fn test_register_or_replace_new_agent() {
+        let registry = AgentRegistry::new();
+        let agent = create_test_agent("agent1", "192.168.1.100:8080");
+
+        let result = registry.register_or_replace(agent.clone());
+        assert!(result.is_ok());
+
+        let old_agent = result.unwrap();
+        assert!(
+            old_agent.is_none(),
+            "First registration should not replace anything"
+        );
+
+        let retrieved = registry.get("agent1");
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().agent_id, "agent1");
+    }
+
+    #[test]
+    fn test_register_or_replace_existing_agent() {
+        let registry = AgentRegistry::new();
+        let agent1 = create_test_agent("agent1", "192.168.1.100:8080");
+        let agent2 = create_test_agent("agent1", "10.0.0.5:3000");
+
+        // Register first agent
+        registry.register(agent1.clone()).unwrap();
+        assert_eq!(registry.count(), 1);
+
+        // Re-register with new target
+        let result = registry.register_or_replace(agent2.clone());
+        assert!(result.is_ok());
+
+        let old_agent = result.unwrap();
+        assert!(old_agent.is_some(), "Should replace existing agent");
+        assert_eq!(old_agent.unwrap().target_address, "192.168.1.100:8080");
+
+        // Count should still be 1 (replaced, not added)
+        assert_eq!(registry.count(), 1);
+
+        // New agent should be registered with new target
+        let retrieved = registry.get("agent1").unwrap();
+        assert_eq!(retrieved.target_address, "10.0.0.5:3000");
+    }
+
+    #[test]
+    fn test_register_or_replace_allows_reconnections() {
+        let registry = AgentRegistry::new();
+        let agent = create_test_agent("agent1", "192.168.1.100:8080");
+
+        // Simulate multiple reconnections
+        for i in 0..5 {
+            let result = registry.register_or_replace(agent.clone());
+            assert!(result.is_ok(), "Registration {} should succeed", i);
+
+            let count = registry.count();
+            assert_eq!(
+                count, 1,
+                "Should have exactly 1 agent after reconnection {}",
+                i
+            );
+        }
     }
 }

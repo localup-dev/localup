@@ -8,4 +8,4 @@ pub mod access_control;
 pub mod server;
 
 pub use access_control::{AccessControl, PortRange};
-pub use server::{AgentServer, AgentServerConfig};
+pub use server::{AgentServer, AgentServerConfig, RelayConfig};
