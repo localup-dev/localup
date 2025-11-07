@@ -4,10 +4,10 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use localup_agent::{Agent, AgentConfig};
 use std::time::Duration;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
-use tunnel_agent::{Agent, AgentConfig};
 
 /// LocalUp - Tunnel your local services through remote relays
 #[derive(Parser, Debug)]

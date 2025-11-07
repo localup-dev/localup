@@ -12,20 +12,20 @@ This is a **geo-distributed tunnel library** written in Rust that enables develo
 
 This is a Rust workspace with 12 focused crates, each with a single responsibility:
 
-- **`tunnel-proto`**: Protocol definitions, message types, frame format, codec
-- **`tunnel-client`**: Public client library API (main entry point for users)
-- **`tunnel-connection`**: Connection management, QUIC transport, multiplexing, reconnection
-- **`tunnel-auth`**: Authentication and JWT handling
-- **`tunnel-router`**: Routing logic (TCP port-based, SNI-based, HTTP host-based)
-- **`tunnel-server-tcp`**: TCP tunnel server implementation
-- **`tunnel-server-tls`**: TLS/SNI tunnel server with passthrough (no termination)
-- **`tunnel-server-https`**: HTTPS server with TLS termination and HTTP/1.1, HTTP/2
-- **`tunnel-cert`**: Certificate management, ACME/Let's Encrypt integration
-- **`tunnel-control`**: Control plane orchestration, tunnel registry, exit node selection
-- **`tunnel-exit-node`**: Exit node orchestrator that coordinates all server types
-- **`tunnel-cli`**: Command-line tool for users
-- **`tunnel-relay-db`**: Database layer using SeaORM for request/response storage and traffic inspection
-- **`tunnel-api`**: REST API with OpenAPI documentation for managing tunnels and viewing traffic
+- **`localup-proto`**: Protocol definitions, message types, frame format, codec
+- **`localup-client`**: Public client library API (main entry point for users)
+- **`localup-connection`**: Connection management, QUIC transport, multiplexing, reconnection
+- **`localup-auth`**: Authentication and JWT handling
+- **`localup-router`**: Routing logic (TCP port-based, SNI-based, HTTP host-based)
+- **`localup-server-tcp`**: TCP tunnel server implementation
+- **`localup-server-tls`**: TLS/SNI tunnel server with passthrough (no termination)
+- **`localup-server-https`**: HTTPS server with TLS termination and HTTP/1.1, HTTP/2
+- **`localup-cert`**: Certificate management, ACME/Let's Encrypt integration
+- **`localup-control`**: Control plane orchestration, tunnel registry, exit node selection
+- **`localup-exit-node`**: Exit node orchestrator that coordinates all server types
+- **`localup-cli`**: Command-line tool for users
+- **`localup-relay-db`**: Database layer using SeaORM for request/response storage and traffic inspection
+- **`localup-api`**: REST API with OpenAPI documentation for managing tunnels and viewing traffic
 
 ## Common Commands
 
@@ -35,7 +35,7 @@ This is a Rust workspace with 12 focused crates, each with a single responsibili
 cargo build
 
 # Build specific crate
-cargo build -p tunnel-client
+cargo build -p localup-client
 
 # Build with release optimizations
 cargo build --release
@@ -47,10 +47,10 @@ cargo build --release
 cargo test
 
 # Run tests for specific crate
-cargo test -p tunnel-proto
+cargo test -p localup-proto
 
 # Run specific test
-cargo test test_tcp_tunnel_basic
+cargo test test_tcp_localup_basic
 
 # Run tests with output
 cargo test -- --nocapture
@@ -82,16 +82,16 @@ These are the exact commands used in the CI workflow (`.github/workflows/ci.yml`
 ### Running
 ```bash
 # Run exit node binary (defaults to in-memory SQLite)
-cargo run -p tunnel-exit-node
+cargo run -p localup-exit-node
 
 # Run exit node with persistent SQLite
-cargo run -p tunnel-exit-node -- --database-url "sqlite://./tunnel.db?mode=rwc"
+cargo run -p localup-exit-node -- --database-url "sqlite://./tunnel.db?mode=rwc"
 
 # Run exit node with PostgreSQL
-cargo run -p tunnel-exit-node -- --database-url "postgres://user:pass@localhost/tunnel_db"
+cargo run -p localup-exit-node -- --database-url "postgres://user:pass@localhost/localup_db"
 
 # Run CLI tool
-cargo run -p tunnel-cli -- --help
+cargo run -p localup-cli -- --help
 ```
 
 ## Architecture Overview
@@ -183,7 +183,7 @@ Use `thiserror` for custom error types. Each crate defines its own error types w
 Everything uses Tokio. Never use `std::sync` primitives - use `tokio::sync` instead.
 
 ### Message Types
-Protocol messages are defined in `tunnel-proto/src/messages.rs` and serialized using `bincode`. All messages implement `Serialize` and `Deserialize`.
+Protocol messages are defined in `localup-proto/src/messages.rs` and serialized using `bincode`. All messages implement `Serialize` and `Deserialize`.
 
 ### Axum Routing (0.8+)
 
@@ -231,7 +231,7 @@ When addressing warnings, always understand **why** they exist:
 **Test Coverage Requirements**:
 
 - **All crates**: ≥75% test coverage (minimum, non-negotiable)
-- **Core libraries**: >90% test coverage (tunnel-transport, tunnel-proto, tunnel-router, tunnel-auth, tunnel-relay-db)
+- **Core libraries**: >90% test coverage (localup-transport, localup-proto, localup-router, localup-auth, localup-relay-db)
 
 #### Test Types
 
@@ -255,14 +255,14 @@ When addressing warnings, always understand **why** they exist:
 cargo test
 
 # Run tests for specific crate
-cargo test -p tunnel-transport
-cargo test -p tunnel-transport-quic
+cargo test -p localup-transport
+cargo test -p localup-transport-quic
 
 # Run only unit tests
-cargo test --lib -p tunnel-transport
+cargo test --lib -p localup-transport
 
 # Run only integration tests
-cargo test --test integration -p tunnel-transport-quic
+cargo test --test integration -p localup-transport-quic
 
 # Run with output
 cargo test -- --nocapture
@@ -280,10 +280,10 @@ To check test coverage, use `cargo-tarpaulin`:
 cargo install cargo-tarpaulin
 
 # Check coverage for a specific crate
-cargo tarpaulin -p tunnel-transport --out Stdout
+cargo tarpaulin -p localup-transport --out Stdout
 
 # Check coverage for multiple crates
-cargo tarpaulin -p tunnel-transport -p tunnel-transport-quic --out Html
+cargo tarpaulin -p localup-transport -p localup-transport-quic --out Html
 ```
 
 #### Test Guidelines
@@ -295,7 +295,7 @@ cargo tarpaulin -p tunnel-transport -p tunnel-transport-quic --out Html
   - Must test from user perspective (how would a developer use this crate?)
   - Must test real component interactions, not just mocks
   - Must cover error scenarios and edge cases
-  - Example: For `tunnel-control`, test actual TCP connections, message serialization, authentication flows
+  - Example: For `localup-control`, test actual TCP connections, message serialization, authentication flows
 - **Use `#[tokio::test]`** for async tests
 - **For QUIC tests**, certificates in workspace root (`cert.pem`, `key.pem`) are used
 
@@ -325,10 +325,10 @@ Every crate with a public API **must** have integration tests in `tests/` direct
    - Real database operations (with in-memory DB)
    - Real async runtime behavior
 
-**Example Structure** (`crates/tunnel-control/tests/integration.rs`):
+**Example Structure** (`crates/localup-control/tests/integration.rs`):
 ```rust
 #[tokio::test]
-async fn test_basic_http_tunnel_connection() {
+async fn test_basic_http_localup_connection() {
     // Setup: Start real TCP server
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -474,7 +474,7 @@ mod tests {
 }
 
 // Integration tests in tests/integration.rs
-use tunnel_transport::*;
+use localup_transport::*;
 
 #[tokio::test]
 async fn test_end_to_end_flow() {
@@ -487,49 +487,49 @@ async fn test_end_to_end_flow() {
 Different crate types have different coverage requirements based on their criticality:
 
 **Tier 1: Core Infrastructure (≥80% required)**
-- `tunnel-transport` - Transport abstraction layer
-- `tunnel-proto` - Protocol definitions
-- `tunnel-router` - Routing logic
-- `tunnel-auth` - Authentication/authorization
-- `tunnel-relay-db` - Database layer (CRITICAL: currently 0%)
-- `tunnel-exit-node` - Orchestration (CRITICAL: currently 0%)
+- `localup-transport` - Transport abstraction layer
+- `localup-proto` - Protocol definitions
+- `localup-router` - Routing logic
+- `localup-auth` - Authentication/authorization
+- `localup-relay-db` - Database layer (CRITICAL: currently 0%)
+- `localup-exit-node` - Orchestration (CRITICAL: currently 0%)
 
 **Tier 2: Server Components (≥60% required)**
-- `tunnel-server-tcp` - TCP server
-- `tunnel-server-tls` - TLS/SNI server
-- `tunnel-server-https` - HTTPS server
-- `tunnel-control` - Control plane
-- `tunnel-connection` - Connection management
+- `localup-server-tcp` - TCP server
+- `localup-server-tls` - TLS/SNI server
+- `localup-server-https` - HTTPS server
+- `localup-control` - Control plane
+- `localup-connection` - Connection management
 
 **Tier 3: Client & Tools (≥50% required)**
-- `tunnel-client` - Client library
-- `tunnel-cli` - CLI tool
-- `tunnel-cert` - Certificate management
-- `tunnel-api` - REST API
+- `localup-client` - Client library
+- `localup-cli` - CLI tool
+- `localup-cert` - Certificate management
+- `localup-api` - REST API
 
 **Current Status (as of last check)**:
 
 | Crate | Current | Target | Status |
 |-------|---------|--------|--------|
-| tunnel-transport | 95% | 80% | ✅ Exceeds |
-| tunnel-transport-quic | 72% | 75% | ⚠️ Close |
-| tunnel-router | 80% | 80% | ✅ Meets |
-| tunnel-proto | 75% | 80% | ⚠️ Close |
-| tunnel-auth | 80% | 80% | ✅ Meets |
-| tunnel-cli | 85% | 50% | ✅ Exceeds |
-| tunnel-cert | 70% | 50% | ✅ Exceeds |
-| **tunnel-relay-db** | **0%** | **80%** | ❌ **BLOCKER** |
-| **tunnel-exit-node** | **0%** | **80%** | ❌ **BLOCKER** |
-| tunnel-control | 20% | 60% | ❌ Insufficient |
-| tunnel-connection | 15% | 60% | ❌ Insufficient |
-| tunnel-client | 50% | 50% | ✅ Meets |
-| tunnel-api | 25% | 50% | ❌ Insufficient |
+| localup-transport | 95% | 80% | ✅ Exceeds |
+| localup-transport-quic | 72% | 75% | ⚠️ Close |
+| localup-router | 80% | 80% | ✅ Meets |
+| localup-proto | 75% | 80% | ⚠️ Close |
+| localup-auth | 80% | 80% | ✅ Meets |
+| localup-cli | 85% | 50% | ✅ Exceeds |
+| localup-cert | 70% | 50% | ✅ Exceeds |
+| **localup-relay-db** | **0%** | **80%** | ❌ **BLOCKER** |
+| **localup-exit-node** | **0%** | **80%** | ❌ **BLOCKER** |
+| localup-control | 20% | 60% | ❌ Insufficient |
+| localup-connection | 15% | 60% | ❌ Insufficient |
+| localup-client | 50% | 50% | ✅ Meets |
+| localup-api | 25% | 50% | ❌ Insufficient |
 
 **Total workspace tests: 103** (102 passing, 1 failing benchmark)
 
 ## Important Constants
 
-- `PROTOCOL_VERSION`: Current protocol version (defined in `tunnel-proto`)
+- `PROTOCOL_VERSION`: Current protocol version (defined in `localup-proto`)
 - `MAX_FRAME_SIZE`: 16MB maximum frame size
 - `CONTROL_STREAM_ID`: Stream 0 reserved for control messages
 
@@ -552,7 +552,7 @@ The system uses **SeaORM** for database operations, supporting multiple backends
 ### Exit Nodes (Production)
 - **PostgreSQL with TimescaleDB** (recommended): Optimized for time-series data
   ```bash
-  --database-url "postgres://user:pass@localhost/tunnel_db"
+  --database-url "postgres://user:pass@localhost/localup_db"
   ```
 - **PostgreSQL**: Standard relational database without TimescaleDB
 - **SQLite3**: Lightweight option for development or small deployments
@@ -564,7 +564,7 @@ The system uses **SeaORM** for database operations, supporting multiple backends
 - **In-memory SQLite** (default): No persistence, data lost on restart
   ```bash
   # Automatic if --database-url not specified
-  cargo run -p tunnel-exit-node
+  cargo run -p localup-exit-node
   ```
 
 ### Clients
@@ -575,7 +575,7 @@ The system uses **SeaORM** for database operations, supporting multiple backends
 
 ### Schema
 
-The `tunnel-relay-db` crate contains:
+The `localup-relay-db` crate contains:
 - **Entities**: SeaORM models (e.g., `CapturedRequest`)
 - **Migrations**: Automatic schema setup with `sea-orm-migration`
 - **TimescaleDB support**: Automatic hypertable creation for PostgreSQL (if extension available)
@@ -584,14 +584,14 @@ Migrations run automatically on startup. The `captured_requests` table stores:
 - Full HTTP request/response data (headers, body, status)
 - Timestamps for time-series queries
 - Latency metrics
-- Indexes on `tunnel_id` and `created_at`
+- Indexes on `localup_id` and `created_at`
 
 ### Reconnection Support
 
 Both port allocations (TCP) and route registrations (HTTP/HTTPS subdomains) use a **reservation system** with TTL:
 
 - **On disconnect**: Resources are marked as "reserved" (default: 5 minutes TTL)
-- **On reconnect**: If the same `tunnel_id` reconnects within the TTL window, it receives the same port/subdomain
+- **On reconnect**: If the same `localup_id` reconnects within the TTL window, it receives the same port/subdomain
 - **After TTL expires**: A background cleanup task frees the resources for reuse
 
 This ensures clients can reconnect with the same public URLs after temporary network interruptions.
@@ -600,18 +600,18 @@ This ensures clients can reconnect with the same public URLs after temporary net
 
 ### Adding a New Feature
 1. Identify which crate(s) the feature belongs to
-2. Update protocol messages if needed (`tunnel-proto`)
+2. Update protocol messages if needed (`localup-proto`)
 3. Implement in appropriate crate(s)
 4. Add unit tests in the same file
 5. Add integration tests in `tests/` directory
 6. Update documentation
 
 ### Adding a New Protocol
-1. Define message types in `tunnel-proto/src/messages.rs`
-2. Add routing logic in `tunnel-router`
-3. Create new server crate `tunnel-server-{protocol}`
+1. Define message types in `localup-proto/src/messages.rs`
+2. Add routing logic in `localup-router`
+3. Create new server crate `localup-server-{protocol}`
 4. Integrate with exit node orchestrator
-5. Add client-side support in `tunnel-client`
+5. Add client-side support in `localup-client`
 
 ## Web Applications
 
@@ -799,32 +799,32 @@ Current milestone: Phase 1-2 (Core protocol and TCP tunnel implementation)
 - Support: 1000+ concurrent connections per tunnel
 - Throughput: 10,000+ requests/second per exit node
 
-## tunnel-lib: Public API Crate
+## localup-lib: Public API Crate
 
-**`tunnel-lib`** is the high-level public API crate for Rust applications that want to integrate tunnel functionality. It re-exports all the focused crates, providing a unified entry point.
+**`localup-lib`** is the high-level public API crate for Rust applications that want to integrate tunnel functionality. It re-exports all the focused crates, providing a unified entry point.
 
 ### Purpose
 
-- **For tunnel clients**: Use `TunnelClient` directly from `tunnel-lib` instead of importing from `tunnel-client`
+- **For tunnel clients**: Use `TunnelClient` directly from `localup-lib` instead of importing from `localup-client`
 - **For custom relays**: Build custom relay servers using the server components (`TunnelHandler`, `HttpsServer`, etc.)
-- **Single dependency**: Applications only need to add `tunnel-lib` instead of multiple crate dependencies
+- **Single dependency**: Applications only need to add `localup-lib` instead of multiple crate dependencies
 
 ### Maintenance Guidelines
 
-**IMPORTANT**: `tunnel-lib` must be kept up-to-date whenever you make changes to other crates. This is a **MANDATORY** requirement.
+**IMPORTANT**: `localup-lib` must be kept up-to-date whenever you make changes to other crates. This is a **MANDATORY** requirement.
 
-1. **When adding new public types to any crate**, add the re-export to [tunnel-lib/src/lib.rs](crates/tunnel-lib/src/lib.rs)
+1. **When adding new public types to any crate**, add the re-export to [localup-lib/src/lib.rs](crates/localup-lib/src/lib.rs)
 2. **When removing/renaming public types**, update the re-exports accordingly
-3. **After any API changes**, run `cargo build -p tunnel-lib` to ensure it compiles
+3. **After any API changes**, run `cargo build -p localup-lib` to ensure it compiles
 4. **Only re-export public types** - do not re-export internal/private types
 
 ### Structure
 
 ```rust
-// tunnel-lib/src/lib.rs
-pub use tunnel_client::{TunnelClient, TunnelConfig, ...};  // Client API
-pub use tunnel_control::{TunnelHandler, ...};               // Relay API
-pub use tunnel_server_https::{HttpsServer, ...};           // Server components
+// localup-lib/src/lib.rs
+pub use localup_client::{TunnelClient, TunnelConfig, ...};  // Client API
+pub use localup_control::{TunnelHandler, ...};               // Relay API
+pub use localup_server_https::{HttpsServer, ...};           // Server components
 // ... etc
 ```
 
@@ -833,10 +833,10 @@ pub use tunnel_server_https::{HttpsServer, ...};           // Server components
 ```rust
 // Cargo.toml
 [dependencies]
-tunnel-lib = { path = "../tunnel-lib" }
+localup-lib = { path = "../localup-lib" }
 
 // main.rs
-use tunnel_lib::{TunnelClient, ProtocolConfig, TunnelConfig};
+use localup_lib::{TunnelClient, ProtocolConfig, TunnelConfig};
 
 let config = TunnelConfig {
     relay_addr: "localhost:4443".to_string(),
@@ -854,11 +854,11 @@ client.wait().await?;
 
 ### Verification
 
-Always verify `tunnel-lib` compiles after making changes:
+Always verify `localup-lib` compiles after making changes:
 
 ```bash
-cargo build -p tunnel-lib
+cargo build -p localup-lib
 cargo build --all-targets  # Ensure entire workspace compiles
 ```
 
-**Zero warnings policy applies** to `tunnel-lib` just like all other crates.
+**Zero warnings policy applies** to `localup-lib` just like all other crates.

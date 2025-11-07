@@ -295,7 +295,7 @@ When running `localup daemon start`, you'll see:
 ```
 
 **Log Prefixes**:
-- `[tunnel-name]` identifies which tunnel the log belongs to
+- `[localup-name]` identifies which tunnel the log belongs to
 - `✅` indicates success
 - `❌` indicates errors
 - `🔄` indicates reconnection attempts

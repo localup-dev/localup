@@ -1,0 +1,73 @@
+[package]
+name = "localup-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Internal dependencies
+localup-proto = { path = "../localup-proto" }
+localup-connection = { path = "../localup-connection" }
+localup-auth = { path = "../localup-auth" }
+localup-transport = { path = "../localup-transport" }
+localup-transport-quic = { path = "../localup-transport-quic" }
+localup-relay-db = { path = "../localup-relay-db", optional = true }
+
+# Database (optional)
+sea-orm = { workspace = true, optional = true }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+
+# Utilities
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bincode = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+bytes = { workspace = true }
+scopeguard = "1.2"
+
+# HTTP client for replay
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+
+# HTTP server framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true, features = ["cors"] }
+
+# OpenAPI / Swagger
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+chrono = { workspace = true }
+
+# RFC 7807/9457 Problem Details
+problem_details = { workspace = true }
+
+# Metrics
+hdrhistogram = "7.5"
+
+# Static asset embedding
+rust-embed = "8.5"
+mime_guess = "2.0"
+
+[features]
+default = []
+# Enable database-backed metrics storage
+db-metrics = ["localup-relay-db", "sea-orm"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tokio-tungstenite = "0.21"
+futures-util = "0.3"
+tracing-subscriber = "0.3"
+rustls = { workspace = true }
+tokio-rustls = "0.26"
+rcgen = "0.12"
+hyper = { workspace = true }
+hyper-util = { workspace = true }

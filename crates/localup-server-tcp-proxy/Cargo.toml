@@ -1,0 +1,19 @@
+[package]
+name = "localup-server-tcp-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+localup-proto = { path = "../localup-proto" }
+localup-router = { path = "../localup-router" }
+localup-control = { path = "../localup-control" }
+localup-relay-db = { path = "../localup-relay-db" }
+localup-transport = { path = "../localup-transport" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+sea-orm = { workspace = true }

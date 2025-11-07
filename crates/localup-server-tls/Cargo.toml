@@ -1,0 +1,16 @@
+[package]
+name = "localup-server-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+localup-proto = { path = "../localup-proto" }
+localup-router = { path = "../localup-router" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true}
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

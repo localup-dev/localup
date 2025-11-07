@@ -1,0 +1,26 @@
+[package]
+name = "localup-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# UUID
+uuid = { workspace = true }
+
+# System information
+hostname = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

@@ -22,7 +22,7 @@ vim my-custom-relays.yaml
 
 ```bash
 # Build with your custom relay config
-LOCALUP_RELAYS_CONFIG=my-custom-relays.yaml cargo build --release -p tunnel-cli
+LOCALUP_RELAYS_CONFIG=my-custom-relays.yaml cargo build --release -p localup-cli
 
 # The binary will be at: target/release/localup
 ```
@@ -32,7 +32,7 @@ LOCALUP_RELAYS_CONFIG=my-custom-relays.yaml cargo build --release -p tunnel-cli
 The build will show which configuration file was used:
 
 ```
-warning: tunnel-client@0.1.0: 📡 Using relay configuration from: /path/to/my-custom-relays.yaml
+warning: localup-client@0.1.0: 📡 Using relay configuration from: /path/to/my-custom-relays.yaml
 ```
 
 ## Configuration File Format
@@ -109,7 +109,7 @@ relays:
 
 Build:
 ```bash
-LOCALUP_RELAYS_CONFIG=private-relays.yaml cargo build --release -p tunnel-cli
+LOCALUP_RELAYS_CONFIG=private-relays.yaml cargo build --release -p localup-cli
 ```
 
 ### Multi-Region Deployment
@@ -143,13 +143,13 @@ relays:
 
 **Production:**
 ```bash
-LOCALUP_RELAYS_CONFIG=relays-production.yaml cargo build --release -p tunnel-cli
+LOCALUP_RELAYS_CONFIG=relays-production.yaml cargo build --release -p localup-cli
 mv target/release/localup localup-production
 ```
 
 **Staging:**
 ```bash
-LOCALUP_RELAYS_CONFIG=relays-staging.yaml cargo build --release -p tunnel-cli
+LOCALUP_RELAYS_CONFIG=relays-staging.yaml cargo build --release -p localup-cli
 mv target/release/localup localup-staging
 ```
 
@@ -174,7 +174,7 @@ fi
 echo "🔨 Building LocalUp with relay config: $RELAY_CONFIG"
 
 # Build with custom relay config
-LOCALUP_RELAYS_CONFIG="$RELAY_CONFIG" cargo build --release -p tunnel-cli
+LOCALUP_RELAYS_CONFIG="$RELAY_CONFIG" cargo build --release -p localup-cli
 
 # Get config name for output
 CONFIG_NAME=$(basename "$RELAY_CONFIG" .yaml)
@@ -205,10 +205,10 @@ The relay configuration is embedded at compile time, so it cannot be inspected f
 
 ```bash
 # Build a test binary
-LOCALUP_RELAYS_CONFIG=my-relays.yaml cargo build -p tunnel-cli
+LOCALUP_RELAYS_CONFIG=my-relays.yaml cargo build -p localup-cli
 
 # Run tests to verify config is valid
-cargo test -p tunnel-client --lib relay_discovery
+cargo test -p localup-client --lib relay_discovery
 
 # Test the CLI (won't connect without running relay, but shows it's embedded)
 ./target/debug/localup --help
@@ -249,7 +249,7 @@ Set LOCALUP_RELAYS_CONFIG environment variable to specify a custom path.
 **Solution:** Ensure the file exists and the path is correct:
 ```bash
 ls -l my-relays.yaml
-LOCALUP_RELAYS_CONFIG="$(pwd)/my-relays.yaml" cargo build --release -p tunnel-cli
+LOCALUP_RELAYS_CONFIG="$(pwd)/my-relays.yaml" cargo build --release -p localup-cli
 ```
 
 ### Error: Failed to parse relay configuration
@@ -265,13 +265,13 @@ The build system automatically detects changes to the relay configuration:
 
 ```bash
 # First build
-LOCALUP_RELAYS_CONFIG=my-relays.yaml cargo build --release -p tunnel-cli
+LOCALUP_RELAYS_CONFIG=my-relays.yaml cargo build --release -p localup-cli
 
 # Edit the config
 vim my-relays.yaml
 
 # Rebuild (automatically detects changes)
-LOCALUP_RELAYS_CONFIG=my-relays.yaml cargo build --release -p tunnel-cli
+LOCALUP_RELAYS_CONFIG=my-relays.yaml cargo build --release -p localup-cli
 ```
 
 ## Security Considerations
@@ -384,7 +384,7 @@ selection_policies:
 
 Build development version:
 ```bash
-LOCALUP_RELAYS_CONFIG=relays-dev.yaml cargo build -p tunnel-cli
+LOCALUP_RELAYS_CONFIG=relays-dev.yaml cargo build -p localup-cli
 ```
 
 ## CI/CD Integration
@@ -438,7 +438,7 @@ jobs:
       - name: Build with Custom Config
         env:
           LOCALUP_RELAYS_CONFIG: custom-relays.yaml
-        run: cargo build --release -p tunnel-cli
+        run: cargo build --release -p localup-cli
 
       - name: Upload Binary
         uses: actions/upload-artifact@v3

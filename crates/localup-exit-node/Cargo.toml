@@ -1,0 +1,36 @@
+[package]
+name = "localup-exit-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "localup-relay"
+path = "src/main.rs"
+
+[dependencies]
+localup-control = { path = "../localup-control" }
+localup-server-tcp = { path = "../localup-server-tcp" }
+localup-server-tcp-proxy = { path = "../localup-server-tcp-proxy" }
+# localup-server-tls = { path = "../localup-server-tls" }  # TLS SNI passthrough - TODO
+localup-server-https = { path = "../localup-server-https" }
+localup-router = { path = "../localup-router" }
+localup-auth = { path = "../localup-auth" }
+# localup-api = { path = "../localup-api" }  # TODO: Re-enable after testing
+localup-relay-db = { path = "../localup-relay-db" }
+localup-transport = { path = "../localup-transport" }
+localup-transport-quic = { path = "../localup-transport-quic" }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+chrono = { workspace = true }
+rustls = { workspace = true }
+rust-embed = "8.5.0"
+mime_guess = "2.0"
+
+[build-dependencies]
+chrono = { workspace = true }

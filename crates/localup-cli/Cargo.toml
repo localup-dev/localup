@@ -1,0 +1,31 @@
+[package]
+name = "localup-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "localup"
+path = "src/main.rs"
+
+[dependencies]
+localup-client = { path = "../localup-client" }
+localup-proto = { path = "../localup-proto" }
+localup-router = { path = "../localup-router" }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = "5.0"
+
+[build-dependencies]
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3.13"

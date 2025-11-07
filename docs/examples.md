@@ -437,7 +437,7 @@ spec:
         - name: TUNNEL_AUTH_TOKEN
           valueFrom:
             secretKeyRef:
-              name: tunnel-secret
+              name: localup-secret
               key: token
         - name: RELAY
           value: "tunnel.kfs.es:4443"

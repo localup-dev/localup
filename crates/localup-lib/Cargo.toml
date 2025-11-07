@@ -1,0 +1,42 @@
+[package]
+name = "localup-lib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+localup-proto = { path = "../localup-proto" }
+localup-client = { path = "../localup-client", features = ["db-metrics"] }
+localup-auth = { path = "../localup-auth" }
+localup-router = { path = "../localup-router" }
+localup-server-tcp = { path = "../localup-server-tcp" }
+localup-server-tcp-proxy = { path = "../localup-server-tcp-proxy" }
+localup-server-tls = { path = "../localup-server-tls" }
+localup-server-https = { path = "../localup-server-https" }
+localup-cert = { path = "../localup-cert" }
+localup-control = { path = "../localup-control" }
+localup-transport = { path = "../localup-transport" }
+localup-transport-quic = { path = "../localup-transport-quic" }
+localup-relay-db = { path = "../localup-relay-db", optional = true }
+
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[features]
+default = ["db"]
+db = ["localup-relay-db"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+tracing-subscriber = { workspace = true }
+bincode = { workspace = true }
+uuid = { version = "1.11", features = ["v4"] }
+rcgen = "0.13"
+futures = { workspace = true }
+localup-transport = { path = "../localup-transport" }
+localup-transport-quic = { path = "../localup-transport-quic" }

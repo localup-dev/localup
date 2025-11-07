@@ -1814,10 +1814,30 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "localup-agent",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "tunnel-agent",
+ "uuid",
+]
+
+[[package]]
+name = "localup-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "ipnetwork",
+ "localup-auth",
+ "localup-proto",
+ "localup-transport",
+ "localup-transport-quic",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -1829,14 +1849,380 @@ dependencies = [
  "chrono",
  "clap",
  "ipnet",
+ "localup-agent",
+ "localup-proto",
+ "localup-transport",
+ "localup-transport-quic",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "tunnel-agent",
- "tunnel-proto",
- "tunnel-transport",
- "tunnel-transport-quic",
+]
+
+[[package]]
+name = "localup-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "localup-auth",
+ "localup-control",
+ "localup-proto",
+ "localup-relay-db",
+ "mime_guess",
+ "rust-embed",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "utoipa",
+ "utoipa-axum",
+ "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
+name = "localup-auth"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.21.7",
+ "chrono",
+ "clap",
+ "jsonwebtoken",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "localup-cert"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "instant-acme",
+ "rand 0.8.5",
+ "rcgen 0.13.2",
+ "rustls 0.23.32",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "localup-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dirs",
+ "localup-client",
+ "localup-proto",
+ "localup-router",
+ "rustls 0.23.32",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "localup-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bincode",
+ "bytes",
+ "chrono",
+ "futures",
+ "futures-util",
+ "hdrhistogram",
+ "hyper 1.7.0",
+ "hyper-util",
+ "localup-auth",
+ "localup-connection",
+ "localup-proto",
+ "localup-relay-db",
+ "localup-transport",
+ "localup-transport-quic",
+ "mime_guess",
+ "problem_details",
+ "rcgen 0.12.1",
+ "reqwest",
+ "rust-embed",
+ "rustls 0.23.32",
+ "scopeguard",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-stream",
+ "tokio-tungstenite 0.21.0",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
+name = "localup-connection"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "localup-proto",
+ "quinn",
+ "rustls 0.23.32",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "localup-control"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "chrono",
+ "dashmap",
+ "jsonwebtoken",
+ "localup-auth",
+ "localup-cert",
+ "localup-proto",
+ "localup-router",
+ "localup-transport",
+ "localup-transport-quic",
+ "quinn",
+ "rustls 0.23.32",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "localup-exit-node"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "localup-auth",
+ "localup-control",
+ "localup-relay-db",
+ "localup-router",
+ "localup-server-https",
+ "localup-server-tcp",
+ "localup-server-tcp-proxy",
+ "localup-transport",
+ "localup-transport-quic",
+ "mime_guess",
+ "rust-embed",
+ "rustls 0.23.32",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "localup-lib"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "futures",
+ "localup-auth",
+ "localup-cert",
+ "localup-client",
+ "localup-control",
+ "localup-proto",
+ "localup-relay-db",
+ "localup-router",
+ "localup-server-https",
+ "localup-server-tcp",
+ "localup-server-tcp-proxy",
+ "localup-server-tls",
+ "localup-transport",
+ "localup-transport-quic",
+ "rcgen 0.13.2",
+ "rustls 0.23.32",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "localup-proto"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "bytes",
+ "hostname",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "localup-relay-db"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "localup-router"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "localup-proto",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "localup-server-https"
+version = "0.1.0"
+dependencies = [
+ "http 1.3.1",
+ "hyper 1.7.0",
+ "localup-cert",
+ "localup-control",
+ "localup-proto",
+ "localup-router",
+ "localup-transport",
+ "localup-transport-quic",
+ "rand 0.8.5",
+ "rustls 0.23.32",
+ "rustls-pemfile 2.2.0",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tracing",
+]
+
+[[package]]
+name = "localup-server-tcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.21.7",
+ "bytes",
+ "chrono",
+ "localup-connection",
+ "localup-control",
+ "localup-proto",
+ "localup-relay-db",
+ "localup-router",
+ "localup-transport",
+ "localup-transport-quic",
+ "rand 0.8.5",
+ "sea-orm",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "localup-server-tcp-proxy"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "localup-control",
+ "localup-proto",
+ "localup-relay-db",
+ "localup-router",
+ "localup-transport",
+ "sea-orm",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "localup-server-tls"
+version = "0.1.0"
+dependencies = [
+ "localup-proto",
+ "localup-router",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "localup-transport"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "localup-proto",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "localup-transport-quic"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "localup-cert",
+ "localup-proto",
+ "localup-transport",
+ "quinn",
+ "rustls 0.23.32",
+ "rustls-pemfile 2.2.0",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -4050,392 +4436,6 @@ dependencies = [
  "sha1",
  "thiserror 2.0.17",
  "utf-8",
-]
-
-[[package]]
-name = "tunnel-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "futures",
- "ipnetwork",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tunnel-auth",
- "tunnel-proto",
- "tunnel-transport",
- "tunnel-transport-quic",
- "uuid",
-]
-
-[[package]]
-name = "tunnel-api"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "mime_guess",
- "rust-embed",
- "sea-orm",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tunnel-auth",
- "tunnel-control",
- "tunnel-proto",
- "tunnel-relay-db",
- "utoipa",
- "utoipa-axum",
- "utoipa-swagger-ui",
- "uuid",
-]
-
-[[package]]
-name = "tunnel-auth"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.21.7",
- "chrono",
- "clap",
- "jsonwebtoken",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "tunnel-cert"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "instant-acme",
- "rand 0.8.5",
- "rcgen 0.13.2",
- "rustls 0.23.32",
- "rustls-pemfile 2.2.0",
- "serde",
- "thiserror 1.0.69",
- "time",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "tunnel-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "dirs",
- "rustls 0.23.32",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tunnel-client",
- "tunnel-proto",
- "tunnel-router",
-]
-
-[[package]]
-name = "tunnel-client"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bincode",
- "bytes",
- "chrono",
- "futures",
- "futures-util",
- "hdrhistogram",
- "hyper 1.7.0",
- "hyper-util",
- "mime_guess",
- "problem_details",
- "rcgen 0.12.1",
- "reqwest",
- "rust-embed",
- "rustls 0.23.32",
- "scopeguard",
- "sea-orm",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 1.0.69",
- "tokio",
- "tokio-rustls 0.26.4",
- "tokio-stream",
- "tokio-tungstenite 0.21.0",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "tunnel-auth",
- "tunnel-connection",
- "tunnel-proto",
- "tunnel-relay-db",
- "tunnel-transport",
- "tunnel-transport-quic",
- "utoipa",
- "utoipa-swagger-ui",
- "uuid",
-]
-
-[[package]]
-name = "tunnel-connection"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "futures",
- "quinn",
- "rustls 0.23.32",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tunnel-proto",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "tunnel-control"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "chrono",
- "dashmap",
- "jsonwebtoken",
- "quinn",
- "rustls 0.23.32",
- "serde",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tunnel-auth",
- "tunnel-cert",
- "tunnel-proto",
- "tunnel-router",
- "tunnel-transport",
- "tunnel-transport-quic",
-]
-
-[[package]]
-name = "tunnel-exit-node"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "mime_guess",
- "rust-embed",
- "rustls 0.23.32",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tunnel-auth",
- "tunnel-control",
- "tunnel-relay-db",
- "tunnel-router",
- "tunnel-server-https",
- "tunnel-server-tcp",
- "tunnel-server-tcp-proxy",
- "tunnel-transport",
- "tunnel-transport-quic",
-]
-
-[[package]]
-name = "tunnel-lib"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bincode",
- "futures",
- "rcgen 0.13.2",
- "rustls 0.23.32",
- "thiserror 1.0.69",
- "tokio",
- "tokio-rustls 0.26.4",
- "tracing",
- "tracing-subscriber",
- "tunnel-auth",
- "tunnel-cert",
- "tunnel-client",
- "tunnel-control",
- "tunnel-proto",
- "tunnel-relay-db",
- "tunnel-router",
- "tunnel-server-https",
- "tunnel-server-tcp",
- "tunnel-server-tcp-proxy",
- "tunnel-server-tls",
- "tunnel-transport",
- "tunnel-transport-quic",
- "uuid",
-]
-
-[[package]]
-name = "tunnel-proto"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "bytes",
- "hostname",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "tunnel-relay-db"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "sea-orm",
- "sea-orm-migration",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "tunnel-router"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "chrono",
- "dashmap",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tunnel-proto",
-]
-
-[[package]]
-name = "tunnel-server-https"
-version = "0.1.0"
-dependencies = [
- "http 1.3.1",
- "hyper 1.7.0",
- "rand 0.8.5",
- "rustls 0.23.32",
- "rustls-pemfile 2.2.0",
- "thiserror 1.0.69",
- "tokio",
- "tokio-rustls 0.26.4",
- "tracing",
- "tunnel-cert",
- "tunnel-control",
- "tunnel-proto",
- "tunnel-router",
- "tunnel-transport",
- "tunnel-transport-quic",
-]
-
-[[package]]
-name = "tunnel-server-tcp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.21.7",
- "bytes",
- "chrono",
- "rand 0.8.5",
- "sea-orm",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tunnel-connection",
- "tunnel-control",
- "tunnel-proto",
- "tunnel-relay-db",
- "tunnel-router",
- "tunnel-transport",
- "tunnel-transport-quic",
- "uuid",
-]
-
-[[package]]
-name = "tunnel-server-tcp-proxy"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "sea-orm",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tunnel-control",
- "tunnel-proto",
- "tunnel-relay-db",
- "tunnel-router",
- "tunnel-transport",
- "uuid",
-]
-
-[[package]]
-name = "tunnel-server-tls"
-version = "0.1.0"
-dependencies = [
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tunnel-proto",
- "tunnel-router",
-]
-
-[[package]]
-name = "tunnel-transport"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "futures",
- "thiserror 1.0.69",
- "tokio",
- "tunnel-proto",
-]
-
-[[package]]
-name = "tunnel-transport-quic"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytes",
- "quinn",
- "rustls 0.23.32",
- "rustls-pemfile 2.2.0",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "tunnel-cert",
- "tunnel-proto",
- "tunnel-transport",
- "uuid",
- "webpki-roots 0.26.11",
 ]
 
 [[package]]

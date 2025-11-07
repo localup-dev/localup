@@ -1,0 +1,30 @@
+[package]
+name = "localup-agent"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "localup-agent"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+localup-proto = { path = "../localup-proto" }
+localup-transport = { path = "../localup-transport" }
+localup-transport-quic = { path = "../localup-transport-quic" }
+localup-auth = { path = "../localup-auth" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+futures = { workspace = true }
+
+# External dependencies
+ipnetwork = "0.20"
+uuid = { version = "1.0", features = ["v4"] }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

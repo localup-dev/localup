@@ -4,16 +4,16 @@
 //! Accepts client connections and forwards to internal targets with access control.
 
 use crate::access_control::AccessControl;
+use localup_agent::TcpForwarder;
+use localup_proto::TunnelMessage;
+use localup_transport::{TransportConnection, TransportListener, TransportStream};
+use localup_transport_quic::{QuicConfig, QuicListener};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, error, info, warn};
-use tunnel_agent::TcpForwarder;
-use tunnel_proto::TunnelMessage;
-use tunnel_transport::{TransportConnection, TransportListener, TransportStream};
-use tunnel_transport_quic::{QuicConfig, QuicListener};
 
 /// Relay connection configuration
 /// When set, this agent server will connect to a relay server and register itself
@@ -127,7 +127,7 @@ impl AgentServer {
                     );
 
                     // Create agent configuration for relay connection
-                    let agent_config = tunnel_agent::AgentConfig {
+                    let agent_config = localup_agent::AgentConfig {
                         agent_id: relay_config.server_id.clone(),
                         relay_addr: format!("{}", relay_config.relay_addr),
                         auth_token: relay_config.relay_token.clone().unwrap_or_default(),
@@ -137,7 +137,7 @@ impl AgentServer {
                         jwt_secret: jwt_secret.clone(),
                     };
 
-                    match tunnel_agent::Agent::new(agent_config) {
+                    match localup_agent::Agent::new(agent_config) {
                         Ok(mut agent) => {
                             info!("Agent created successfully, starting relay connection");
                             // Reset backoff on successful connection
@@ -204,7 +204,7 @@ impl AgentServer {
 
     /// Handle a single client connection
     async fn handle_connection(
-        connection: Arc<tunnel_transport_quic::QuicConnection>,
+        connection: Arc<localup_transport_quic::QuicConnection>,
         peer_addr: SocketAddr,
         config: AgentServerConfig,
         forwarder: Arc<TcpForwarder>,
@@ -286,8 +286,8 @@ impl AgentServer {
 
     /// Handle agent forwarding requests
     async fn handle_agent_forwarding(
-        mut control_stream: tunnel_transport_quic::QuicStream,
-        _connection: Arc<tunnel_transport_quic::QuicConnection>,
+        mut control_stream: localup_transport_quic::QuicStream,
+        _connection: Arc<localup_transport_quic::QuicConnection>,
         agent_id: String,
         _target_addr: SocketAddr,
         _forwarder: Arc<TcpForwarder>,
@@ -333,14 +333,14 @@ impl AgentServer {
     async fn handle_tcp_connection(
         tcp_stream: TcpStream,
         mut rx: tokio::sync::mpsc::Receiver<TunnelMessage>,
-        control_send: Arc<tokio::sync::Mutex<tunnel_transport_quic::QuicSendHalf>>,
-        tunnel_id: String,
+        control_send: Arc<tokio::sync::Mutex<localup_transport_quic::QuicSendHalf>>,
+        localup_id: String,
         stream_id: u32,
     ) -> anyhow::Result<()> {
         let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
         // Task: TCP → Client
-        let tunnel_id_clone = tunnel_id.clone();
+        let localup_id_clone = localup_id.clone();
         let control_send_clone = control_send.clone();
         let tcp_to_client = tokio::spawn(async move {
             let mut buffer = vec![0u8; 8192];
@@ -351,7 +351,7 @@ impl AgentServer {
                         let mut send = control_send_clone.lock().await;
                         let _ = send
                             .send_message(&TunnelMessage::ReverseClose {
-                                tunnel_id: tunnel_id_clone.clone(),
+                                localup_id: localup_id_clone.clone(),
                                 stream_id,
                                 reason: None,
                             })
@@ -363,7 +363,7 @@ impl AgentServer {
                         let mut send = control_send_clone.lock().await;
                         if let Err(e) = send
                             .send_message(&TunnelMessage::ReverseData {
-                                tunnel_id: tunnel_id_clone.clone(),
+                                localup_id: localup_id_clone.clone(),
                                 stream_id,
                                 data: buffer[..n].to_vec(),
                             })

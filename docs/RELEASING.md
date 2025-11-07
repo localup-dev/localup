@@ -331,11 +331,11 @@ git push origin v0.2.0
 Each release includes:
 
 ### Binaries
-- `tunnel-linux-amd64.tar.gz` + `tunnel-exit-node-linux-amd64.tar.gz`
-- `tunnel-linux-arm64.tar.gz` + `tunnel-exit-node-linux-arm64.tar.gz`
-- `tunnel-macos-amd64.tar.gz` + `tunnel-exit-node-macos-amd64.tar.gz`
-- `tunnel-macos-arm64.tar.gz` + `tunnel-exit-node-macos-arm64.tar.gz`
-- `tunnel-windows-amd64.zip` + `tunnel-exit-node-windows-amd64.zip`
+- `localup-linux-amd64.tar.gz` + `localup-exit-node-linux-amd64.tar.gz`
+- `localup-linux-arm64.tar.gz` + `localup-exit-node-linux-arm64.tar.gz`
+- `localup-macos-amd64.tar.gz` + `localup-exit-node-macos-amd64.tar.gz`
+- `localup-macos-arm64.tar.gz` + `localup-exit-node-macos-arm64.tar.gz`
+- `localup-windows-amd64.zip` + `localup-exit-node-windows-amd64.zip`
 
 ### Checksums
 - `checksums-linux-amd64.txt`

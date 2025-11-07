@@ -20,11 +20,11 @@ This document describes how to create releases for the tunnel project.
 
 **What it builds:**
 - `tunnel` - CLI client for creating tunnels
-- `tunnel-exit-node` - Exit node server
+- `localup-exit-node` - Exit node server
 
 **Outputs:**
-- `tunnel-linux-amd64.tar.gz` - CLI client binary
-- `tunnel-exit-node-linux-amd64.tar.gz` - Exit node server binary
+- `localup-linux-amd64.tar.gz` - CLI client binary
+- `localup-exit-node-linux-amd64.tar.gz` - Exit node server binary
 - `checksums-linux-amd64.txt` - SHA256 checksums
 
 ### 3. Multi-Platform Release (Optional)
@@ -98,14 +98,14 @@ git push origin v0.1.0
 3. Download and test binaries:
    ```bash
    # Download
-   wget https://github.com/OWNER/REPO/releases/download/v0.1.0/tunnel-linux-amd64.tar.gz
+   wget https://github.com/OWNER/REPO/releases/download/v0.1.0/localup-linux-amd64.tar.gz
 
    # Verify checksum
    wget https://github.com/OWNER/REPO/releases/download/v0.1.0/checksums-linux-amd64.txt
    sha256sum -c checksums-linux-amd64.txt
 
    # Extract and test
-   tar -xzf tunnel-linux-amd64.tar.gz
+   tar -xzf localup-linux-amd64.tar.gz
    ./tunnel --version
    ```
 
@@ -162,15 +162,15 @@ If GitHub Actions is unavailable, create releases manually:
 ```bash
 # Build binaries
 cargo build --release --bin tunnel
-cargo build --release --bin tunnel-exit-node
+cargo build --release --bin localup-exit-node
 
 # Strip binaries
 strip target/release/tunnel
-strip target/release/tunnel-exit-node
+strip target/release/localup-exit-node
 
 # Create archives
-tar -czf tunnel-linux-amd64.tar.gz -C target/release tunnel
-tar -czf tunnel-exit-node-linux-amd64.tar.gz -C target/release tunnel-exit-node
+tar -czf localup-linux-amd64.tar.gz -C target/release tunnel
+tar -czf localup-exit-node-linux-amd64.tar.gz -C target/release localup-exit-node
 
 # Create checksums
 sha256sum *.tar.gz > checksums-linux-amd64.txt

@@ -132,7 +132,7 @@ Must be in format: `host:port` or `ip:port`
 #         address: tunnel.kfs.es:4443
 
 # Build binary
-cargo build --release -p tunnel-cli
+cargo build --release -p localup-cli
 
 # Use auto-discovery (picks tunnel.kfs.es:4443)
 localup -p 3000 --protocol http --token TOKEN
@@ -320,7 +320,7 @@ If auto-discovery doesn't work:
 1. **Check binary was built correctly:**
    ```bash
    # Should show relay config message during build
-   cargo build --release -p tunnel-cli 2>&1 | grep "📡"
+   cargo build --release -p localup-cli 2>&1 | grep "📡"
    ```
 
 2. **Verify relay config is valid:**
@@ -344,8 +344,8 @@ If you modified `relays.yaml` but changes aren't reflected:
 **Solution:** Rebuild the binary:
 ```bash
 # Clean and rebuild
-cargo clean -p tunnel-client
-cargo build --release -p tunnel-cli
+cargo clean -p localup-client
+cargo build --release -p localup-cli
 ```
 
 ## Best Practices

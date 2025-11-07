@@ -152,7 +152,7 @@ Expand-Archive -Path "localup-relay-windows-amd64.zip" -DestinationPath "."
 
 # Rename
 Rename-Item "tunnel.exe" "localup.exe"
-Rename-Item "tunnel-exit-node.exe" "localup-relay.exe"
+Rename-Item "localup-exit-node.exe" "localup-relay.exe"
 
 # Add to PATH or move to desired location
 # Example: Move to C:\Program Files\Localup\
@@ -175,11 +175,11 @@ git clone https://github.com/localup-dev/localup.git
 cd localup
 
 # Build release binaries
-cargo build --release -p tunnel-cli -p tunnel-exit-node
+cargo build --release -p localup-cli -p localup-exit-node
 
 # Install
-sudo cp target/release/tunnel-cli /usr/local/bin/localup
-sudo cp target/release/tunnel-exit-node /usr/local/bin/localup-relay
+sudo cp target/release/localup-cli /usr/local/bin/localup
+sudo cp target/release/localup-exit-node /usr/local/bin/localup-relay
 sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
 ```
 
@@ -208,8 +208,8 @@ localup-relay --help
 
 **Expected output:**
 ```
-tunnel-cli 0.1.0
-tunnel-exit-node 0.1.0
+localup-cli 0.1.0
+localup-exit-node 0.1.0
 ```
 
 ---
@@ -319,9 +319,9 @@ Download and install the latest version following the manual installation steps 
 ```bash
 cd localup
 git pull origin main
-cargo build --release -p tunnel-cli -p tunnel-exit-node
-sudo cp target/release/tunnel-cli /usr/local/bin/localup
-sudo cp target/release/tunnel-exit-node /usr/local/bin/localup-relay
+cargo build --release -p localup-cli -p localup-exit-node
+sudo cp target/release/localup-cli /usr/local/bin/localup
+sudo cp target/release/localup-exit-node /usr/local/bin/localup-relay
 ```
 
 ---

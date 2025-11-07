@@ -104,10 +104,10 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     let filter = if cli.verbose {
         tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "localup_agent_server=debug,tunnel_agent=debug".into())
+            .unwrap_or_else(|_| "localup_agent_server=debug,localup_agent=debug".into())
     } else {
         tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| "localup_agent_server=info,tunnel_agent=info".into())
+            .unwrap_or_else(|_| "localup_agent_server=info,localup_agent=info".into())
     };
 
     tracing_subscriber::registry()

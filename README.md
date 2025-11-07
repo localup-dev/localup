@@ -202,7 +202,7 @@ cd localup
 
 # Option 3: Manual build and install
 # Build all three binaries
-cargo build --release -p localup -p tunnel-exit-node -p localup-agent-server
+cargo build --release -p localup -p localup-exit-node -p localup-agent-server
 
 # Install to system (Linux/macOS)
 sudo cp target/release/localup target/release/localup-relay target/release/localup-agent-server /usr/local/bin/
@@ -228,7 +228,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tunnel-lib = { path = "path/to/localup/crates/tunnel-lib" }
+localup-lib = { path = "path/to/localup/crates/localup-lib" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -250,8 +250,8 @@ localup-relay --help
 
 **Expected output:**
 ```
-tunnel-cli 0.1.0
-tunnel-exit-node 0.1.0
+localup-cli 0.1.0
+localup-exit-node 0.1.0
 ```
 
 ---
@@ -313,9 +313,9 @@ Download and install the latest version following the manual installation steps 
 ```bash
 cd localup
 git pull origin main
-cargo build --release -p tunnel-cli -p tunnel-exit-node
-sudo cp target/release/tunnel-cli /usr/local/bin/localup
-sudo cp target/release/tunnel-exit-node /usr/local/bin/localup-relay
+cargo build --release -p localup-cli -p localup-exit-node
+sudo cp target/release/localup-cli /usr/local/bin/localup
+sudo cp target/release/localup-exit-node /usr/local/bin/localup-relay
 ```
 
 ---
@@ -390,7 +390,7 @@ curl http://myapp.localhost:8080
 For programmatic tunnel creation:
 
 ```rust
-use tunnel_lib::Tunnel;
+use localup_lib::Tunnel;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -674,13 +674,13 @@ FROM rust:latest as builder
 
 WORKDIR /workspace
 COPY . .
-RUN cargo build --release -p tunnel-exit-node
+RUN cargo build --release -p localup-exit-node
 
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /workspace/target/release/tunnel-exit-node /usr/local/bin/localup-relay
+COPY --from=builder /workspace/target/release/localup-exit-node /usr/local/bin/localup-relay
 
 EXPOSE 4443/udp 80/tcp 443/tcp 8080/tcp 10000-20000/tcp
 
@@ -918,7 +918,7 @@ localup-relay
 localup-relay --database-url "sqlite://./tunnel.db?mode=rwc"
 
 # If building from source:
-cargo run --release -p tunnel-exit-node
+cargo run --release -p localup-exit-node
 ```
 
 ### Production Setup
@@ -953,7 +953,7 @@ Options:
 
 ```bash
 # Create service file
-sudo tee /etc/systemd/system/tunnel-exit-node.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/localup-exit-node.service > /dev/null <<EOF
 [Unit]
 Description=Tunnel Exit Node
 After=network.target postgresql.service
@@ -962,8 +962,8 @@ After=network.target postgresql.service
 Type=simple
 User=tunnel
 WorkingDirectory=/opt/tunnel
-ExecStart=/usr/local/bin/tunnel-exit-node \\
-  --database-url "postgres://tunnel:password@localhost/tunnel_db" \\
+ExecStart=/usr/local/bin/localup-exit-node \\
+  --database-url "postgres://tunnel:password@localhost/localup_db" \\
   --domain "tunnel.example.com" \\
   --jwt-secret "CHANGE_THIS_SECRET" \\
   --http-addr "0.0.0.0:80" \\
@@ -989,11 +989,11 @@ sudo chown tunnel:tunnel /opt/tunnel/*.pem
 
 # Enable and start
 sudo systemctl daemon-reload
-sudo systemctl enable tunnel-exit-node
-sudo systemctl start tunnel-exit-node
+sudo systemctl enable localup-exit-node
+sudo systemctl start localup-exit-node
 
 # Check status
-sudo systemctl status tunnel-exit-node
+sudo systemctl status localup-exit-node
 ```
 
 ## 🌐 Creating Tunnels (Client)
@@ -1003,7 +1003,7 @@ sudo systemctl status tunnel-exit-node
 **HTTP Tunnel:**
 
 ```rust
-use tunnel_lib::Tunnel;
+use localup_lib::Tunnel;
 
 let tunnel = Tunnel::http(3000)
     .relay("relay.example.com:4443")
@@ -1018,7 +1018,7 @@ println!("Public URL: {}", tunnel.url());
 **TCP Tunnel (for databases, SSH):**
 
 ```rust
-use tunnel_lib::Tunnel;
+use localup_lib::Tunnel;
 
 let tunnel = Tunnel::tcp(5432) // Local PostgreSQL
     .relay("relay.example.com:4443")
@@ -1033,7 +1033,7 @@ println!("Connect to: {}:{}", tunnel.host(), tunnel.port());
 **HTTPS Tunnel:**
 
 ```rust
-use tunnel_lib::Tunnel;
+use localup_lib::Tunnel;
 
 let tunnel = Tunnel::https(3000)
     .relay("relay.example.com:4443")
@@ -1138,23 +1138,23 @@ println!("Bytes sent: {}", metrics.bytes_sent());
 This project is organized as a Rust workspace with 13 focused crates:
 
 ### Core Libraries
-- **tunnel-proto**: Protocol definitions, messages, and multiplexing frames
-- **tunnel-auth**: JWT authentication and token generation
-- **tunnel-connection**: QUIC transport using quinn with reconnection logic
-- **tunnel-router**: Routing registry for TCP/TLS/HTTP protocols
-- **tunnel-cert**: Certificate storage and ACME integration
+- **localup-proto**: Protocol definitions, messages, and multiplexing frames
+- **localup-auth**: JWT authentication and token generation
+- **localup-connection**: QUIC transport using quinn with reconnection logic
+- **localup-router**: Routing registry for TCP/TLS/HTTP protocols
+- **localup-cert**: Certificate storage and ACME integration
 
 ### Server Implementations
-- **tunnel-server-tcp**: Raw TCP tunnel server
-- **tunnel-server-tls**: TLS/SNI server with passthrough
-- **tunnel-server-https**: HTTPS server with TLS termination
+- **localup-server-tcp**: Raw TCP tunnel server
+- **localup-server-tls**: TLS/SNI server with passthrough
+- **localup-server-https**: HTTPS server with TLS termination
 
 ### Application Layer
-- **tunnel-lib**: Main library entry point with high-level API ⭐ **Use this!**
-- **tunnel-client**: Internal client implementation
-- **tunnel-control**: Control plane for orchestration
-- **tunnel-exit-node**: Exit node binary (orchestrator)
-- **tunnel-cli**: Command-line tool
+- **localup-lib**: Main library entry point with high-level API ⭐ **Use this!**
+- **localup-client**: Internal client implementation
+- **localup-control**: Control plane for orchestration
+- **localup-exit-node**: Exit node binary (orchestrator)
+- **localup-cli**: Command-line tool
 
 ### Why QUIC?
 - Built-in multiplexing (no custom layer needed)
@@ -1221,7 +1221,7 @@ export TUNNEL_RELAY_ADDR="relay.example.com:4443"
 export TUNNEL_AUTH_TOKEN="your-jwt-token"
 
 # Relay Server
-export TUNNEL_DATABASE_URL="postgres://user:pass@localhost/tunnel_db"
+export TUNNEL_DATABASE_URL="postgres://user:pass@localhost/localup_db"
 export TUNNEL_JWT_SECRET="your-secret-key"
 export TUNNEL_DOMAIN="tunnel.example.com"
 ```
@@ -1233,7 +1233,7 @@ export TUNNEL_DOMAIN="tunnel.example.com"
 postgres://user:password@host:5432/database_name
 
 # PostgreSQL with TimescaleDB (best for traffic inspection)
-postgres://user:password@host:5432/tunnel_db?options=-c%20timescaledb.telemetry_level=off
+postgres://user:password@host:5432/localup_db?options=-c%20timescaledb.telemetry_level=off
 
 # SQLite persistent
 sqlite://./path/to/tunnel.db?mode=rwc
@@ -1249,7 +1249,7 @@ sqlite::memory:
 **"Address already in use"**
 ```bash
 lsof -i :8080
-tunnel-exit-node --http-addr 0.0.0.0:8081
+localup-exit-node --http-addr 0.0.0.0:8081
 ```
 
 **"Certificate not found"**
@@ -1262,7 +1262,7 @@ openssl req -x509 -newkey rsa:4096 -nodes \
 **"Database connection failed"**
 ```bash
 pg_isready
-createdb tunnel_db
+createdb localup_db
 # Or use SQLite: --database-url "sqlite://./tunnel.db?mode=rwc"
 ```
 
@@ -1298,10 +1298,10 @@ createdb tunnel_db
 cargo test --workspace
 
 # Integration tests
-cargo test -p tunnel-lib --test integration_test
+cargo test -p localup-lib --test integration_test
 
 # Specific crate tests
-cargo test -p tunnel-proto
+cargo test -p localup-proto
 ```
 
 **Testing Status**: 85+ passing tests including unit and integration tests
@@ -1315,7 +1315,7 @@ cargo test -p tunnel-proto
 cargo build --workspace --release
 
 # Build specific crate
-cd crates/tunnel-exit-node
+cd crates/localup-exit-node
 cargo build --release
 ```
 

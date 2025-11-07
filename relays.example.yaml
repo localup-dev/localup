@@ -4,7 +4,7 @@
 #   cp relays.example.yaml my-relays.yaml
 #
 # Then build with:
-#   LOCALUP_RELAYS_CONFIG=my-relays.yaml cargo build --release -p tunnel-cli
+#   LOCALUP_RELAYS_CONFIG=my-relays.yaml cargo build --release -p localup-cli
 
 version: 1
 

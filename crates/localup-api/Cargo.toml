@@ -1,0 +1,48 @@
+[package]
+name = "localup-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace crates
+localup-control = { path = "../localup-control" }
+localup-proto = { path = "../localup-proto" }
+localup-auth = { path = "../localup-auth" }
+localup-relay-db = { path = "../localup-relay-db" }
+
+# Web framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# OpenAPI
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# Database
+sea-orm = { workspace = true }
+
+# Static file embedding
+rust-embed = "8.5.0"
+mime_guess = "2.0"
+
+[dev-dependencies]
+tokio = { workspace = true }

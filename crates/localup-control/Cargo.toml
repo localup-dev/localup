@@ -1,0 +1,30 @@
+[package]
+name = "localup-control"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+localup-proto = { path = "../localup-proto" }
+localup-auth = { path = "../localup-auth" }
+localup-router = { path = "../localup-router" }
+localup-transport = { path = "../localup-transport" }
+localup-transport-quic = { path = "../localup-transport-quic" }
+tokio = { workspace = true, features = ["sync"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bincode = { workspace = true }
+dashmap = "6.1"
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+bincode = { workspace = true }
+chrono = { workspace = true }
+localup-cert = { path = "../localup-cert" }
+jsonwebtoken = { workspace = true }
+serde = { workspace = true }
+quinn = { workspace = true }
+tracing-subscriber = { workspace = true }
+rustls = { version = "0.23", features = ["ring"] }

@@ -11,10 +11,10 @@ path = "src/main.rs"
 
 [dependencies]
 # Internal dependencies
-tunnel-proto = { path = "../tunnel-proto" }
-tunnel-transport = { path = "../tunnel-transport" }
-tunnel-transport-quic = { path = "../tunnel-transport-quic" }
-tunnel-agent = { path = "../tunnel-agent" }
+localup-proto = { path = "../localup-proto" }
+localup-transport = { path = "../localup-transport" }
+localup-transport-quic = { path = "../localup-transport-quic" }
+localup-agent = { path = "../localup-agent" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }

@@ -1,24 +1,24 @@
 [workspace]
 members = [
-    "crates/tunnel-proto",
-    "crates/tunnel-client",
-    "crates/tunnel-connection",
-    "crates/tunnel-auth",
-    "crates/tunnel-router",
-    "crates/tunnel-server-tcp",
-    "crates/tunnel-server-tcp-proxy",
-    "crates/tunnel-server-tls",
-    "crates/tunnel-server-https",
-    "crates/tunnel-cert",
-    "crates/tunnel-control",
-    "crates/tunnel-exit-node",
-    "crates/tunnel-cli",
-    "crates/tunnel-lib",  # High-level public API for Rust applications
-    "crates/tunnel-api",
-    "crates/tunnel-relay-db",
-    "crates/tunnel-transport",
-    "crates/tunnel-transport-quic",
-    "crates/tunnel-agent",
+    "crates/localup-proto",
+    "crates/localup-client",
+    "crates/localup-connection",
+    "crates/localup-auth",
+    "crates/localup-router",
+    "crates/localup-server-tcp",
+    "crates/localup-server-tcp-proxy",
+    "crates/localup-server-tls",
+    "crates/localup-server-https",
+    "crates/localup-cert",
+    "crates/localup-control",
+    "crates/localup-exit-node",
+    "crates/localup-cli",
+    "crates/localup-lib",  # High-level public API for Rust applications
+    "crates/localup-api",
+    "crates/localup-relay-db",
+    "crates/localup-transport",
+    "crates/localup-transport-quic",
+    "crates/localup-agent",
     "crates/localup-agent-server",
     # "crates/localup-agent",
 ]
@@ -38,7 +38,7 @@ path = "src/main.rs"
 
 
 [dependencies]
-tunnel-agent = { path = "crates/tunnel-agent" }
+localup-agent = { path = "crates/localup-agent" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

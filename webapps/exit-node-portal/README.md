@@ -57,7 +57,7 @@ Output will be in the `dist/` directory.
 
 ## Embedded Deployment
 
-The portal is automatically embedded into the `tunnel-exit-node` binary using `rust-embed`. When you build the exit node binary, the latest built portal assets are included.
+The portal is automatically embedded into the `localup-exit-node` binary using `rust-embed`. When you build the exit node binary, the latest built portal assets are included.
 
 To rebuild the portal and update the embedded version:
 
@@ -68,7 +68,7 @@ bun run build
 
 # Build the exit node with embedded portal
 cd ../..
-cargo build -p tunnel-exit-node --release
+cargo build -p localup-exit-node --release
 ```
 
 ## Usage
@@ -92,11 +92,11 @@ src/
 
 ## API Integration
 
-The portal communicates with the tunnel-exit-node API:
+The portal communicates with the localup-exit-node API:
 
 - `GET /api/tunnels` - List all active tunnels
-- `GET /api/requests?tunnel_id={id}` - Get HTTP requests for a tunnel
-- `GET /api/tcp-connections?tunnel_id={id}` - Get TCP connections for a tunnel
+- `GET /api/requests?localup_id={id}` - Get HTTP requests for a tunnel
+- `GET /api/tcp-connections?localup_id={id}` - Get TCP connections for a tunnel
 - `DELETE /api/tunnels/{id}` - Delete a tunnel
 
 All endpoints are documented in the Swagger UI.
