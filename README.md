@@ -15,14 +15,32 @@ A high-performance, QUIC-based tunnel system for exposing local servers through 
 
 ## 📦 Installation
 
+### Installation Guide by Platform
+
+Select your operating system to see the recommended installation method:
+
+| Platform | Recommended Method | Time | Level |
+|----------|-------------------|------|-------|
+| **macOS** | [Homebrew](#option-1-homebrew-macoslinux) or [Binary](#option-2-download-pre-built-binaries) | < 1 min | ⭐ Easiest |
+| **Linux** | [Homebrew](#option-1-homebrew-macoslinux) or [Binary](#option-2-download-pre-built-binaries) | < 1 min | ⭐ Easiest |
+| **Windows** | [Binary (PowerShell)](#windows-amd64) | < 2 min | ⭐⭐ Easy |
+| **Any OS** | [Build from Source](#option-3-build-from-source) | 5-10 min | ⭐⭐⭐ Advanced |
+
+---
+
 ### Quick Install (One-Liner)
 
-**Linux/macOS:**
+**macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/localup-dev/localup/main/scripts/install.sh | bash
 ```
 
-This auto-detects your platform, downloads the latest release, verifies checksums, and shows installation instructions.
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/localup-dev/localup/main/scripts/install.ps1 | iex
+```
+
+These scripts auto-detect your architecture, download the latest release, verify checksums, and guide you through installation.
 
 ---
 
@@ -32,16 +50,19 @@ This auto-detects your platform, downloads the latest release, verifies checksum
 
 ```bash
 # Stable release
-brew install https://raw.githubusercontent.com/localup-dev/localup/main/Formula/localup.rb
+brew tap localup-dev/tap
+brew install localup
 
 # Verify installation
 localup --version
 localup-relay --version
+localup-agent-server --version
 ```
 
-This installs two commands:
-- **`localup`** - Client CLI for creating tunnels
-- **`localup-relay`** - Relay server (exit node) for hosting
+This installs three commands:
+- **`localup`** - Client CLI for creating tunnels to your relay
+- **`localup-relay`** - Relay/exit node server that handles public connections
+- **`localup-agent-server`** - Agent that combines relay + agent functionality (useful for VPN scenarios)
 
 ---
 
@@ -52,17 +73,24 @@ This installs two commands:
 # Get latest version
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
-# Download
+# Download all binaries
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-linux-amd64.tar.gz"
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-linux-amd64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-agent-server-linux-amd64.tar.gz"
 
 # Extract
 tar -xzf localup-linux-amd64.tar.gz
 tar -xzf localup-relay-linux-amd64.tar.gz
+tar -xzf localup-agent-server-linux-amd64.tar.gz
 
 # Install
-sudo mv localup localup-relay /usr/local/bin/
-sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
+sudo mv localup localup-relay localup-agent-server /usr/local/bin/
+sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay /usr/local/bin/localup-agent-server
+
+# Verify
+localup --version
+localup-relay --version
+localup-agent-server --version
 ```
 
 #### Linux (ARM64)
@@ -70,9 +98,11 @@ sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-linux-arm64.tar.gz"
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-linux-arm64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-agent-server-linux-arm64.tar.gz"
 tar -xzf localup-linux-arm64.tar.gz
 tar -xzf localup-relay-linux-arm64.tar.gz
-sudo mv localup localup-relay /usr/local/bin/
+tar -xzf localup-agent-server-linux-arm64.tar.gz
+sudo mv localup localup-relay localup-agent-server /usr/local/bin/
 ```
 
 #### macOS (Apple Silicon)
@@ -80,9 +110,12 @@ sudo mv localup localup-relay /usr/local/bin/
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-macos-arm64.tar.gz"
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-macos-arm64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-agent-server-macos-arm64.tar.gz"
 tar -xzf localup-macos-arm64.tar.gz
 tar -xzf localup-relay-macos-arm64.tar.gz
-sudo mv localup localup-relay /usr/local/bin/
+tar -xzf localup-agent-server-macos-arm64.tar.gz
+sudo mv localup localup-relay localup-agent-server /usr/local/bin/
+xattr -d com.apple.quarantine /usr/local/bin/localup /usr/local/bin/localup-relay /usr/local/bin/localup-agent-server
 ```
 
 #### macOS (Intel)
@@ -90,28 +123,59 @@ sudo mv localup localup-relay /usr/local/bin/
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-macos-amd64.tar.gz"
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-macos-amd64.tar.gz"
+curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-agent-server-macos-amd64.tar.gz"
 tar -xzf localup-macos-amd64.tar.gz
 tar -xzf localup-relay-macos-amd64.tar.gz
-sudo mv localup localup-relay /usr/local/bin/
+tar -xzf localup-agent-server-macos-amd64.tar.gz
+sudo mv localup localup-relay localup-agent-server /usr/local/bin/
+xattr -d com.apple.quarantine /usr/local/bin/localup /usr/local/bin/localup-relay /usr/local/bin/localup-agent-server
 ```
 
 #### Windows (AMD64)
+
+**PowerShell (Recommended):**
 ```powershell
+# Create directory for binaries
+mkdir "$env:LocalAppData\localup" -ErrorAction SilentlyContinue
+cd "$env:LocalAppData\localup"
+
 # Get latest version
 $latestRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/localup-dev/localup/releases/latest"
 $version = $latestRelease.tag_name
 
-# Download
+# Download all binaries
 Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/localup-windows-amd64.zip" -OutFile "localup-windows-amd64.zip"
 Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/localup-relay-windows-amd64.zip" -OutFile "localup-relay-windows-amd64.zip"
+Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/localup-agent-server-windows-amd64.zip" -OutFile "localup-agent-server-windows-amd64.zip"
 
 # Extract
 Expand-Archive -Path "localup-windows-amd64.zip" -DestinationPath "."
 Expand-Archive -Path "localup-relay-windows-amd64.zip" -DestinationPath "."
+Expand-Archive -Path "localup-agent-server-windows-amd64.zip" -DestinationPath "."
 
-# Binaries are now ready to use (localup.exe and localup-relay.exe)
-# Add to PATH or move to desired location
+# Remove archives
+Remove-Item "*.zip"
+
+# Add to PATH (permanently)
+$userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+if ($userPath -notcontains "$env:LocalAppData\localup") {
+    [Environment]::SetEnvironmentVariable("Path", "$userPath;$env:LocalAppData\localup", "User")
+    Write-Host "✅ Added to PATH. Please restart PowerShell for changes to take effect."
+} else {
+    Write-Host "✅ Already in PATH."
+}
+
+# Unblock executables
+Unblock-File -Path "$env:LocalAppData\localup\localup.exe"
+Unblock-File -Path "$env:LocalAppData\localup\localup-relay.exe"
+Unblock-File -Path "$env:LocalAppData\localup\localup-agent-server.exe"
+
+Write-Host "✅ Installation complete! Restart PowerShell and verify:"
+Write-Host "   localup --version"
+Write-Host "   localup-relay --version"
+Write-Host "   localup-agent-server --version"
 ```
+
 
 ---
 
@@ -121,22 +185,39 @@ Expand-Archive -Path "localup-relay-windows-amd64.zip" -DestinationPath "."
 - **Rust**: 1.90+ (install from [rustup.rs](https://rustup.rs))
 - **Bun**: For building webapps (install from [bun.sh](https://bun.sh))
 - **OpenSSL**: For TLS certificate generation
+- **Git**: For cloning the repository
+
+**Steps:**
 
 ```bash
 # Clone the repository
 git clone https://github.com/localup-dev/localup.git
 cd localup
 
-# Option 1: Use install script (interactive)
+# Option 1: Use interactive install script
 ./scripts/install-local.sh
 
 # Option 2: Quick install (no prompts)
 ./scripts/install-local-quick.sh
 
 # Option 3: Manual build and install
-cargo build --release -p tunnel-cli -p tunnel-exit-node
-sudo cp target/release/localup target/release/localup-relay /usr/local/bin/
-sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay
+# Build all three binaries
+cargo build --release -p localup -p tunnel-exit-node -p localup-agent-server
+
+# Install to system (Linux/macOS)
+sudo cp target/release/localup target/release/localup-relay target/release/localup-agent-server /usr/local/bin/
+sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay /usr/local/bin/localup-agent-server
+
+# On Windows, copy to your desired location:
+# Copy target/release/localup.exe, localup-relay.exe, and localup-agent-server.exe
+# to a directory in your PATH
+```
+
+**Verify installation:**
+```bash
+localup --version
+localup-relay --version
+localup-agent-server --version
 ```
 
 ---
@@ -328,6 +409,503 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## 🏗️ Self-Hosting Localup
+
+Localup can be self-hosted on your own infrastructure (VPS, on-premises, Kubernetes, Docker) to create private tunnels for your organization. This section covers common deployment scenarios.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────┐
+│        Your Infrastructure (Self-Hosted)             │
+├─────────────────────────────────────────────────────┤
+│                                                       │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  Localup Relay Server (Public Endpoint)      │   │
+│  │  - Runs on public IP/domain                  │   │
+│  │  - Handles QUIC connections                 │   │
+│  │  - Manages TCP/HTTP/HTTPS routing            │   │
+│  └──────────────────────────────────────────────┘   │
+│              ↓                                       │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  Database (PostgreSQL/SQLite)                │   │
+│  │  - Traffic inspection logs                   │   │
+│  │  - Tunnel metadata                           │   │
+│  │  - Metrics and analytics                     │   │
+│  └──────────────────────────────────────────────┘   │
+│              ↓                                       │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  Your Internal Services                      │   │
+│  │  - Web apps on localhost:3000                │   │
+│  │  - PostgreSQL on localhost:5432              │   │
+│  │  - APIs behind NAT/firewall                  │   │
+│  └──────────────────────────────────────────────┘   │
+│                                                       │
+└─────────────────────────────────────────────────────┘
+```
+
+### Scenario 1: Development Setup (Single Machine)
+
+**Use case**: Local development, testing tunnel functionality
+
+```bash
+# Terminal 1: Start relay with in-memory database
+localup-relay
+
+# Terminal 2: Start a local HTTP server
+python3 -m http.server 3000
+
+# Terminal 3: Create a tunnel
+localup http --port 3000 --relay localhost:4443 --subdomain myapp
+
+# Access at: http://myapp.localhost:8080
+```
+
+**Files created**: None (in-memory database)
+
+**Cleanup**: Press Ctrl+C on all terminals
+
+---
+
+### Scenario 2: Small Team with Persistent Storage (SQLite)
+
+**Use case**: Small teams, internal staging environments, limited traffic
+
+**Requirements**:
+- Single machine or VPS
+- ~1-2GB disk for SQLite database
+- Less than 50 concurrent tunnels
+
+**Setup**:
+
+```bash
+# 1. Create data directory
+mkdir -p ~/.localup
+cd ~/.localup
+
+# 2. Start relay with persistent SQLite
+localup-relay \
+  --database-url "sqlite://./tunnel.db?mode=rwc" \
+  --http-addr "0.0.0.0:8080" \
+  --https-addr "0.0.0.0:8443" \
+  --tcp-port-range "10000-20000" \
+  --control-addr "0.0.0.0:4443" \
+  --domain "relay.yourcompany.local" \
+  --jwt-secret "your-secret-key-change-this"
+
+# 3. In another terminal, create tunnels
+localup http \
+  --port 3000 \
+  --relay "relay.yourcompany.local:4443" \
+  --subdomain "staging-app" \
+  --token "your-secret-key-change-this"
+```
+
+**Data persistence**: All tunnel data stored in `~/.localup/tunnel.db`
+
+**Backup strategy**:
+```bash
+# Daily backup
+cp ~/.localup/tunnel.db ~/.localup/tunnel.db.backup.$(date +%Y-%m-%d)
+
+# Weekly retention
+find ~/.localup -name "*.backup.*" -mtime +7 -delete
+```
+
+---
+
+### Scenario 3: Production Setup (PostgreSQL + Multiple Machines)
+
+**Use case**: Production deployments, high availability, 100+ concurrent tunnels
+
+**Requirements**:
+- PostgreSQL 13+
+- Public domain name
+- Valid TLS certificates (Let's Encrypt or custom)
+- Multiple machines (optional, for HA)
+- 4GB+ RAM, 50GB+ disk
+
+**Step 1: Setup PostgreSQL**
+
+```bash
+# macOS
+brew install postgresql
+brew services start postgresql
+
+# Linux (Ubuntu/Debian)
+sudo apt-get install postgresql postgresql-contrib
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+
+# Windows (using WSL2 or Docker)
+# Option A: Docker
+docker run --name postgres -e POSTGRES_PASSWORD=secret -p 5432:5432 -d postgres
+
+# Option B: Windows native installer (https://www.postgresql.org/download/windows/)
+```
+
+**Step 2: Create Database**
+
+```bash
+# Create database and user
+psql -U postgres << EOF
+CREATE DATABASE localup_db;
+CREATE USER localup WITH PASSWORD 'strong-password-change-this';
+ALTER ROLE localup WITH CREATEDB;
+GRANT ALL PRIVILEGES ON DATABASE localup_db TO localup;
+EOF
+
+# Test connection
+psql -U localup -d localup_db -h localhost
+```
+
+**Step 3: Generate TLS Certificates**
+
+```bash
+# Option A: Let's Encrypt (recommended for production)
+# Follow: https://letsencrypt.org/getting-started/
+certbot certonly --standalone -d relay.yourcompany.com
+
+# Then use:
+# --cert-path "/etc/letsencrypt/live/relay.yourcompany.com/fullchain.pem"
+# --key-path "/etc/letsencrypt/live/relay.yourcompany.com/privkey.pem"
+
+# Option B: Self-signed (for internal/staging)
+openssl req -x509 -newkey rsa:4096 -nodes \
+  -keyout /opt/localup/key.pem \
+  -out /opt/localup/cert.pem \
+  -days 365 \
+  -subj "/CN=relay.yourcompany.com"
+```
+
+**Step 4: Start Relay Server**
+
+```bash
+localup-relay \
+  --control-addr "0.0.0.0:4443" \
+  --http-addr "0.0.0.0:80" \
+  --https-addr "0.0.0.0:443" \
+  --tcp-port-range "10000-20000" \
+  --domain "relay.yourcompany.com" \
+  --database-url "postgres://localup:strong-password-change-this@localhost:5432/localup_db" \
+  --jwt-secret "$(openssl rand -base64 32)" \
+  --cert-path "/etc/letsencrypt/live/relay.yourcompany.com/fullchain.pem" \
+  --key-path "/etc/letsencrypt/live/relay.yourcompany.com/privkey.pem"
+```
+
+**Step 5: Configure as Systemd Service (Linux)**
+
+```bash
+# Create service file
+sudo tee /etc/systemd/system/localup-relay.service > /dev/null <<'EOF'
+[Unit]
+Description=Localup Relay Server
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=localup
+WorkingDirectory=/opt/localup
+Environment="RUST_LOG=info"
+
+ExecStart=/usr/local/bin/localup-relay \
+  --control-addr "0.0.0.0:4443" \
+  --http-addr "0.0.0.0:80" \
+  --https-addr "0.0.0.0:443" \
+  --tcp-port-range "10000-20000" \
+  --domain "relay.yourcompany.com" \
+  --database-url "postgres://localup:strong-password@localhost:5432/localup_db" \
+  --jwt-secret "CHANGE-THIS-SECRET-KEY" \
+  --cert-path "/etc/letsencrypt/live/relay.yourcompany.com/fullchain.pem" \
+  --key-path "/etc/letsencrypt/live/relay.yourcompany.com/privkey.pem"
+
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Create localup user
+sudo useradd -r -s /bin/false localup
+
+# Set permissions
+sudo chown localup:localup /opt/localup
+sudo chmod 755 /opt/localup
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable localup-relay
+sudo systemctl start localup-relay
+
+# Check status
+sudo systemctl status localup-relay
+sudo journalctl -u localup-relay -f
+```
+
+**Step 6: Firewall Configuration**
+
+```bash
+# Linux (UFW)
+sudo ufw allow 4443/tcp  # QUIC control plane
+sudo ufw allow 80/tcp    # HTTP
+sudo ufw allow 443/tcp   # HTTPS
+sudo ufw allow 10000:20000/tcp  # TCP tunnel ports
+
+# macOS (if using pf)
+# Add to /etc/pf.conf:
+# pass in proto tcp from any to any port {4443, 80, 443, 10000:20000}
+```
+
+---
+
+### Scenario 4: Docker Deployment
+
+**Use case**: Container-based deployment, easier scaling and updates
+
+**Files needed**:
+
+Create `Dockerfile`:
+```dockerfile
+FROM rust:latest as builder
+
+WORKDIR /workspace
+COPY . .
+RUN cargo build --release -p tunnel-exit-node
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /workspace/target/release/tunnel-exit-node /usr/local/bin/localup-relay
+
+EXPOSE 4443/udp 80/tcp 443/tcp 8080/tcp 10000-20000/tcp
+
+ENTRYPOINT ["/usr/local/bin/localup-relay"]
+CMD ["--control-addr", "0.0.0.0:4443", \
+     "--http-addr", "0.0.0.0:8080", \
+     "--https-addr", "0.0.0.0:8443", \
+     "--tcp-port-range", "10000-20000", \
+     "--domain", "relay.local"]
+```
+
+Create `docker-compose.yml`:
+```yaml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: localup_db
+      POSTGRES_USER: localup
+      POSTGRES_PASSWORD: secure-password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  relay:
+    build: .
+    ports:
+      - "4443:4443/udp"
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "8080:8080/tcp"
+      - "10000-20000:10000-20000/tcp"
+    environment:
+      RUST_LOG: info
+    command: >
+      localup-relay
+      --control-addr 0.0.0.0:4443
+      --http-addr 0.0.0.0:8080
+      --https-addr 0.0.0.0:8443
+      --tcp-port-range 10000-20000
+      --domain relay.local
+      --database-url postgres://localup:secure-password@postgres:5432/localup_db
+      --jwt-secret change-this-secret
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:
+```
+
+**Deploy**:
+```bash
+docker-compose up -d
+docker-compose logs -f relay
+```
+
+---
+
+### Scenario 5: Kubernetes Deployment
+
+**Use case**: Enterprise deployments, automatic scaling, high availability
+
+Create `k8s-relay.yaml`:
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: localup
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: localup-config
+  namespace: localup
+data:
+  RUST_LOG: "info"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: localup-relay
+  namespace: localup
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: localup-relay
+  template:
+    metadata:
+      labels:
+        app: localup-relay
+    spec:
+      containers:
+      - name: relay
+        image: localup-relay:latest
+        imagePullPolicy: Always
+        ports:
+        - name: quic
+          containerPort: 4443
+          protocol: UDP
+        - name: http
+          containerPort: 8080
+        - name: https
+          containerPort: 8443
+        args:
+        - "--control-addr=0.0.0.0:4443"
+        - "--http-addr=0.0.0.0:8080"
+        - "--https-addr=0.0.0.0:8443"
+        - "--tcp-port-range=10000-20000"
+        - "--domain=relay.example.com"
+        - "--database-url=postgres://localup:password@postgres:5432/localup_db"
+        - "--jwt-secret=change-this-secret"
+        envFrom:
+        - configMapRef:
+            name: localup-config
+        livenessProbe:
+          tcpSocket:
+            port: 4443
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          tcpSocket:
+            port: 4443
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: localup-relay
+  namespace: localup
+spec:
+  type: LoadBalancer
+  selector:
+    app: localup-relay
+  ports:
+  - name: quic
+    port: 4443
+    targetPort: 4443
+    protocol: UDP
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: https
+    port: 443
+    targetPort: 8443
+```
+
+**Deploy**:
+```bash
+kubectl apply -f k8s-relay.yaml
+kubectl get pods -n localup
+kubectl logs -f -n localup deployment/localup-relay
+```
+
+---
+
+### Scenario 6: Expose Internal Services (Common Pattern)
+
+**Real-world example**: Expose internal PostgreSQL + staging web app
+
+```bash
+# Terminal 1: Start relay on your server (publicly accessible)
+localup-relay \
+  --control-addr "0.0.0.0:4443" \
+  --http-addr "0.0.0.0:8080" \
+  --tcp-port-range "10000-20000" \
+  --domain "relay.mycompany.com" \
+  --database-url "sqlite://./tunnel.db?mode=rwc"
+
+# Terminal 2 (On internal machine behind NAT): Expose PostgreSQL
+localup tcp \
+  --port 5432 \
+  --relay "relay.mycompany.com:4443" \
+  --token "your-secret-token"
+
+# Terminal 3 (On internal machine): Expose web app
+localup http \
+  --port 3000 \
+  --relay "relay.mycompany.com:4443" \
+  --subdomain "staging-app" \
+  --token "your-secret-token"
+
+# Terminal 4 (From any machine): Access services
+# Connect to PostgreSQL
+psql -h relay.mycompany.com -p 15234 -U postgres
+
+# Access web app
+curl http://staging-app.relay.mycompany.com:8080
+```
+
+---
+
+### Scenario 7: Multi-Region Setup (Advanced)
+
+**Use case**: Global tunnel network, geographic redundancy
+
+```bash
+# Primary relay (us-east-1)
+localup-relay \
+  --control-addr "0.0.0.0:4443" \
+  --domain "relay-us.mycompany.com" \
+  --database-url "postgres://localup:pass@postgres-primary:5432/localup_db"
+
+# Secondary relay (eu-west-1)
+localup-relay \
+  --control-addr "0.0.0.0:4443" \
+  --domain "relay-eu.mycompany.com" \
+  --database-url "postgres://localup:pass@postgres-secondary:5432/localup_db"
+
+# Client: Connect to nearest relay
+localup http \
+  --port 3000 \
+  --relay "relay-us.mycompany.com:4443" \
+  --subdomain "myapp"
+```
+
+---
+
 ## 🔧 Relay Server Setup
 
 ### Development Setup
@@ -345,29 +923,13 @@ cargo run --release -p tunnel-exit-node
 
 ### Production Setup
 
-```bash
-# Install PostgreSQL with TimescaleDB
-brew install timescaledb  # macOS
-# or: sudo apt-get install postgresql timescaledb-2-postgresql-14
-
-# Start PostgreSQL
-brew services start postgresql  # macOS
-# or: sudo systemctl start postgresql
-
-# Create database
-createdb tunnel_db
-
-# Run relay server
-localup-relay \
-  --database-url "postgres://user:password@localhost/tunnel_db" \
-  --domain "tunnel.example.com" \
-  --jwt-secret "CHANGE-THIS-SECRET-KEY" \
-  --http-addr "0.0.0.0:80" \
-  --https-addr "0.0.0.0:443" \
-  --control-addr "0.0.0.0:4443" \
-  --cert-path "/path/to/cert.pem" \
-  --key-path "/path/to/key.pem"
-```
+See **Self-Hosting Scenarios** section above for complete production configurations, including:
+- PostgreSQL setup
+- TLS certificates
+- Systemd service
+- Firewall rules
+- Docker deployment
+- Kubernetes deployment
 
 ### Relay Configuration Options
 
