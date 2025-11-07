@@ -20,7 +20,6 @@ members = [
     "crates/localup-transport-quic",
     "crates/localup-agent",
     "crates/localup-agent-server",
-    # "crates/localup-agent",
 ]
 
 resolver = "2"
