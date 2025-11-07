@@ -1380,12 +1380,24 @@ Licensed under either of:
 
 at your option.
 
+## 📚 Documentation
+
+For more detailed guides and examples, see the documentation folder:
+
+| Document | Purpose |
+|----------|---------|
+| [**Examples**](docs/examples.md) | Common usage patterns and real-world examples |
+| [**Daemon Mode**](docs/daemon.md) | Running multiple tunnels concurrently |
+| [**Relay Selection**](docs/relay-selection.md) | Choosing and configuring exit nodes |
+| [**Custom Relay Config**](docs/custom-relay-config.md) | Building custom relay configurations |
+| [**Releasing**](docs/RELEASING.md) | Release process and versioning |
+
 ## 🌟 Support
 
 - **Issues**: [GitHub Issues](https://github.com/localup-dev/localup/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/localup-dev/localup/discussions)
-- **Documentation**: [docs/](docs/)
+- **Development**: See [CLAUDE.md](CLAUDE.md) for architectural guidelines and development standards
 
 ---
 
-**Built with ❤️ in Rust** | [Documentation](docs/) | [Examples](examples/) | [Installation Guide](docs/INSTALLATION.md)
+**Built with ❤️ in Rust** | [Full Documentation](docs/) | [Report an Issue](https://github.com/localup-dev/localup/issues)

@@ -9,12 +9,12 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tracing::info;
 
 use localup_client::{ProtocolConfig, TunnelClient, TunnelConfig};
-use localup_proto::{Endpoint, ExitNodeConfig, Protocol, TunnelMessage};
+use localup_proto::{Endpoint, ExitNodeConfig, TunnelMessage};
 use localup_transport::{TransportConnection, TransportListener, TransportStream};
 use localup_transport_quic::{QuicConfig, QuicListener};
 
@@ -304,7 +304,7 @@ async fn acceptance_e2e_connection_lifecycle() {
             info!("      ✓ Public URL: {:?}", client.public_url());
             info!("      ✓ Endpoints: {}", client.endpoints().len());
 
-            let metrics = client.metrics();
+            let _ = client.metrics();
             info!("      ✓ Metrics initialized");
 
             info!("\n[4/5] ACTIVE");
