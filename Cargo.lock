@@ -2056,6 +2056,7 @@ name = "localup-lib"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bincode",
  "chrono",
  "futures",

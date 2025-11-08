@@ -28,9 +28,11 @@
 
 use axum::{routing::get, Router};
 use localup_lib::{
-    generate_self_signed_cert, generate_token, ExitNodeConfig, HttpsRelayBuilder, ProtocolConfig,
-    TunnelClient, TunnelConfig,
+    generate_self_signed_cert, generate_token, ExitNodeConfig, HttpsRelayBuilder,
+    InMemoryTunnelStorage, ProtocolConfig, SelfSignedCertificateProvider,
+    SimpleCounterDomainProvider, TunnelClient, TunnelConfig,
 };
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -56,10 +58,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let relay = HttpsRelayBuilder::new("127.0.0.1:8443", "cert.pem", "key.pem")?
         .control_plane("127.0.0.1:4443")?
         .jwt_secret(b"example-secret-key")
+        // Configure relay behavior with trait-based customization
+        .storage(Arc::new(InMemoryTunnelStorage::new())) // In-memory tunnel storage
+        .domain_provider(Arc::new(SimpleCounterDomainProvider::new())) // Simple domain naming
+        .certificate_provider(Arc::new(SelfSignedCertificateProvider)) // Self-signed certs
         .build()?;
     println!("✅ Relay configuration created");
     println!("   - Data Plane (HTTPS): 127.0.0.1:8443");
     println!("   - Control Plane (QUIC): 127.0.0.1:4443");
+    println!("   - Storage: In-memory (trait-based, customizable)");
     println!("   - Authentication: JWT enabled\n");
 
     // Spawn relay in background

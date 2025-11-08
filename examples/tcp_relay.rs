@@ -28,8 +28,11 @@
 //! ```
 
 use localup_lib::{
-    generate_token, ExitNodeConfig, ProtocolConfig, TcpRelayBuilder, TunnelClient, TunnelConfig,
+    generate_token, ExitNodeConfig, InMemoryTunnelStorage, ProtocolConfig,
+    SelfSignedCertificateProvider, SimpleCounterDomainProvider, SimplePortAllocator,
+    TcpRelayBuilder, TunnelClient, TunnelConfig,
 };
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -90,11 +93,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .tcp_port_range(10000, Some(20000)) // Allocate ports 10000-20000
         .control_plane("127.0.0.1:4443")?
         .jwt_secret(b"example-secret-key")
+        // Configure relay behavior with trait-based customization
+        .storage(Arc::new(InMemoryTunnelStorage::new())) // In-memory tunnel storage
+        .domain_provider(Arc::new(SimpleCounterDomainProvider::new())) // Simple domain naming
+        .certificate_provider(Arc::new(SelfSignedCertificateProvider)) // Self-signed certs
+        .port_allocator(Arc::new(SimplePortAllocator::with_range(
+            10000,
+            Some(20000),
+        ))) // Custom port range
         .build()?;
 
     println!("✅ Relay configuration created");
     println!("   - Control Plane (QUIC): 127.0.0.1:4443");
     println!("   - TCP Ports: 10000-20000 (dynamically allocated)");
+    println!("   - Storage: In-memory (trait-based, customizable)");
     println!("   - Authentication: JWT enabled\n");
 
     // Spawn relay in background

@@ -26,6 +26,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 rustls = { workspace = true }
 chrono = { workspace = true }
+async-trait = { workspace = true }
 
 [features]
 default = ["db"]

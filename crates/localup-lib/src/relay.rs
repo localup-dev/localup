@@ -98,7 +98,7 @@ pub fn generate_token(
 
 /// Simple port allocator for TCP tunnels
 /// Allocates ports starting from a configurable range and increments for each tunnel
-struct SimplePortAllocator {
+pub struct SimplePortAllocator {
     allocations: Arc<Mutex<HashMap<String, u16>>>,
     next_port: Arc<Mutex<u16>>,
     max_port: Option<u16>,
@@ -110,7 +110,7 @@ impl SimplePortAllocator {
     /// # Arguments
     /// * `start_port` - First port to allocate
     /// * `max_port` - Optional maximum port (inclusive). If None, no upper limit.
-    fn with_range(start_port: u16, max_port: Option<u16>) -> Self {
+    pub fn with_range(start_port: u16, max_port: Option<u16>) -> Self {
         Self {
             allocations: Arc::new(Mutex::new(HashMap::new())),
             next_port: Arc::new(Mutex::new(start_port)),
@@ -199,6 +199,11 @@ pub struct RelayBuilder<P> {
     domain: String,
     tcp_port_range_start: u16,
     tcp_port_range_end: Option<u16>,
+    // Configurable trait implementations
+    storage: Option<Arc<dyn crate::TunnelStorage>>,
+    domain_provider: Option<Arc<dyn crate::DomainProvider>>,
+    certificate_provider: Option<Arc<dyn crate::CertificateProvider>>,
+    port_allocator: Option<Arc<dyn localup_control::PortAllocator>>,
     _marker: std::marker::PhantomData<P>,
 }
 
@@ -235,6 +240,10 @@ impl RelayBuilder<Https> {
             domain: "localhost".to_string(),
             tcp_port_range_start: 9000,
             tcp_port_range_end: None,
+            storage: None,
+            domain_provider: None,
+            certificate_provider: None,
+            port_allocator: None,
             _marker: std::marker::PhantomData,
         })
     }
@@ -262,6 +271,10 @@ impl RelayBuilder<Tcp> {
             domain: "localhost".to_string(),
             tcp_port_range_start: 9000,
             tcp_port_range_end: None,
+            storage: None,
+            domain_provider: None,
+            certificate_provider: None,
+            port_allocator: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -324,6 +337,10 @@ impl RelayBuilder<Tls> {
             domain: "localhost".to_string(),
             tcp_port_range_start: 9000,
             tcp_port_range_end: None,
+            storage: None,
+            domain_provider: None,
+            certificate_provider: None,
+            port_allocator: None,
             _marker: std::marker::PhantomData,
         })
     }
@@ -373,6 +390,42 @@ impl<P> RelayBuilder<P> {
         self
     }
 
+    /// Configure custom tunnel storage implementation
+    ///
+    /// By default, tunnels are stored in-memory. Provide a custom implementation
+    /// to persist to a database, files, etc.
+    pub fn storage(mut self, storage: Arc<dyn crate::TunnelStorage>) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
+    /// Configure custom domain provider for subdomain generation
+    ///
+    /// By default, subdomains are generated with a simple counter (tunnel-1, tunnel-2, etc.)
+    /// Provide a custom implementation for memorable names, UUID-based, etc.
+    pub fn domain_provider(mut self, provider: Arc<dyn crate::DomainProvider>) -> Self {
+        self.domain_provider = Some(provider);
+        self
+    }
+
+    /// Configure custom certificate provider
+    ///
+    /// By default, self-signed certificates are generated on demand.
+    /// Provide a custom implementation for ACME/Let's Encrypt, cached certs, etc.
+    pub fn certificate_provider(mut self, provider: Arc<dyn crate::CertificateProvider>) -> Self {
+        self.certificate_provider = Some(provider);
+        self
+    }
+
+    /// Configure custom port allocator for TCP tunnels
+    ///
+    /// By default, ports are allocated sequentially from a configurable range.
+    /// Provide a custom implementation for random selection, reserved pools, etc.
+    pub fn port_allocator(mut self, allocator: Arc<dyn localup_control::PortAllocator>) -> Self {
+        self.port_allocator = Some(allocator);
+        self
+    }
+
     /// Internal build implementation shared by all protocols
     fn build_internal(self) -> Result<Relay, RelayBuilderError> {
         // Create shared infrastructure
@@ -389,6 +442,26 @@ impl<P> RelayBuilder<P> {
                 .with_issuer("localup-relay".to_string())
                 .with_audience("localup-client".to_string()),
         );
+
+        // Create trait implementations - use custom or defaults
+        let _storage = self
+            .storage
+            .unwrap_or_else(|| Arc::new(crate::InMemoryTunnelStorage::new()));
+
+        let _domain_provider = self
+            .domain_provider
+            .unwrap_or_else(|| Arc::new(crate::SimpleCounterDomainProvider::new()));
+
+        let _certificate_provider = self
+            .certificate_provider
+            .unwrap_or_else(|| Arc::new(crate::SelfSignedCertificateProvider));
+
+        let port_allocator = self.port_allocator.unwrap_or_else(|| {
+            Arc::new(SimplePortAllocator::with_range(
+                self.tcp_port_range_start,
+                self.tcp_port_range_end,
+            ))
+        });
 
         let mut https_server_handle = None;
         let mut tls_server_handle = None;
@@ -443,10 +516,7 @@ impl<P> RelayBuilder<P> {
                 ))
             })?;
 
-            let port_allocator = Arc::new(SimplePortAllocator::with_range(
-                self.tcp_port_range_start,
-                self.tcp_port_range_end,
-            ));
+            // Use the port allocator created above (either custom or default)
 
             // Create TCP proxy spawner that uses TcpProxyServer for raw TCP forwarding
             let localup_manager_for_spawner = tunnel_manager.clone();

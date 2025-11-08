@@ -167,7 +167,8 @@ pub use localup_client::{
 
 // Re-export control plane types (for building custom relays)
 pub use localup_control::{
-    AgentRegistry, PendingRequests, RegisteredAgent, TunnelConnectionManager, TunnelHandler,
+    AgentRegistry, PendingRequests, PortAllocator, RegisteredAgent, TunnelConnectionManager,
+    TunnelHandler,
 };
 
 // Re-export server types (for building custom relays/exit nodes)
@@ -200,4 +201,11 @@ pub use localup_relay_db::{
 
 // High-level relay builder API
 pub mod relay;
-pub use relay::{generate_token, HttpsRelayBuilder, TcpRelayBuilder, TlsRelayBuilder};
+pub mod relay_config;
+pub use relay::{
+    generate_token, HttpsRelayBuilder, SimplePortAllocator, TcpRelayBuilder, TlsRelayBuilder,
+};
+pub use relay_config::{
+    CertificateData, CertificateProvider, DomainProvider, InMemoryTunnelStorage,
+    SelfSignedCertificateProvider, SimpleCounterDomainProvider, TunnelRecord, TunnelStorage,
+};

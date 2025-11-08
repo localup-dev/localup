@@ -24,7 +24,8 @@
 
 use localup_lib::{
     generate_self_signed_cert, generate_self_signed_cert_with_domains, generate_token,
-    ExitNodeConfig, ProtocolConfig, TlsRelayBuilder, TunnelClient, TunnelConfig,
+    ExitNodeConfig, InMemoryTunnelStorage, ProtocolConfig, SelfSignedCertificateProvider,
+    SimpleCounterDomainProvider, TlsRelayBuilder, TunnelClient, TunnelConfig,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -156,11 +157,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let relay = TlsRelayBuilder::new("127.0.0.1:8443")?
         .control_plane("127.0.0.1:4443")?
         .jwt_secret(b"example-secret-key")
+        // Configure relay behavior with trait-based customization
+        .storage(Arc::new(InMemoryTunnelStorage::new())) // In-memory tunnel storage
+        .domain_provider(Arc::new(SimpleCounterDomainProvider::new())) // Simple domain naming
+        .certificate_provider(Arc::new(SelfSignedCertificateProvider)) // Self-signed certs
         .build()?;
 
     println!("✅ Relay configuration created");
     println!("   - Data Plane (TLS/SNI): 127.0.0.1:8443");
     println!("   - Control Plane (QUIC): 127.0.0.1:4443");
+    println!("   - Storage: In-memory (trait-based, customizable)");
     println!("   - Authentication: JWT enabled");
     println!("   - Routes: Registered by TunnelClient connections\n");
 
