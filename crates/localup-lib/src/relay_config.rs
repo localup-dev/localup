@@ -2,9 +2,12 @@
 //!
 //! This module provides trait-based configuration that allows users to customize:
 //! - Where tunnels are persisted (in-memory, database, file-based)
-//! - How domains are generated (simple counter, UUID-based, etc.)
+//! - How domains are generated (custom DomainProvider trait in localup-control)
 //! - Port allocation strategies (sequential, random, reserved pools)
 //! - Certificate providers (self-signed, ACME, cached)
+//!
+//! Note: DomainProvider and related types have been moved to localup-control
+//! and are re-exported from the root localup-lib module.
 
 use std::sync::Arc;
 use thiserror::Error;
@@ -23,6 +26,9 @@ pub enum ConfigError {
 
     #[error("Certificate error: {0}")]
     CertificateError(String),
+
+    #[error("Invalid subdomain: {0}")]
+    InvalidSubdomain(String),
 }
 
 /// Tunnel metadata persisted to storage
@@ -76,48 +82,10 @@ pub trait TunnelStorage: Send + Sync {
     async fn touch(&self, localup_id: &str) -> Result<(), ConfigError>;
 }
 
-/// Trait for generating subdomains and public URLs
+/// DomainProvider trait has been moved to localup-control::domain_provider
+/// to enable integration with TunnelHandler for actual subdomain assignment.
+/// See localup-control for trait definition and implementations.
 ///
-/// Default implementation uses a simple counter (tunnel-1, tunnel-2, etc.)
-/// or UUID-based names (tunnel-{uuid}).
-///
-/// # Example
-/// ```ignore
-/// struct CustomDomainProvider;
-///
-/// #[async_trait]
-/// impl DomainProvider for CustomDomainProvider {
-///     async fn generate_subdomain(&self) -> Result<String, ConfigError> {
-///         // Generate from database, config file, etc.
-///         Ok("my-app".to_string())
-///     }
-/// }
-/// ```
-#[async_trait::async_trait]
-pub trait DomainProvider: Send + Sync {
-    /// Generate a unique subdomain for this tunnel
-    async fn generate_subdomain(&self) -> Result<String, ConfigError>;
-
-    /// Generate the full public URL for a tunnel
-    /// Called after port is allocated (for TCP) or domain is generated (for HTTP/HTTPS)
-    async fn generate_public_url(
-        &self,
-        subdomain: Option<&str>,
-        port: Option<u16>,
-        protocol: &str,
-        public_domain: &str,
-    ) -> Result<String, ConfigError>;
-
-    /// Check if a subdomain is already taken
-    async fn is_available(&self, subdomain: &str) -> Result<bool, ConfigError>;
-
-    /// Reserve a subdomain (prevent others from using it)
-    async fn reserve(&self, subdomain: &str) -> Result<(), ConfigError>;
-
-    /// Release a reserved subdomain
-    async fn release(&self, subdomain: &str) -> Result<(), ConfigError>;
-}
-
 /// Trait for certificate handling
 ///
 /// This allows custom certificate providers (ACME, cached files, etc.)
@@ -213,95 +181,9 @@ impl TunnelStorage for InMemoryTunnelStorage {
     }
 }
 
-/// Simple counter-based domain provider (default implementation)
-/// Generates domains like: tunnel-1, tunnel-2, tunnel-{uuid}
-pub struct SimpleCounterDomainProvider {
-    counter: Arc<Mutex<u64>>,
-    reserved: Arc<Mutex<std::collections::HashSet<String>>>,
-}
-
-impl SimpleCounterDomainProvider {
-    pub fn new() -> Self {
-        Self {
-            counter: Arc::new(Mutex::new(0)),
-            reserved: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        }
-    }
-
-    /// Use UUID-based domain generation instead of counter
-    pub fn with_uuid() -> Self {
-        Self {
-            counter: Arc::new(Mutex::new(0)),
-            reserved: Arc::new(Mutex::new(std::collections::HashSet::new())),
-        }
-    }
-}
-
-impl Default for SimpleCounterDomainProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl DomainProvider for SimpleCounterDomainProvider {
-    async fn generate_subdomain(&self) -> Result<String, ConfigError> {
-        let mut counter = self.counter.lock().unwrap();
-        *counter += 1;
-        Ok(format!("tunnel-{}", counter))
-    }
-
-    async fn generate_public_url(
-        &self,
-        subdomain: Option<&str>,
-        port: Option<u16>,
-        protocol: &str,
-        public_domain: &str,
-    ) -> Result<String, ConfigError> {
-        match protocol {
-            "tcp" => {
-                // TCP: use port number
-                port.map(|p| format!("{}:{}", public_domain, p))
-                    .ok_or_else(|| ConfigError::DomainError("TCP requires port".into()))
-            }
-            "https" | "http" => {
-                // HTTP(S): use subdomain
-                subdomain
-                    .map(|s| format!("{}://{}.{}", protocol, s, public_domain))
-                    .ok_or_else(|| ConfigError::DomainError("HTTP requires subdomain".into()))
-            }
-            "tls" => {
-                // TLS/SNI: use subdomain with port
-                match (subdomain, port) {
-                    (Some(s), Some(p)) => Ok(format!("{}:{}", s, p)),
-                    (Some(s), None) => Ok(s.to_string()),
-                    _ => Err(ConfigError::DomainError(
-                        "TLS requires subdomain and/or port".into(),
-                    )),
-                }
-            }
-            _ => Err(ConfigError::DomainError(format!(
-                "Unknown protocol: {}",
-                protocol
-            ))),
-        }
-    }
-
-    async fn is_available(&self, subdomain: &str) -> Result<bool, ConfigError> {
-        Ok(!self.reserved.lock().unwrap().contains(subdomain))
-    }
-
-    async fn reserve(&self, subdomain: &str) -> Result<(), ConfigError> {
-        self.reserved.lock().unwrap().insert(subdomain.to_string());
-        Ok(())
-    }
-
-    async fn release(&self, subdomain: &str) -> Result<(), ConfigError> {
-        self.reserved.lock().unwrap().remove(subdomain);
-        Ok(())
-    }
-}
-
+/// SimpleCounterDomainProvider and RestrictedDomainProvider have been moved to
+/// localup-control::domain_provider. Import from there or use the re-exports from localup-lib.
+///
 /// Self-signed certificate provider (default implementation)
 /// Generates new certificates on demand, no caching.
 pub struct SelfSignedCertificateProvider;
@@ -332,3 +214,5 @@ impl CertificateProvider for SelfSignedCertificateProvider {
         Ok(false)
     }
 }
+
+// Domain provider tests have been moved to localup-control::domain_provider

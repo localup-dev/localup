@@ -308,7 +308,6 @@ fn test_localup_store_protocol_types() {
             protocols: vec![ProtocolConfig::Tls {
                 local_port: 9000,
                 sni_hostname: Some("tls-test.example.com".to_string()),
-                remote_port: Some(9000),
             }],
             auth_token: "test-token".to_string(),
             exit_node: ExitNodeConfig::Auto,

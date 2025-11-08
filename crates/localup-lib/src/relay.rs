@@ -448,7 +448,7 @@ impl<P> RelayBuilder<P> {
             .storage
             .unwrap_or_else(|| Arc::new(crate::InMemoryTunnelStorage::new()));
 
-        let _domain_provider = self
+        let domain_provider = self
             .domain_provider
             .unwrap_or_else(|| Arc::new(crate::SimpleCounterDomainProvider::new()));
 
@@ -560,7 +560,8 @@ impl<P> RelayBuilder<P> {
             )
             .with_agent_registry(Arc::new(AgentRegistry::new()))
             .with_port_allocator(port_allocator)
-            .with_tcp_proxy_spawner(tcp_proxy_spawner);
+            .with_tcp_proxy_spawner(tcp_proxy_spawner)
+            .with_domain_provider(domain_provider);
 
             Some((control_plane_addr, Arc::new(handler)))
         } else {

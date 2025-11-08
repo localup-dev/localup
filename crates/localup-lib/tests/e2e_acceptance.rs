@@ -77,12 +77,12 @@ async fn start_mock_relay() -> (String, tokio::task::JoinHandle<()>) {
                                     localup_id: localup_id.clone(),
                                     endpoints: vec![Endpoint {
                                         protocol: protocols[0].clone(),
-                                        public_url: format!("http://localhost:8080"),
+                                        public_url: "http://localhost:8080".to_string(),
                                         port: Some(8080),
                                     }],
                                 };
 
-                                if let Ok(_) = control_stream.send_message(&connected_msg).await {
+                                if (control_stream.send_message(&connected_msg).await).is_ok() {
                                     info!("✓ Relay: sent Connected response");
                                 }
 

@@ -112,8 +112,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_host: "127.0.0.1".to_string(),
         protocols: vec![ProtocolConfig::Https {
             local_port,
-            subdomain: Some("myapp".to_string()),
+            // subdomain: Some("myapp".to_string()),
             custom_domain: None,
+            subdomain: None,
         }],
         auth_token,
         exit_node: ExitNodeConfig::Custom("127.0.0.1:4443".to_string()),

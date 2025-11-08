@@ -15,6 +15,7 @@ tokio = { workspace = true, features = ["sync"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 bincode = { workspace = true }
+async-trait = { workspace = true }
 dashmap = "6.1"
 chrono = { workspace = true }
 

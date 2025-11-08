@@ -235,12 +235,8 @@ impl TunnelConnector {
                     // 0 means auto-allocate, specific port means request that port
                     port: remote_port.unwrap_or(0),
                 },
-                ProtocolConfig::Tls {
-                    sni_hostname,
-                    remote_port,
-                    ..
-                } => Protocol::Tls {
-                    port: remote_port.unwrap_or(8443),
+                ProtocolConfig::Tls { sni_hostname, .. } => Protocol::Tls {
+                    port: 8443,
                     sni_pattern: sni_hostname.clone().unwrap_or_else(|| "*".to_string()),
                 },
             })

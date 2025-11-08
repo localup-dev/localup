@@ -10,6 +10,7 @@ use localup_transport::{TransportConnection, TransportStream};
 
 use crate::agent_registry::{AgentRegistry, RegisteredAgent};
 use crate::connection::TunnelConnectionManager;
+use crate::domain_provider::{DomainContext, DomainProvider};
 use crate::pending_requests::PendingRequests;
 
 /// Trait for port allocation (TCP tunnels)
@@ -39,6 +40,7 @@ pub struct TunnelHandler {
     route_registry: Arc<RouteRegistry>,
     jwt_validator: Option<Arc<JwtValidator>>,
     domain: String,
+    domain_provider: Option<Arc<dyn DomainProvider>>,
     #[allow(dead_code)] // Used for HTTP request/response handling (future work)
     pending_requests: Arc<PendingRequests>,
     port_allocator: Option<Arc<dyn PortAllocator>>,
@@ -60,6 +62,7 @@ impl TunnelHandler {
             route_registry,
             jwt_validator,
             domain,
+            domain_provider: None,
             pending_requests,
             port_allocator: None,
             tcp_proxy_spawner: None,
@@ -80,6 +83,11 @@ impl TunnelHandler {
 
     pub fn with_agent_registry(mut self, agent_registry: Arc<AgentRegistry>) -> Self {
         self.agent_registry = Some(agent_registry);
+        self
+    }
+
+    pub fn with_domain_provider(mut self, domain_provider: Arc<dyn DomainProvider>) -> Self {
+        self.domain_provider = Some(domain_provider);
         self
     }
 
@@ -227,7 +235,9 @@ impl TunnelHandler {
         }
 
         // Build endpoints based on requested protocols
-        let mut endpoints = self.build_endpoints(&localup_id, &protocols, &config, peer_addr);
+        let mut endpoints = self
+            .build_endpoints(&localup_id, &protocols, &config, peer_addr)
+            .await;
         debug!(
             "Built {} endpoints for tunnel {}",
             endpoints.len(),
@@ -1187,7 +1197,7 @@ impl TunnelHandler {
         subdomain
     }
 
-    fn build_endpoints(
+    async fn build_endpoints(
         &self,
         localup_id: &str,
         protocols: &[Protocol],
@@ -1198,63 +1208,127 @@ impl TunnelHandler {
 
         for protocol in protocols {
             match protocol {
-                Protocol::Http { subdomain } => {
-                    // Use provided subdomain or generate deterministic one
+                Protocol::Http { subdomain, .. } | Protocol::Https { subdomain, .. } => {
+                    // Extract local port if available for sticky domain context
+                    let local_port = match protocol {
+                        Protocol::Http { .. } => None, // HTTP doesn't have a local port concept in Protocol enum
+                        Protocol::Https { .. } => None,
+                        _ => None,
+                    };
+
+                    // Build domain context for custom domain providers
+                    let domain_context = DomainContext::new()
+                        .with_client_id(localup_id.to_string())
+                        .with_local_port(local_port.unwrap_or(0))
+                        .with_protocol(
+                            if matches!(protocol, Protocol::Http { .. }) {
+                                "http"
+                            } else {
+                                "https"
+                            }
+                            .to_string(),
+                        );
+
+                    // Use provided subdomain or generate via domain provider
                     let actual_subdomain = match subdomain {
                         Some(ref s) if !s.is_empty() => {
-                            info!("Using user-provided subdomain: '{}' (http)", s);
-                            s.clone()
+                            let protocol_name = if matches!(protocol, Protocol::Http { .. }) {
+                                "http"
+                            } else {
+                                "https"
+                            };
+                            // Check if manual subdomains are allowed
+                            if let Some(ref provider) = self.domain_provider {
+                                if !provider.allow_manual_subdomain() {
+                                    // Use provider's auto-generation instead
+                                    match provider.generate_subdomain(&domain_context).await {
+                                        Ok(generated) => {
+                                            info!(
+                                                "Domain provider auto-generated subdomain '{}' for tunnel {} ({})",
+                                                generated, localup_id, protocol_name
+                                            );
+                                            generated
+                                        }
+                                        Err(e) => {
+                                            warn!("Domain provider error, falling back to default: {}", e);
+                                            Self::generate_subdomain(localup_id, peer_addr)
+                                        }
+                                    }
+                                } else {
+                                    info!(
+                                        "Using user-provided subdomain: '{}' ({})",
+                                        s, protocol_name
+                                    );
+                                    s.clone()
+                                }
+                            } else {
+                                info!("Using user-provided subdomain: '{}' ({})", s, protocol_name);
+                                s.clone()
+                            }
                         }
                         _ => {
-                            let generated = Self::generate_subdomain(localup_id, peer_addr);
-                            info!(
-                                "🎯 Auto-generated subdomain '{}' for tunnel {} (http)",
-                                generated, localup_id
-                            );
-                            generated
+                            // Generate subdomain via domain provider or default
+                            if let Some(ref provider) = self.domain_provider {
+                                match provider.generate_subdomain(&domain_context).await {
+                                    Ok(generated) => {
+                                        let protocol_name =
+                                            if matches!(protocol, Protocol::Http { .. }) {
+                                                "http"
+                                            } else {
+                                                "https"
+                                            };
+                                        info!(
+                                            "🎯 Domain provider generated subdomain '{}' for tunnel {} ({})",
+                                            generated, localup_id, protocol_name
+                                        );
+                                        generated
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Domain provider error, falling back to default: {}",
+                                            e
+                                        );
+                                        let generated =
+                                            Self::generate_subdomain(localup_id, peer_addr);
+                                        info!(
+                                            "🎯 Auto-generated subdomain '{}' for tunnel {} (fallback)",
+                                            generated, localup_id
+                                        );
+                                        generated
+                                    }
+                                }
+                            } else {
+                                let generated = Self::generate_subdomain(localup_id, peer_addr);
+                                let protocol_name = if matches!(protocol, Protocol::Http { .. }) {
+                                    "http"
+                                } else {
+                                    "https"
+                                };
+                                info!(
+                                    "🎯 Auto-generated subdomain '{}' for tunnel {} ({})",
+                                    generated, localup_id, protocol_name
+                                );
+                                generated
+                            }
                         }
                     };
 
                     let host = format!("{}.{}", actual_subdomain, self.domain);
 
                     // Create endpoint with actual subdomain used
-                    let endpoint_protocol = Protocol::Http {
-                        subdomain: Some(actual_subdomain),
+                    let endpoint_protocol = if matches!(protocol, Protocol::Http { .. }) {
+                        Protocol::Http {
+                            subdomain: Some(actual_subdomain.clone()),
+                        }
+                    } else {
+                        Protocol::Https {
+                            subdomain: Some(actual_subdomain.clone()),
+                        }
                     };
 
                     endpoints.push(Endpoint {
                         protocol: endpoint_protocol,
-                        // HTTP tunnels use HTTPS (TLS termination at exit node)
-                        public_url: format!("https://{}", host),
-                        port: None,
-                    });
-                }
-                Protocol::Https { subdomain } => {
-                    // Use provided subdomain or generate deterministic one
-                    let actual_subdomain = match subdomain {
-                        Some(ref s) if !s.is_empty() => {
-                            info!("Using user-provided subdomain: '{}' (https)", s);
-                            s.clone()
-                        }
-                        _ => {
-                            let generated = Self::generate_subdomain(localup_id, peer_addr);
-                            info!(
-                                "🎯 Auto-generated subdomain '{}' for tunnel {} (https)",
-                                generated, localup_id
-                            );
-                            generated
-                        }
-                    };
-
-                    let host = format!("{}.{}", actual_subdomain, self.domain);
-
-                    // Create endpoint with actual subdomain used
-                    let endpoint_protocol = Protocol::Https {
-                        subdomain: Some(actual_subdomain),
-                    };
-
-                    endpoints.push(Endpoint {
-                        protocol: endpoint_protocol,
+                        // HTTP and HTTPS tunnels use HTTPS (TLS termination at exit node)
                         public_url: format!("https://{}", host),
                         port: None,
                     });
@@ -1440,8 +1514,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_endpoints_http() {
+    #[tokio::test]
+    async fn test_build_endpoints_http() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -1461,7 +1535,9 @@ mod tests {
         let config = TunnelConfig::default();
 
         let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
-        let endpoints = handler.build_endpoints(localup_id, &protocols, &config, mock_peer_addr);
+        let endpoints = handler
+            .build_endpoints(localup_id, &protocols, &config, mock_peer_addr)
+            .await;
 
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].public_url, "https://custom.tunnel.test");
@@ -1470,8 +1546,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_endpoints_http_auto_subdomain() {
+    #[tokio::test]
+    async fn test_build_endpoints_http_auto_subdomain() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -1489,7 +1565,9 @@ mod tests {
         let config = TunnelConfig::default();
 
         let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
-        let endpoints = handler.build_endpoints(localup_id, &protocols, &config, mock_peer_addr);
+        let endpoints = handler
+            .build_endpoints(localup_id, &protocols, &config, mock_peer_addr)
+            .await;
 
         assert_eq!(endpoints.len(), 1);
 
@@ -1505,8 +1583,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_build_endpoints_https() {
+    #[tokio::test]
+    async fn test_build_endpoints_https() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -1526,7 +1604,9 @@ mod tests {
         let config = TunnelConfig::default();
 
         let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
-        let endpoints = handler.build_endpoints(localup_id, &protocols, &config, mock_peer_addr);
+        let endpoints = handler
+            .build_endpoints(localup_id, &protocols, &config, mock_peer_addr)
+            .await;
 
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].public_url, "https://secure.tunnel.test");
@@ -1535,8 +1615,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_endpoints_tcp() {
+    #[tokio::test]
+    async fn test_build_endpoints_tcp() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -1554,15 +1634,17 @@ mod tests {
         let config = TunnelConfig::default();
 
         let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
-        let endpoints = handler.build_endpoints(localup_id, &protocols, &config, mock_peer_addr);
+        let endpoints = handler
+            .build_endpoints(localup_id, &protocols, &config, mock_peer_addr)
+            .await;
 
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].public_url, "tcp://tunnel.test:8080");
         assert_eq!(endpoints[0].port, Some(8080));
     }
 
-    #[test]
-    fn test_build_endpoints_multiple_protocols() {
+    #[tokio::test]
+    async fn test_build_endpoints_multiple_protocols() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -1588,7 +1670,9 @@ mod tests {
         let config = TunnelConfig::default();
 
         let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
-        let endpoints = handler.build_endpoints(localup_id, &protocols, &config, mock_peer_addr);
+        let endpoints = handler
+            .build_endpoints(localup_id, &protocols, &config, mock_peer_addr)
+            .await;
 
         assert_eq!(endpoints.len(), 3);
         assert_eq!(endpoints[0].public_url, "https://http.tunnel.test");
@@ -1596,8 +1680,8 @@ mod tests {
         assert_eq!(endpoints[2].public_url, "tcp://tunnel.test:8080");
     }
 
-    #[test]
-    fn test_build_endpoints_tls() {
+    #[tokio::test]
+    async fn test_build_endpoints_tls() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -1618,7 +1702,9 @@ mod tests {
         let config = TunnelConfig::default();
 
         let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
-        let endpoints = handler.build_endpoints(localup_id, &protocols, &config, mock_peer_addr);
+        let endpoints = handler
+            .build_endpoints(localup_id, &protocols, &config, mock_peer_addr)
+            .await;
 
         assert_eq!(endpoints.len(), 1);
         assert!(endpoints[0].public_url.contains("tls://"));

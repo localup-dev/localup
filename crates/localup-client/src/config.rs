@@ -18,7 +18,6 @@ pub enum ProtocolConfig {
         local_port: u16,
         /// SNI hostname for routing (e.g., "api.example.com")
         sni_hostname: Option<String>,
-        remote_port: Option<u16>,
     },
     /// HTTP with host-based routing
     Http {

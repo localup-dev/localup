@@ -101,7 +101,7 @@ async fn acceptance_expose_http_server() {
     }
 
     // Cleanup
-    let _ = server_handle.abort();
+    server_handle.abort();
 }
 
 // ============================================================================

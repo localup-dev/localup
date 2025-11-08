@@ -227,21 +227,18 @@ async fn test_sni_multi_tenant_api_workflow() {
     let tls_config = ProtocolConfig::Tls {
         local_port: 3443,
         sni_hostname: Some("api-001.company.com".to_string()),
-        remote_port: Some(443),
     };
 
     match tls_config {
         ProtocolConfig::Tls {
             local_port,
             sni_hostname,
-            remote_port,
         } => {
             assert_eq!(local_port, 3443);
             assert_eq!(sni_hostname, Some("api-001.company.com".to_string()));
-            assert_eq!(remote_port, Some(443));
             info!(
-                "✓ TLS config valid: local_port={}, sni_hostname={:?}, remote_port={:?}",
-                local_port, sni_hostname, remote_port
+                "✓ TLS config valid: local_port={}, sni_hostname={:?}",
+                local_port, sni_hostname
             );
         }
         _ => panic!("Invalid protocol config"),
@@ -282,7 +279,7 @@ async fn test_sni_with_random_domains() {
     let relay = SniRelay::new();
 
     // Generate random-like domains
-    let domains = vec![
+    let domains = &[
         "service-abc123.example.com",
         "api-xyz789.staging.local",
         "db-prod-001.internal.company.net",

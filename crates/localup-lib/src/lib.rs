@@ -192,6 +192,12 @@ pub use localup_cert::{
     SelfSignedCertificate,
 };
 
+// Re-export domain provider types from control plane (where they're actually used)
+pub use localup_control::{
+    DomainContext, DomainProvider, DomainProviderError, RestrictedDomainProvider,
+    SimpleCounterDomainProvider,
+};
+
 // Re-export database types (for traffic inspection)
 #[cfg(feature = "db")]
 pub use localup_relay_db::{
@@ -206,6 +212,6 @@ pub use relay::{
     generate_token, HttpsRelayBuilder, SimplePortAllocator, TcpRelayBuilder, TlsRelayBuilder,
 };
 pub use relay_config::{
-    CertificateData, CertificateProvider, DomainProvider, InMemoryTunnelStorage,
-    SelfSignedCertificateProvider, SimpleCounterDomainProvider, TunnelRecord, TunnelStorage,
+    CertificateData, CertificateProvider, ConfigError, InMemoryTunnelStorage,
+    SelfSignedCertificateProvider, TunnelRecord, TunnelStorage,
 };
