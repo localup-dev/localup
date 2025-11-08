@@ -31,10 +31,6 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
-[[bin]]
-name = "localup"
-path = "src/main.rs"
-
 [[example]]
 name = "https_relay"
 path = "examples/https_relay.rs"

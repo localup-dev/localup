@@ -13,6 +13,17 @@ path = "src/main.rs"
 localup-client = { path = "../localup-client" }
 localup-proto = { path = "../localup-proto" }
 localup-router = { path = "../localup-router" }
+localup-agent = { path = "../localup-agent" }
+localup-exit-node = { path = "../localup-exit-node" }
+localup-agent-server = { path = "../localup-agent-server" }
+localup-auth = { path = "../localup-auth" }
+localup-control = { path = "../localup-control" }
+localup-server-https = { path = "../localup-server-https" }
+localup-server-tcp = { path = "../localup-server-tcp" }
+localup-server-tls = { path = "../localup-server-tls" }
+localup-transport = { path = "../localup-transport" }
+localup-transport-quic = { path = "../localup-transport-quic" }
+localup-relay-db = { path = "../localup-relay-db" }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
@@ -22,6 +33,9 @@ rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = "5.0"
+uuid = { version = "1.0", features = ["v4"] }
+ipnetwork = "0.20"
+chrono = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }

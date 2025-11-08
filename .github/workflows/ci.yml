@@ -161,3 +161,41 @@ jobs:
 
       - name: Build workspace
         run: cargo build --release --workspace --verbose
+
+  cli-e2e:
+    name: CLI E2E Tests
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+          cache-targets: true
+          cache-on-failure: true
+
+      - name: Build binaries in release mode
+        run: cargo build --release --bins --workspace
+
+      - name: Add binaries to PATH
+        run: echo "${{ github.workspace }}/target/release" >> $GITHUB_PATH
+
+      - name: Run CLI E2E tests
+        run: bash .github/scripts/test-cli.sh
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-test-logs
+          path: /tmp/test_output.txt
+          retention-days: 7

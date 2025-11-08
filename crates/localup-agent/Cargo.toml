@@ -3,10 +3,6 @@ name = "localup-agent"
 version = "0.1.0"
 edition = "2021"
 
-[[bin]]
-name = "localup-agent"
-path = "src/main.rs"
-
 [dependencies]
 # Workspace dependencies
 localup-proto = { path = "../localup-proto" }

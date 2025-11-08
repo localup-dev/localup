@@ -5,10 +5,6 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
-[[bin]]
-name = "localup-relay"
-path = "src/main.rs"
-
 [dependencies]
 localup-control = { path = "../localup-control" }
 localup-server-tcp = { path = "../localup-server-tcp" }
