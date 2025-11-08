@@ -385,6 +385,33 @@ localup http --port 3000 --relay localhost:4443 --subdomain myapp
 curl http://myapp.localhost:8080
 ```
 
+### 5. Advanced: TLS/SNI Tunnel (Optional)
+
+For exposing TLS services with Server Name Indication routing:
+
+```bash
+# Terminal 1: Start relay with TLS server on port 443
+openssl req -x509 -newkey rsa:4096 -nodes \
+  -keyout key.pem -out cert.pem -days 365 \
+  -subj "/CN=localhost"
+
+localup-relay --tls-addr 0.0.0.0:443
+
+# Terminal 2: Start local TLS service
+# (e.g., nginx with TLS, or any TLS server on port 3443)
+python3 -m http.server --bind 127.0.0.1 3443
+
+# Terminal 3: Create TLS tunnel with SNI routing
+localup tls \
+  --port 3443 \
+  --relay localhost:4443 \
+  --sni-hostname api.example.com \
+  --token demo-token
+
+# Terminal 4: Test the tunnel
+openssl s_client -connect localhost:443 -servername api.example.com
+```
+
 ### Using the Rust Library
 
 For programmatic tunnel creation:
@@ -443,6 +470,8 @@ Localup can be self-hosted on your own infrastructure (VPS, on-premises, Kuberne
 │                                                       │
 └─────────────────────────────────────────────────────┘
 ```
+
+> **📝 Note on Port Configuration**: When using HTTPS in any scenario, both `--http-addr` (port 80 or 8080) and `--https-addr` (port 443 or 8443) must be configured. The HTTP port is essential for ACME certificate validation and HTTP → HTTPS redirects. The HTTPS port handles encrypted TLS traffic.
 
 ### Scenario 1: Development Setup (Single Machine)
 
@@ -577,6 +606,14 @@ openssl req -x509 -newkey rsa:4096 -nodes \
   -days 365 \
   -subj "/CN=relay.yourcompany.com"
 ```
+
+> **⚠️ IMPORTANT: HTTPS Requires Both HTTP and HTTPS Ports**
+>
+> When running the relay with HTTPS support, you **must configure both ports**:
+> - **Port 80 (HTTP)**: Required for ACME/Let's Encrypt certificate validation and HTTP → HTTPS redirects
+> - **Port 443 (HTTPS)**: Required for encrypted TLS traffic to clients and tunnels
+>
+> Both `--http-addr` and `--https-addr` must be specified. If either is missing, HTTPS clients will fail to connect and certificate renewal will be blocked.
 
 **Step 4: Start Relay Server**
 
@@ -940,6 +977,7 @@ Options:
   --control-addr <ADDR>         Control plane address [default: 0.0.0.0:4443]
   --http-addr <ADDR>            HTTP server address [default: 0.0.0.0:8080]
   --https-addr <ADDR>           HTTPS server address [default: 0.0.0.0:8443]
+  --tls-addr <ADDR>             TLS/SNI server address (e.g., 0.0.0.0:443)
   --tcp-port-range <START-END>  TCP port range [default: 10000-20000]
   --domain <DOMAIN>             Base domain for subdomains [default: localhost]
   --cert-path <PATH>            TLS certificate path [default: cert.pem]
@@ -996,6 +1034,94 @@ sudo systemctl start localup-exit-node
 sudo systemctl status localup-exit-node
 ```
 
+### SNI Server Setup
+
+SNI (Server Name Indication) allows multiple TLS services to run on the same port (443) with routing based on hostname. This is a **passthrough mode** - the relay doesn't decrypt traffic or manage certificates.
+
+#### How SNI Passthrough Works
+
+1. **Client sends ClientHello** with SNI extension (hostname)
+2. **Relay extracts SNI hostname** from ClientHello bytes (binary parsing, no decryption)
+3. **Relay routes to appropriate tunnel** based on SNI hostname
+4. **Connection forwarded directly** to local service (end-to-end encryption maintained)
+5. **Relay never sees plaintext** (unlike HTTPS termination mode)
+
+#### Setup SNI Relay
+
+```bash
+# Start relay with SNI server on port 443
+# No certificates required - relay only reads SNI hostname from ClientHello
+localup-relay \
+  --control-addr "0.0.0.0:4443" \
+  --tls-addr "0.0.0.0:443" \
+  --jwt-secret "your-secret-key"
+```
+
+#### Multi-Tenant SNI Example
+
+Host multiple TLS services on the same relay with different hostnames:
+
+```bash
+# Terminal 1: Start relay with SNI on port 443
+localup-relay \
+  --control-addr "0.0.0.0:4443" \
+  --tls-addr "0.0.0.0:443" \
+  --jwt-secret "demo-token"
+
+# Terminal 2: Expose first TLS service (api.example.com)
+localup tls \
+  --port 3443 \
+  --relay localhost:4443 \
+  --sni-hostname "api.example.com" \
+  --token "demo-token"
+
+# Terminal 3: Expose second TLS service (db.example.com)
+localup tls \
+  --port 4443 \
+  --relay localhost:4443 \
+  --sni-hostname "db.example.com" \
+  --token "demo-token"
+
+# Terminal 4: Test routing
+# Clients connecting with SNI "api.example.com" → routed to localhost:3443
+openssl s_client -connect localhost:443 -servername api.example.com
+
+# Clients connecting with SNI "db.example.com" → routed to localhost:4443
+openssl s_client -connect localhost:443 -servername db.example.com
+```
+
+#### Best Practices for SNI
+
+1. **No Certificate Management at Relay**:
+   - SNI extraction happens at ClientHello (before TLS handshake)
+   - Relay doesn't need certificates for SNI routing
+   - Local services keep their own certificates
+   - **Security advantage**: Relay cannot decrypt traffic
+
+2. **Hostname Convention**:
+   - Use descriptive, DNS-resolvable hostnames
+   - Examples: `api-v1.company.com`, `db-replica.company.com`
+   - Avoid reusing hostnames across different relays
+
+3. **Security Model** (SNI vs HTTPS):
+   - **SNI (passthrough)**: End-to-end encrypted, relay is blind, no cert needed
+   - **HTTPS (termination)**: Relay decrypts, inspects, re-encrypts, manages certs
+   - Choose SNI for maximum privacy/security
+   - Choose HTTPS for traffic inspection
+
+4. **Multiple Protocol Support** (Production Setup):
+   ```bash
+   # Single relay can handle all protocols simultaneously
+   localup-relay \
+     --control-addr "0.0.0.0:4443" \
+     --http-addr "0.0.0.0:8080" \
+     --https-addr "0.0.0.0:8443" \
+     --tls-addr "0.0.0.0:443" \
+     --tcp-port-range "10000-20000" \
+     --database-url "postgres://localup:pass@localhost/localup_db" \
+     --jwt-secret "secret-key"
+   ```
+
 ## 🌐 Creating Tunnels (Client)
 
 ### Using the Rust Library
@@ -1030,6 +1156,76 @@ println!("Connect to: {}:{}", tunnel.host(), tunnel.port());
 // Prints: relay.example.com:15234 (dynamically allocated)
 ```
 
+**TLS Tunnel (SNI-based passthrough):**
+
+```rust
+use localup_lib::Tunnel;
+
+// Expose local TLS service with SNI hostname
+let tunnel = Tunnel::tls(3443) // Local TLS service on port 3443
+    .relay("relay.example.com:4443")
+    .token("your-auth-token")
+    .sni_hostname("api.example.com")  // SNI hostname for routing
+    .connect()
+    .await?;
+
+println!("Public TLS endpoint: {}:{}", tunnel.host(), tunnel.port());
+// Prints: relay.example.com:443
+
+// Clients connect with:
+// openssl s_client -connect relay.example.com:443 -servername api.example.com
+```
+
+**Multi-Tenant TLS Setup (Multiple Services):**
+
+```rust
+use localup_lib::Tunnel;
+use tokio::task;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Expose three different TLS services on the same relay:443
+
+    // Service 1: API server
+    let api_tunnel = Tunnel::tls(3443)
+        .relay("relay.example.com:4443")
+        .token("demo-token")
+        .sni_hostname("api.example.com")
+        .connect()
+        .await?;
+
+    // Service 2: Database server
+    let db_tunnel = Tunnel::tls(5443)
+        .relay("relay.example.com:4443")
+        .token("demo-token")
+        .sni_hostname("db.example.com")
+        .connect()
+        .await?;
+
+    // Service 3: Cache server
+    let cache_tunnel = Tunnel::tls(6443)
+        .relay("relay.example.com:4443")
+        .token("demo-token")
+        .sni_hostname("cache.example.com")
+        .connect()
+        .await?;
+
+    println!("✅ All services exposed on relay.example.com:443");
+    println!("   - api.example.com → localhost:3443");
+    println!("   - db.example.com → localhost:5443");
+    println!("   - cache.example.com → localhost:6443");
+
+    // Keep tunnels alive
+    tokio::select! {
+        _ = api_tunnel.wait() => println!("API tunnel closed"),
+        _ = db_tunnel.wait() => println!("DB tunnel closed"),
+        _ = cache_tunnel.wait() => println!("Cache tunnel closed"),
+    }
+
+    Ok(())
+}
+```
+
 **HTTPS Tunnel:**
 
 ```rust
@@ -1062,12 +1258,45 @@ localup tcp \
   --relay localhost:4443 \
   --token demo-token
 
+# TLS tunnel (SNI-based passthrough)
+localup tls \
+  --port 3443 \
+  --relay tunnel.example.com:4443 \
+  --sni-hostname api.example.com \
+  --token demo-token
+
 # HTTPS tunnel
 localup https \
   --port 3000 \
   --relay tunnel.example.com:4443 \
   --subdomain myapp \
   --token demo-token
+
+# TLS tunnel with SNI (passthrough, no decryption at relay)
+localup tls \
+  --port 3443 \
+  --relay tunnel.example.com:4443 \
+  --sni-hostname api.example.com \
+  --token demo-token
+
+# Multiple TLS services on same relay (run in separate terminals)
+# Terminal 1:
+localup tls \
+  --port 3443 \
+  --relay tunnel.example.com:4443 \
+  --sni-hostname api.example.com \
+  --token demo-token
+
+# Terminal 2:
+localup tls \
+  --port 4443 \
+  --relay tunnel.example.com:4443 \
+  --sni-hostname db.example.com \
+  --token demo-token
+
+# Clients connect with:
+# openssl s_client -connect tunnel.example.com:443 -servername api.example.com
+# openssl s_client -connect tunnel.example.com:443 -servername db.example.com
 ```
 
 ### Client Configuration
@@ -1171,9 +1400,21 @@ Raw TCP connections for databases, SSH, and custom protocols.
 **Use cases**: PostgreSQL, MySQL, Redis, SSH, custom protocols
 
 ### TLS with SNI
-TLS passthrough with Server Name Indication routing (no termination at relay).
+TLS passthrough with Server Name Indication (SNI) routing - no TLS termination at relay.
 
-**Benefits**: End-to-end encryption, relay never sees plaintext
+**How it works:**
+1. Client sends TLS ClientHello with SNI extension specifying the target hostname
+2. Relay extracts the hostname from the ClientHello (before full TLS handshake)
+3. Relay routes the connection to the appropriate tunnel based on SNI hostname
+4. All TLS encryption remains end-to-end between client and local service
+
+**Benefits**:
+- End-to-end encryption (relay never sees plaintext)
+- Run multiple TLS services on the same port (443)
+- No certificate management at relay (certs on local services)
+- Support for wildcard certificates
+
+**Use cases**: Multiple TLS APIs, SSL-based databases, custom protocols
 
 ### HTTP
 Plain HTTP tunneling with host-based routing.
@@ -1337,6 +1578,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 - ✅ Core protocol and QUIC transport
 - ✅ TCP tunneling
 - ✅ Basic HTTP/HTTPS support
+- ✅ TLS/SNI passthrough with hostname-based routing
 - ✅ JWT authentication
 - ✅ Routing and multiplexing
 - ✅ Database layer with SeaORM
@@ -1344,9 +1586,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 **In Progress**:
 - 🚧 Web dashboard for traffic inspection
 - 🚧 Complete ACME/Let's Encrypt integration
-- 🚧 TLS SNI passthrough
 - 🚧 CLI tool improvements
 - 🚧 Production-ready relay orchestration
+- 🚧 Wildcard SNI hostname matching
 
 **Current milestone**: Phase 2-3 (Multi-protocol support and advanced features)
 

@@ -1812,10 +1812,14 @@ name = "localup"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "clap",
  "localup-agent",
+ "localup-lib",
+ "rustls 0.23.32",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -2036,6 +2040,7 @@ dependencies = [
  "localup-server-https",
  "localup-server-tcp",
  "localup-server-tcp-proxy",
+ "localup-server-tls",
  "localup-transport",
  "localup-transport-quic",
  "mime_guess",
@@ -2052,6 +2057,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "chrono",
  "futures",
  "localup-auth",
  "localup-cert",
@@ -2186,10 +2192,14 @@ dependencies = [
 name = "localup-server-tls"
 version = "0.1.0"
 dependencies = [
+ "localup-cert",
  "localup-proto",
  "localup-router",
+ "localup-transport",
+ "rustls 0.23.32",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tracing",
 ]
 

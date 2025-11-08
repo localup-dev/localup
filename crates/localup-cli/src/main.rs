@@ -433,12 +433,12 @@ fn handle_list_tunnels() -> Result<()> {
                 }
                 ProtocolConfig::Tls {
                     local_port,
-                    subdomain,
+                    sni_hostname,
                     remote_port,
                 } => {
                     print!("    Protocol: TLS, Port: {}", local_port);
-                    if let Some(sub) = subdomain {
-                        print!(", Subdomain: {}", sub);
+                    if let Some(sni) = sni_hostname {
+                        print!(", SNI: {}", sni);
                     }
                     if let Some(remote) = remote_port {
                         print!(", Remote: {}", remote);
@@ -759,7 +759,7 @@ fn parse_protocol(
         }),
         "tls" => Ok(ProtocolConfig::Tls {
             local_port: port,
-            subdomain,
+            sni_hostname: subdomain,
             remote_port,
         }),
         _ => Err(anyhow::anyhow!(

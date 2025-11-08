@@ -8,9 +8,13 @@ authors.workspace = true
 [dependencies]
 localup-proto = { path = "../localup-proto" }
 localup-router = { path = "../localup-router" }
+localup-transport = { path = "../localup-transport" }
+localup-cert = { path = "../localup-cert" }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true}
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

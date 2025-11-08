@@ -236,12 +236,12 @@ impl TunnelConnector {
                     port: remote_port.unwrap_or(0),
                 },
                 ProtocolConfig::Tls {
-                    subdomain,
+                    sni_hostname,
                     remote_port,
                     ..
                 } => Protocol::Tls {
                     port: remote_port.unwrap_or(8443),
-                    sni_pattern: subdomain.clone().unwrap_or_else(|| "*".to_string()),
+                    sni_pattern: sni_hostname.clone().unwrap_or_else(|| "*".to_string()),
                 },
             })
             .collect();

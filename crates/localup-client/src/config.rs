@@ -7,19 +7,25 @@ use std::time::Duration;
 /// Protocol-specific configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProtocolConfig {
+    /// TCP port forwarding
     Tcp {
         local_port: u16,
         remote_port: Option<u16>,
     },
+    /// TLS/SNI-based routing
+    /// Routes incoming TLS connections based on Server Name Indication (SNI)
     Tls {
         local_port: u16,
-        subdomain: Option<String>,
+        /// SNI hostname for routing (e.g., "api.example.com")
+        sni_hostname: Option<String>,
         remote_port: Option<u16>,
     },
+    /// HTTP with host-based routing
     Http {
         local_port: u16,
         subdomain: Option<String>,
     },
+    /// HTTPS with automatic certificate management
     Https {
         local_port: u16,
         subdomain: Option<String>,

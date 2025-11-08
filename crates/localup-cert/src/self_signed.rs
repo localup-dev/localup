@@ -35,16 +35,45 @@ pub enum SelfSignedError {
 /// // Use cert.cert_der and cert.key_der with rustls/quinn
 /// ```
 pub fn generate_self_signed_cert() -> Result<SelfSignedCertificate, SelfSignedError> {
+    generate_self_signed_cert_with_domains("Tunnel Development Certificate", &[])
+}
+
+/// Generate a self-signed certificate with custom domains
+///
+/// This creates an ephemeral certificate for testing with specific domains.
+/// **DO NOT use in production** - use proper CA-signed certificates or ACME instead.
+///
+/// # Arguments
+/// - `common_name`: The CN (Common Name) for the certificate
+/// - `domains`: List of domains to include as Subject Alternative Names
+///
+/// # Features
+/// - Valid for 90 days (typical development cycle)
+/// - Always includes localhost, 127.0.0.1, ::1 as SANs
+/// - RSA 2048-bit key (fast generation, adequate for development)
+/// - Random serial number to avoid collisions
+///
+/// # Example
+/// ```no_run
+/// use localup_cert::self_signed::generate_self_signed_cert_with_domains;
+///
+/// let cert = generate_self_signed_cert_with_domains("api.localho.st", &["api.localho.st"]).unwrap();
+/// // Use cert.cert_der and cert.key_der with rustls/quinn
+/// ```
+pub fn generate_self_signed_cert_with_domains(
+    common_name: &str,
+    domains: &[&str],
+) -> Result<SelfSignedCertificate, SelfSignedError> {
     let mut params = CertificateParams::default();
 
     // Set subject
     let mut dn = DistinguishedName::new();
-    dn.push(rcgen::DnType::CommonName, "Tunnel Development Certificate");
+    dn.push(rcgen::DnType::CommonName, common_name);
     dn.push(rcgen::DnType::OrganizationName, "Tunnel Dev");
     params.distinguished_name = dn;
 
     // Set Subject Alternative Names (SANs) for local development
-    params.subject_alt_names = vec![
+    let mut sans = vec![
         rcgen::SanType::DnsName(rcgen::Ia5String::try_from("localhost").unwrap()),
         rcgen::SanType::DnsName(rcgen::Ia5String::try_from("*.localhost").unwrap()),
         rcgen::SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
@@ -52,6 +81,28 @@ pub fn generate_self_signed_cert() -> Result<SelfSignedCertificate, SelfSignedEr
             0, 0, 0, 0, 0, 0, 0, 1,
         ))),
     ];
+
+    // Add custom domains
+    for domain in domains {
+        if let Ok(ia5) = rcgen::Ia5String::try_from(*domain) {
+            sans.push(rcgen::SanType::DnsName(ia5));
+        } else {
+            return Err(SelfSignedError::GenerationFailed(format!(
+                "Invalid domain name: {}",
+                domain
+            )));
+        }
+    }
+
+    // Also add wildcard version of each domain if not already present
+    for domain in domains {
+        let wildcard = format!("*.{}", domain);
+        if let Ok(ia5) = rcgen::Ia5String::try_from(wildcard.as_str()) {
+            sans.push(rcgen::SanType::DnsName(ia5));
+        }
+    }
+
+    params.subject_alt_names = sans;
 
     // Validity: 90 days from now
     let not_before = SystemTime::now()

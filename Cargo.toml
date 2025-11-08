@@ -35,15 +35,30 @@ authors.workspace = true
 name = "localup"
 path = "src/main.rs"
 
+[[example]]
+name = "https_relay"
+path = "examples/https_relay.rs"
+
+[[example]]
+name = "tcp_relay"
+path = "examples/tcp_relay.rs"
+
+[[example]]
+name = "tls_relay"
+path = "examples/tls_relay.rs"
 
 [dependencies]
 localup-agent = { path = "crates/localup-agent" }
+localup-lib = { path = "crates/localup-lib" }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
+rustls = { workspace = true }
+axum = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }

@@ -18,6 +18,7 @@ use localup_control::{
 use localup_router::RouteRegistry;
 use localup_server_https::{HttpsServer, HttpsServerConfig};
 use localup_server_tcp::{TcpServer, TcpServerConfig};
+use localup_server_tls::{TlsServer, TlsServerConfig};
 use localup_transport_quic::QuicConfig;
 
 /// Tunnel exit node - accepts public connections and routes to tunnels
@@ -80,6 +81,10 @@ struct ServerArgs {
     /// HTTPS server bind address (requires TLS certificates)
     #[arg(long)]
     https_addr: Option<String>,
+
+    /// TLS/SNI server bind address (for raw TLS connections with SNI routing)
+    #[arg(long)]
+    tls_addr: Option<String>,
 
     /// TLS certificate file path (PEM format, for HTTPS server and custom QUIC certs)
     /// If not specified for QUIC, a self-signed certificate is auto-generated
@@ -259,6 +264,10 @@ async fn main() -> Result<()> {
         info!("HTTPS endpoint: {}", https_addr);
     }
 
+    if let Some(ref tls_addr) = args.tls_addr {
+        info!("TLS/SNI endpoint: {}", tls_addr);
+    }
+
     // Initialize database connection
     info!("Connecting to database: {}", args.database_url);
     let db = localup_relay_db::connect(&args.database_url).await?;
@@ -369,6 +378,26 @@ async fn main() -> Result<()> {
             info!("Starting HTTPS relay server");
             if let Err(e) = https_server.start().await {
                 error!("HTTPS server error: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Start TLS/SNI server if configured
+    let tls_handle = if let Some(ref tls_addr) = args.tls_addr {
+        let tls_addr: SocketAddr = tls_addr.parse()?;
+        let tls_config = TlsServerConfig {
+            bind_addr: tls_addr,
+        };
+
+        let tls_server = TlsServer::new(tls_config, registry.clone());
+        info!("✅ TLS/SNI server configured (routes based on Server Name Indication)");
+
+        Some(tokio::spawn(async move {
+            info!("Starting TLS/SNI relay server on {}", tls_addr);
+            if let Err(e) = tls_server.start().await {
+                error!("TLS server error: {}", e);
             }
         }))
     } else {

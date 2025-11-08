@@ -399,6 +399,7 @@ impl TunnelHandler {
     }
 
     /// Handle a reverse tunnel request from a client
+    #[allow(clippy::too_many_arguments)]
     async fn handle_reverse_localup_request<C, S>(
         &self,
         _connection: Arc<C>,
@@ -535,7 +536,7 @@ impl TunnelHandler {
                 let _ = control_stream
                     .send_message(&TunnelMessage::ReverseTunnelReject {
                         localup_id: localup_id.clone(),
-                        reason: reason,
+                        reason,
                     })
                     .await;
                 return;
@@ -848,6 +849,7 @@ impl TunnelHandler {
     }
 
     /// Proxy data bidirectionally between client and agent for reverse tunnel
+    #[allow(dead_code)]
     async fn proxy_reverse_tunnel<S1, S2>(
         &self,
         mut client_stream: S1,

@@ -862,3 +862,34 @@ cargo build --all-targets  # Ensure entire workspace compiles
 ```
 
 **Zero warnings policy applies** to `localup-lib` just like all other crates.
+
+## Documentation and File Organization
+
+### Markdown Files
+
+**Guideline**: All markdown files created during development without explicit user request should be placed in the `thoughts/` folder at the repository root.
+
+This keeps the root directory clean while preserving internal documentation and analysis:
+
+```
+localup-dev/
+├── thoughts/
+│   ├── SNI_ANALYSIS.md          # Analysis and research notes
+│   ├── ARCHITECTURE_NOTES.md    # Architecture discussions
+│   ├── IMPLEMENTATION_PLAN.md   # Implementation planning
+│   ├── TEST_SUMMARY.md          # Test documentation
+│   └── [other-documentation]/   # Other internal docs
+├── docs/                         # User-facing documentation
+├── README.md                     # Project readme (root level, explicit)
+├── CLAUDE.md                     # This file (root level, explicit)
+└── [source files]/
+```
+
+**Exception**: User-requested documentation at the repository root (e.g., when user explicitly asks for a README or specific documentation file) may be placed at the root.
+
+**Examples**:
+- ✅ Internal SNI analysis → `thoughts/SNI_ANALYSIS.md`
+- ✅ Test summaries → `thoughts/TEST_SUMMARY.md`
+- ✅ Implementation notes → `thoughts/IMPLEMENTATION_NOTES.md`
+- ✅ Exploration findings → `thoughts/CODEBASE_EXPLORATION.md`
+- ❌ Root-level documentation without explicit request

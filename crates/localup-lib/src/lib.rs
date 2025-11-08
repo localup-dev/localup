@@ -186,7 +186,10 @@ pub use localup_auth::{
 };
 
 // Re-export certificate types
-pub use localup_cert::{Certificate, SelfSignedCertificate};
+pub use localup_cert::{
+    generate_self_signed_cert, generate_self_signed_cert_with_domains, Certificate,
+    SelfSignedCertificate,
+};
 
 // Re-export database types (for traffic inspection)
 #[cfg(feature = "db")]
@@ -194,3 +197,7 @@ pub use localup_relay_db::{
     entities::{captured_request, prelude::*},
     migrator::Migrator,
 };
+
+// High-level relay builder API
+pub mod relay;
+pub use relay::{generate_token, HttpsRelayBuilder, TcpRelayBuilder, TlsRelayBuilder};

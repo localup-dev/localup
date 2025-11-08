@@ -13,7 +13,7 @@ path = "src/main.rs"
 localup-control = { path = "../localup-control" }
 localup-server-tcp = { path = "../localup-server-tcp" }
 localup-server-tcp-proxy = { path = "../localup-server-tcp-proxy" }
-# localup-server-tls = { path = "../localup-server-tls" }  # TLS SNI passthrough - TODO
+localup-server-tls = { path = "../localup-server-tls" }
 localup-server-https = { path = "../localup-server-https" }
 localup-router = { path = "../localup-router" }
 localup-auth = { path = "../localup-auth" }
