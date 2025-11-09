@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Installation script for localup binaries
-# Builds from source and installs all binaries to /usr/local/bin with sudo
+# Installation script for localup
+# Builds from source and installs the localup binary to /usr/local/bin with sudo
 # Supports macOS and Linux
 
 set -e
@@ -18,11 +18,9 @@ INSTALL_PREFIX="${INSTALL_PREFIX:-/usr/local}"
 INSTALL_DIR="${INSTALL_PREFIX}/bin"
 RELEASE_DIR="target/release"
 
-# Binaries to install
+# Binary to install
 declare -a BINARIES=(
-  "localup"           # from localup-cli
-  "localup-relay"     # from localup-exit-node
-  "localup-agent-server"  # from localup-agent-server
+  "localup"           # Unified CLI with all subcommands (relay, connect, agent-server, etc.)
 )
 
 # Display header
@@ -67,8 +65,8 @@ fi
 echo -e "${GREEN}✓ Running from correct directory${NC}"
 echo ""
 
-# Build all binaries in release mode
-echo -e "${YELLOW}→ Building binaries in release mode...${NC}"
+# Build localup binary in release mode
+echo -e "${YELLOW}→ Building localup in release mode...${NC}"
 echo "(This may take a few minutes on first build)"
 echo ""
 
@@ -81,8 +79,8 @@ else
 fi
 echo ""
 
-# Verify all binaries exist
-echo -e "${YELLOW}→ Verifying built binaries...${NC}"
+# Verify binary exists
+echo -e "${YELLOW}→ Verifying built binary...${NC}"
 missing_binaries=0
 for binary in "${BINARIES[@]}"; do
   if [ -f "${RELEASE_DIR}/${binary}" ]; then
@@ -108,8 +106,8 @@ if [ ! -d "${INSTALL_DIR}" ]; then
   echo ""
 fi
 
-# Install binaries
-echo -e "${YELLOW}→ Installing binaries to ${INSTALL_DIR}...${NC}"
+# Install binary
+echo -e "${YELLOW}→ Installing localup to ${INSTALL_DIR}...${NC}"
 echo "(You may be prompted for your password)"
 echo ""
 
@@ -127,8 +125,8 @@ for binary in "${BINARIES[@]}"; do
 done
 echo ""
 
-# Verify installations
-echo -e "${YELLOW}→ Verifying installations...${NC}"
+# Verify installation
+echo -e "${YELLOW}→ Verifying installation...${NC}"
 failed=0
 installed=0
 for binary in "${BINARIES[@]}"; do
@@ -151,7 +149,7 @@ done
 echo ""
 
 if [ $failed -gt 0 ]; then
-  echo -e "${YELLOW}⚠ Warning: ${failed} binary/binaries installed but not found in PATH${NC}"
+  echo -e "${YELLOW}⚠ Warning: ${binary} installed but not found in PATH${NC}"
   echo "  This might be because your PATH doesn't include ${INSTALL_DIR}"
   echo "  Make sure ${INSTALL_DIR} is in your PATH environment variable"
   echo ""
@@ -168,19 +166,20 @@ if [ $installed -gt 0 ]; then
   echo -e "${GREEN}✓ Installation completed!${NC}"
   echo -e "${BLUE}╚════════════════════════════════════════════════════════╝${NC}"
   echo ""
-  echo "Installed ${installed}/${#BINARIES[@]} binaries:"
+  echo "Installed:"
   for binary in "${BINARIES[@]}"; do
     if [ -f "${INSTALL_DIR}/${binary}" ]; then
       echo "  • ${binary}"
     fi
   done
   echo ""
-  echo "Quick start:"
-  echo "  ${BLUE}localup --help${NC}              # Client CLI tool"
-  echo "  ${BLUE}localup-relay --help${NC}        # Exit node/relay server"
-  if [ -f "${INSTALL_DIR}/localup-agent-server" ]; then
-    echo "  ${BLUE}localup-agent-server --help${NC} # Agent server"
-  fi
+  echo "Quick start - Available subcommands:"
+  echo "  ${BLUE}localup --help${NC}                    # Show all commands"
+  echo "  ${BLUE}localup relay --help${NC}              # Run as relay server"
+  echo "  ${BLUE}localup --port 3000 --relay ...${NC}   # Create a tunnel (standalone mode)"
+  echo "  ${BLUE}localup generate-token --help${NC}     # Generate JWT auth tokens"
+  echo ""
+  echo "Full documentation: https://github.com/localup-dev/localup"
   echo ""
 else
   echo -e "${RED}✗ Installation failed${NC}"

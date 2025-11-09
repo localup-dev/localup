@@ -216,9 +216,23 @@ pub struct JwtValidator {
 
 impl JwtValidator {
     /// Create a new JWT validator using HMAC-SHA256 (symmetric secret)
+    ///
+    /// Validates ONLY:
+    /// - Signature verification (using the secret)
+    /// - Token expiration
+    ///
+    /// Does NOT validate:
+    /// - Issuer claim
+    /// - Audience claim
+    /// - Not-before claim
+    /// - Any other claims
     pub fn new(secret: &[u8]) -> Self {
         let mut validation = Validation::new(Algorithm::HS256);
+        // Only validate expiration - skip all other claims
         validation.validate_exp = true;
+        validation.validate_aud = false;
+        validation.validate_nbf = false;
+        // Note: Issuer validation is disabled by default (only enabled if set_issuer() is called)
 
         Self {
             decoding_key: DecodingKey::from_secret(secret),
@@ -229,9 +243,23 @@ impl JwtValidator {
     /// Create a new JWT validator using RSA public key (asymmetric)
     ///
     /// The public key should be in PEM format (begins with "-----BEGIN PUBLIC KEY-----")
+    ///
+    /// Validates ONLY:
+    /// - Signature verification (using the public key)
+    /// - Token expiration
+    ///
+    /// Does NOT validate:
+    /// - Issuer claim
+    /// - Audience claim
+    /// - Not-before claim
+    /// - Any other claims
     pub fn from_rsa_pem(public_key_pem: &[u8]) -> Result<Self, JwtError> {
         let mut validation = Validation::new(Algorithm::RS256);
+        // Only validate expiration - skip all other claims
         validation.validate_exp = true;
+        validation.validate_aud = false;
+        validation.validate_nbf = false;
+        // Note: Issuer validation is disabled by default (only enabled if set_issuer() is called)
 
         Ok(Self {
             decoding_key: DecodingKey::from_rsa_pem(public_key_pem)

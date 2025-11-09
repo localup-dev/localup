@@ -13,6 +13,91 @@ A high-performance, QUIC-based tunnel system for exposing local servers through 
 - 🗄️ **Database Support**: PostgreSQL (with TimescaleDB) or SQLite backends
 - 🛡️ **JWT Authentication**: Secure token-based tunnel authorization
 
+## 🚀 Quick Start (30 seconds)
+
+See what localup can do in under a minute:
+
+```bash
+# 1. Generate self-signed certificate (first time only, using v3/v3 SAN for localhost)
+openssl req -x509 -newkey rsa:4096 -nodes \
+  -keyout key.pem -out cert.pem -days 365 \
+  -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost"
+
+# 2. Start relay server (Terminal 1)
+# ✅ Relay is now listening on:
+#    - localhost:4443/UDP  (QUIC control plane - where clients connect)
+#    - localhost:8080/TCP  (HTTP - access tunneled services)
+#    - localhost:8443/TCP  (HTTPS - access tunneled services)
+#    - localhost:9090/TCP  (REST API)
+localup relay --http-addr=0.0.0.0:18080 --https-addr=0.0.0.0:18443 \
+  --tls-cert=cert.pem --tls-key=key.pem \
+  --jwt-secret="my-jwt-secret" --localup-addr="0.0.0.0:14443"
+
+# 3. Start a local HTTP server (Terminal 2)
+python3 -m http.server 13000
+
+export TOKEN=$(localup generate-token --secret "my-jwt-secret" --sub "myapp" --token-only)
+
+# 4. Create a tunnel (Terminal 3)
+localup --port 13000 --relay localhost:14443 --subdomain myapp --token=$TOKEN
+
+# 5. Access your local server via HTTPS
+curl -k https://myapp.localhost:18443
+# 6. Access your local server via HTTP
+curl http://myapp.localhost:18080
+```
+
+**That's it!** Your local server is now publicly accessible.
+
+### More Examples
+
+**TCP Tunnel (for databases, SSH):**
+```bash
+# Terminal 1: Start relay with TCP port range enabled
+# Note: All three addresses (localup-addr, http-addr, https-addr) are required
+# for TCP port allocation to work properly
+# Terminal 1: Start relay with TCP port range enabled
+localup relay \
+  --localup-addr "0.0.0.0:14443" \
+  --http-addr "0.0.0.0:18080" \
+  --https-addr "0.0.0.0:18443" \
+  --tcp-port-range "10000-20000" \
+  --tls-cert=cert.pem --tls-key=key.pem \
+  --jwt-secret "my-jwt-secret"
+# Terminal 2: Generate token
+export TOKEN=$(localup generate-token --secret "my-jwt-secret" --sub "myapp" --token-only)
+
+# Terminal 3: Expose local PostgreSQL on a dynamic port
+localup --port 5432 --protocol tcp --relay localhost:14443 --token="$TOKEN"
+# Accessible at: localhost:PORT_ALLOCATED (check output for assigned port)
+```
+
+**TLS/SNI Tunnel (end-to-end encryption with SNI routing):**
+```bash
+# Terminal 1: Start relay with TLS/SNI server on port 443
+localup relay --tls-addr 0.0.0.0:443 \
+  --jwt-secret "my-jwt-secret"
+
+# Terminal 2: Expose your TLS service via SNI
+localup --port 3443 --protocol tls --relay localhost:4443 \
+  --subdomain api.example.com --token="my-jwt-secret"
+
+# Terminal 3: Test it (the relay will route based on SNI hostname)
+openssl s_client -connect localhost:443 -servername api.example.com
+```
+
+**Generate JWT Token for Production:**
+```bash
+# Generate a token with custom subject ID
+localup generate-token --secret "your-secret-key" --sub "myapp" --token-only
+
+# Without --sub, generates random UUID automatically
+localup generate-token --secret "your-secret-key" --token-only
+```
+
+---
+
 ## 📦 Installation
 
 ### Installation Guide by Platform
@@ -23,8 +108,9 @@ Select your operating system to see the recommended installation method:
 |----------|-------------------|------|-------|
 | **macOS** | [Homebrew](#option-1-homebrew-macoslinux) or [Binary](#option-2-download-pre-built-binaries) | < 1 min | ⭐ Easiest |
 | **Linux** | [Homebrew](#option-1-homebrew-macoslinux) or [Binary](#option-2-download-pre-built-binaries) | < 1 min | ⭐ Easiest |
-| **Windows** | [Binary (PowerShell)](#windows-amd64) | < 2 min | ⭐⭐ Easy |
-| **Any OS** | [Build from Source](#option-3-build-from-source) | 5-10 min | ⭐⭐⭐ Advanced |
+| **Windows** | [Docker](#option-4-docker) or [Binary (PowerShell)](#windows-amd64) | < 2 min | ⭐⭐ Easy |
+| **Docker** | [Docker / Docker Compose](#option-4-docker) | 5-15 min | ⭐⭐ Easy |
+| **Any OS** | [Build from Source](#option-3-build-from-source) | 10-20 min | ⭐⭐⭐ Advanced |
 
 ---
 
@@ -55,87 +141,72 @@ brew install localup
 
 # Verify installation
 localup --version
-localup-relay --version
-localup-agent-server --version
+localup --help
 ```
 
-This installs three commands:
-- **`localup`** - Client CLI for creating tunnels to your relay
-- **`localup-relay`** - Relay/exit node server that handles public connections
-- **`localup-agent-server`** - Agent that combines relay + agent functionality (useful for VPN scenarios)
+This installs a single binary with multiple subcommands:
+- **`localup --port 3000 --relay ...`** - Client: Create tunnels to your relay
+- **`localup relay`** - Run as relay/exit node server
+- **`localup agent`** - Run as reverse tunnel agent
+- **`localup agent-server`** - Combine relay and agent functionality (useful for VPN scenarios)
+- **`localup generate-token`** - Generate JWT authentication tokens
 
 ---
 
 ### Option 2: Download Pre-built Binaries
+
+This installs a single `localup` binary with all subcommands built-in.
 
 #### Linux (AMD64)
 ```bash
 # Get latest version
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
-# Download all binaries
+# Download single binary
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-linux-amd64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-linux-amd64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-agent-server-linux-amd64.tar.gz"
 
-# Extract
+# Extract and install
 tar -xzf localup-linux-amd64.tar.gz
-tar -xzf localup-relay-linux-amd64.tar.gz
-tar -xzf localup-agent-server-linux-amd64.tar.gz
-
-# Install
-sudo mv localup localup-relay localup-agent-server /usr/local/bin/
-sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay /usr/local/bin/localup-agent-server
+sudo mv localup /usr/local/bin/
+sudo chmod +x /usr/local/bin/localup
 
 # Verify
 localup --version
-localup-relay --version
-localup-agent-server --version
+localup --help
 ```
 
 #### Linux (ARM64)
 ```bash
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-linux-arm64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-linux-arm64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-agent-server-linux-arm64.tar.gz"
 tar -xzf localup-linux-arm64.tar.gz
-tar -xzf localup-relay-linux-arm64.tar.gz
-tar -xzf localup-agent-server-linux-arm64.tar.gz
-sudo mv localup localup-relay localup-agent-server /usr/local/bin/
+sudo mv localup /usr/local/bin/
+sudo chmod +x /usr/local/bin/localup
 ```
 
 #### macOS (Apple Silicon)
 ```bash
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-macos-arm64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-macos-arm64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-agent-server-macos-arm64.tar.gz"
 tar -xzf localup-macos-arm64.tar.gz
-tar -xzf localup-relay-macos-arm64.tar.gz
-tar -xzf localup-agent-server-macos-arm64.tar.gz
-sudo mv localup localup-relay localup-agent-server /usr/local/bin/
-xattr -d com.apple.quarantine /usr/local/bin/localup /usr/local/bin/localup-relay /usr/local/bin/localup-agent-server
+sudo mv localup /usr/local/bin/
+xattr -d com.apple.quarantine /usr/local/bin/localup
 ```
 
 #### macOS (Intel)
 ```bash
 LATEST_VERSION=$(curl -s https://api.github.com/repos/localup-dev/localup/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-macos-amd64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-relay-macos-amd64.tar.gz"
-curl -L -O "https://github.com/localup-dev/localup/releases/download/${LATEST_VERSION}/localup-agent-server-macos-amd64.tar.gz"
 tar -xzf localup-macos-amd64.tar.gz
-tar -xzf localup-relay-macos-amd64.tar.gz
-tar -xzf localup-agent-server-macos-amd64.tar.gz
-sudo mv localup localup-relay localup-agent-server /usr/local/bin/
-xattr -d com.apple.quarantine /usr/local/bin/localup /usr/local/bin/localup-relay /usr/local/bin/localup-agent-server
+sudo mv localup /usr/local/bin/
+xattr -d com.apple.quarantine /usr/local/bin/localup
 ```
 
 #### Windows (AMD64)
 
 **PowerShell (Recommended):**
 ```powershell
-# Create directory for binaries
+# Create directory for binary
 mkdir "$env:LocalAppData\localup" -ErrorAction SilentlyContinue
 cd "$env:LocalAppData\localup"
 
@@ -143,18 +214,12 @@ cd "$env:LocalAppData\localup"
 $latestRelease = Invoke-RestMethod -Uri "https://api.github.com/repos/localup-dev/localup/releases/latest"
 $version = $latestRelease.tag_name
 
-# Download all binaries
+# Download single binary
 Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/localup-windows-amd64.zip" -OutFile "localup-windows-amd64.zip"
-Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/localup-relay-windows-amd64.zip" -OutFile "localup-relay-windows-amd64.zip"
-Invoke-WebRequest -Uri "https://github.com/localup-dev/localup/releases/download/$version/localup-agent-server-windows-amd64.zip" -OutFile "localup-agent-server-windows-amd64.zip"
 
 # Extract
 Expand-Archive -Path "localup-windows-amd64.zip" -DestinationPath "."
-Expand-Archive -Path "localup-relay-windows-amd64.zip" -DestinationPath "."
-Expand-Archive -Path "localup-agent-server-windows-amd64.zip" -DestinationPath "."
-
-# Remove archives
-Remove-Item "*.zip"
+Remove-Item "localup-windows-amd64.zip"
 
 # Add to PATH (permanently)
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -165,15 +230,12 @@ if ($userPath -notcontains "$env:LocalAppData\localup") {
     Write-Host "✅ Already in PATH."
 }
 
-# Unblock executables
+# Unblock executable
 Unblock-File -Path "$env:LocalAppData\localup\localup.exe"
-Unblock-File -Path "$env:LocalAppData\localup\localup-relay.exe"
-Unblock-File -Path "$env:LocalAppData\localup\localup-agent-server.exe"
 
 Write-Host "✅ Installation complete! Restart PowerShell and verify:"
 Write-Host "   localup --version"
-Write-Host "   localup-relay --version"
-Write-Host "   localup-agent-server --version"
+Write-Host "   localup --help"
 ```
 
 
@@ -195,34 +257,435 @@ git clone https://github.com/localup-dev/localup.git
 cd localup
 
 # Option 1: Use interactive install script
-./scripts/install-local.sh
+./scripts/install-local-from-source.sh
 
-# Option 2: Quick install (no prompts)
-./scripts/install-local-quick.sh
-
-# Option 3: Manual build and install
-# Build all three binaries
-cargo build --release -p localup -p localup-exit-node -p localup-agent-server
+# Option 2: Manual build and install
+# Build the unified binary
+cargo build --release
 
 # Install to system (Linux/macOS)
-sudo cp target/release/localup target/release/localup-relay target/release/localup-agent-server /usr/local/bin/
-sudo chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay /usr/local/bin/localup-agent-server
+sudo cp target/release/localup /usr/local/bin/
+sudo chmod +x /usr/local/bin/localup
 
 # On Windows, copy to your desired location:
-# Copy target/release/localup.exe, localup-relay.exe, and localup-agent-server.exe
-# to a directory in your PATH
+# Copy target/release/localup.exe to a directory in your PATH
 ```
 
 **Verify installation:**
 ```bash
 localup --version
-localup-relay --version
-localup-agent-server --version
+localup --help
 ```
 
 ---
 
-### Option 4: Use as Rust Library
+### Option 4: Docker
+
+**Prerequisites:**
+- Docker installed ([docker.com](https://www.docker.com))
+- 5-15 minutes for build time (first run)
+
+**Quick Start:**
+
+```bash
+# Build Docker image from source (recommended)
+docker build -f Dockerfile -t localup:latest .
+
+# Verify the image
+docker run --rm localup:latest --version
+docker run --rm localup:latest --help
+```
+
+**Generate Authentication Token:**
+
+```bash
+# Generate a JWT token for client authentication (token only)
+TOKEN=$(docker run --rm localup:latest generate-token \
+  --secret "my-super-secret-key" \
+  --sub "myapp" \
+  --token-only)
+
+echo "Your token: $TOKEN"
+
+# Or for verbose output with details (auto-generates random UUID if --sub not provided):
+docker run --rm localup:latest generate-token \
+  --secret "my-super-secret-key" \
+  --sub "myapp"
+```
+
+**Run Relay Server in Docker:**
+
+```bash
+# First, build the Docker image (if not already built)
+docker build -f Dockerfile -t localup:latest .
+
+# Terminal 1: Run relay server (with JWT secret and TLS certificates)
+docker run -d \
+  --name localup-relay \
+  -p 4443:4443/udp \
+  -p 18080:18080 \
+  -p 18443:18443 \
+  -e RUST_LOG=info \
+  -v "$(pwd)/relay-cert.pem:/app/relay-cert.pem:ro" \
+  -v "$(pwd)/relay-key.pem:/app/relay-key.pem:ro" \
+  localup:latest \
+  relay \
+    --localup-addr 0.0.0.0:4443 \
+    --http-addr 0.0.0.0:18080 \
+    --https-addr 0.0.0.0:18443 \
+    --tls-cert /app/relay-cert.pem \
+    --tls-key /app/relay-key.pem \
+    --jwt-secret "my-super-secret-key"
+
+# Check logs
+docker logs -f localup-relay
+
+# Stop when done
+docker stop localup-relay
+docker rm localup-relay
+```
+
+**Create a Tunnel in Docker:**
+
+```bash
+# Terminal 2: Create HTTP tunnel (standalone mode)
+# Generate a token first (using --token-only for clean output):
+export TOKEN=$(./target/release/localup generate-token --secret "my-super-secret-key" --sub "myapp" --token-only)
+
+# For macOS/Windows Docker Desktop (use host.docker.internal):
+docker run --rm \
+  --network=host \
+  --env TOKEN=$TOKEN \
+  localup:latest \
+    --address "host.docker.internal:5700" \
+    --protocol http \
+    --relay localhost:4443 \
+    --subdomain myapp \
+    --token "$TOKEN"
+
+# Access at: http://localhost:18080/myapp
+
+# For Linux (use the Docker bridge gateway):
+docker run --rm \
+  localup:latest \
+    --port 3000 \
+    --protocol http \
+    --relay 172.17.0.1:4443 \
+    --subdomain myapp \
+    --token "YOUR_JWT_TOKEN_FROM_GENERATE_TOKEN"
+
+# Or use Docker Compose network (see below for better approach)
+```
+
+**Using Docker Compose (Complete Setup):**
+
+Docker Compose will automatically build the image when you run it. Create `docker-compose.yml`:
+```yaml
+version: '3.8'
+
+services:
+  relay:
+    build:
+      dockerfile: Dockerfile
+    ports:
+      - "4443:4443/udp"
+      - "18080:18080"
+      - "18443:18443"
+    volumes:
+      - ./relay-cert.pem:/app/relay-cert.pem:ro
+      - ./relay-key.pem:/app/relay-key.pem:ro
+    environment:
+      RUST_LOG: info
+    networks:
+      - localup-net
+    entrypoint: ["localup", "relay"]
+    command:
+      - "--localup-addr"
+      - "0.0.0.0:4443"
+      - "--http-addr"
+      - "0.0.0.0:18080"
+      - "--https-addr"
+      - "0.0.0.0:18443"
+      - "--tls-cert"
+      - "/app/relay-cert.pem"
+      - "--tls-key"
+      - "/app/relay-key.pem"
+      - "--jwt-secret"
+      - "my-super-secret-key"
+    healthcheck:
+      test: ["CMD", "localup", "--help"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: Web server to expose via tunnel (internal only, no host port needed)
+  web:
+    image: python:3.11-slim
+    networks:
+      - localup-net
+    command: python3 -m http.server 127.0.0.1 3000
+
+  # Optional: Agent that creates a tunnel to the web server
+  agent:
+    build:
+      dockerfile: Dockerfile
+    networks:
+      - localup-net
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+    entrypoint: ["localup"]
+    command:
+      - "--address"
+      - "web:3000"
+      - "--relay"
+      - "relay:4443"
+      - "--protocol"
+      - "http"
+      - "--subdomain"
+      - "myapp"
+      - "--token"
+      - "my-super-secret-key"
+
+networks:
+  localup-net:
+    driver: bridge
+```
+
+Deploy and monitor:
+```bash
+# Start all services
+docker-compose up -d
+
+# Check relay logs
+docker-compose logs -f relay
+
+# Generate a token interactively (verbose output)
+docker-compose exec relay localup generate-token \
+  --secret "my-super-secret-key" \
+  --sub "myapp"
+
+# Or for scripting (token only):
+TOKEN=$(docker-compose exec relay localup generate-token \
+  --secret "my-super-secret-key" \
+  --sub "myapp" \
+  --token-only)
+
+# Access the tunneled web server
+# Note: The web service on port 3000 is internal to Docker network
+# Traffic flows: Host -> Relay (8080) -> Agent -> Web Service (3000)
+curl http://localhost:8080/myapp
+
+# Check agent connection status
+docker-compose logs -f agent
+
+# Shutdown
+docker-compose down
+```
+
+**How it works:**
+- **Web service** (port 3000): Runs internally in Docker network, not exposed to host
+- **Agent**: Connects to relay and tunnels traffic from `web:3000` (internal hostname)
+- **Relay**: Exposes tunneled service on `http://localhost:18080/myapp` with subdomain routing
+- **Access**: Use relay's HTTP port (18080) + subdomain, NOT the internal port 3000
+
+**Run HTTPS Relay with Certificates:**
+
+For HTTPS support, you need TLS certificates. Use the pre-generated certificates in the repository:
+
+```bash
+# First, verify certificates exist in project root:
+ls -l relay-cert.pem relay-key.pem
+
+# Terminal 1: Run relay server with HTTPS (using volume mount for certificates)
+docker run -d \
+  --name localup-relay-https \
+  -p 4443:4443/udp \
+  -p 18080:18080 \
+  -p 18443:18443 \
+  -e RUST_LOG=info \
+  -v "$(pwd)/relay-cert.pem:/app/relay-cert.pem:ro" \
+  -v "$(pwd)/relay-key.pem:/app/relay-key.pem:ro" \
+  localup:latest \
+  relay \
+    --localup-addr 0.0.0.0:4443 \
+    --http-addr 0.0.0.0:18080 \
+    --https-addr 0.0.0.0:18443 \
+    --tls-cert /app/relay-cert.pem \
+    --tls-key /app/relay-key.pem \
+    --jwt-secret "my-super-secret-key"
+
+# Check logs
+docker logs -f localup-relay-https
+
+# Terminal 2: Test HTTPS tunnel (with insecure SSL verification for self-signed cert)
+docker run --rm \
+  localup:latest \
+    --port 3000 \
+    --protocol https \
+    --relay host.docker.internal:4443 \
+    --subdomain secure-app \
+    --token "YOUR_JWT_TOKEN_FROM_GENERATE_TOKEN"
+
+# Access your service via HTTPS (ignore self-signed cert warning)
+curl -k https://localhost:18443/secure-app
+```
+
+**Docker Compose with HTTPS:**
+
+```yaml
+version: '3.8'
+
+services:
+  relay:
+    build:
+      dockerfile: Dockerfile
+    ports:
+      - "4443:4443/udp"
+      - "18080:18080"
+      - "18443:18443"
+    volumes:
+      - ./relay-cert.pem:/app/relay-cert.pem:ro
+      - ./relay-key.pem:/app/relay-key.pem:ro
+    environment:
+      RUST_LOG: info
+    networks:
+      - localup-net
+    entrypoint: ["localup", "relay"]
+    command:
+      - "--localup-addr"
+      - "0.0.0.0:4443"
+      - "--http-addr"
+      - "0.0.0.0:18080"
+      - "--https-addr"
+      - "0.0.0.0:18443"
+      - "--tls-cert"
+      - "/app/relay-cert.pem"
+      - "--tls-key"
+      - "/app/relay-key.pem"
+      - "--jwt-secret"
+      - "my-super-secret-key"
+    healthcheck:
+      test: ["CMD", "localup", "--help"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  web:
+    image: python:3.11-slim
+    networks:
+      - localup-net
+    command: python3 -m http.server 127.0.0.1 3000
+
+  agent:
+    build:
+      dockerfile: Dockerfile
+    networks:
+      - localup-net
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+    entrypoint: ["localup"]
+    command:
+      - "--address"
+      - "web:3000"
+      - "--relay"
+      - "relay:4443"
+      - "--protocol"
+      - "https"
+      - "--subdomain"
+      - "myapp-secure"
+      - "--token"
+      - "my-super-secret-key"
+
+networks:
+  localup-net:
+    driver: bridge
+```
+
+Test the HTTPS setup:
+```bash
+# Start all services
+docker-compose up -d
+
+# Generate a token (verbose output with details)
+docker-compose exec relay localup generate-token \
+  --secret "my-super-secret-key" \
+  --sub "myapp"
+
+# Or for scripting (token only):
+TOKEN=$(docker-compose exec relay localup generate-token \
+  --secret "my-super-secret-key" \
+  --sub "myapp" \
+  --token-only)
+
+# Access the HTTPS service (ignore self-signed cert warning)
+curl -k https://localhost:18443/myapp-secure
+
+# Or use HTTP
+curl http://localhost:18080/myapp-secure
+
+# Cleanup
+docker-compose down
+```
+
+**Generating Custom Certificates:**
+
+If you need to generate new certificates for different hostnames:
+
+```bash
+# Generate for localhost (default)
+openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem \
+  -days 365 -nodes -subj "/CN=localhost"
+
+# Generate for specific domain
+openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem \
+  -days 365 -nodes -subj "/CN=relay.example.com"
+
+# Generate with multiple SANs (Subject Alternative Names)
+openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem \
+  -days 365 -nodes -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,DNS:127.0.0.1,DNS:host.docker.internal"
+```
+
+**Available Dockerfiles:**
+
+- **`Dockerfile`** (Recommended): Multi-stage build from Rust source, guaranteed correct Linux binary
+- **`Dockerfile.prebuilt`** (Alternative): Fast build using pre-compiled Linux binary
+
+**Docker Options:**
+
+```bash
+# Use specific version tag
+docker build -t localup:v0.1.0 .
+
+# Build specific Dockerfile
+docker build -f Dockerfile.prebuilt -t localup:latest .
+
+# Multi-stage build with caching
+docker build --build-arg BUILDKIT_INLINE_CACHE=1 -t localup:latest .
+
+# Pull from GitHub Container Registry (when published)
+docker pull ghcr.io/davidviejo/localup:latest
+docker run --rm ghcr.io/davidviejo/localup:latest --help
+```
+
+**For Complete Docker Documentation:**
+
+See [DOCKER.md](DOCKER.md) for:
+- Multi-stage build details
+- Production deployment patterns
+- Docker Compose examples
+- Size optimization tips
+- Troubleshooting guide
+
+---
+
+### Option 5: Use as Rust Library
 
 Add to your `Cargo.toml`:
 
@@ -236,22 +699,36 @@ tokio = { version = "1", features = ["full"] }
 
 ### Verify Installation
 
-After installation, verify the binaries:
+**For binary/Homebrew installation:**
 
 ```bash
-# Check versions
+# Check version
 localup --version
-localup-relay --version
 
 # Check help
 localup --help
-localup-relay --help
+
+# List available subcommands
+localup relay --help
+localup generate-token --help
+```
+
+**For Docker installation:**
+
+```bash
+# Verify image
+docker images | grep localup
+
+# Check version
+docker run --rm localup:latest --version
+
+# Check help
+docker run --rm localup:latest --help
 ```
 
 **Expected output:**
 ```
-localup-cli 0.1.0
-localup-exit-node 0.1.0
+localup 0.1.0
 ```
 
 ---
@@ -270,9 +747,8 @@ source ~/.bashrc  # or ~/.zshrc
 
 **Permission denied:**
 ```bash
-# Make binaries executable
+# Make binary executable
 chmod +x /usr/local/bin/localup
-chmod +x /usr/local/bin/localup-relay
 ```
 
 **macOS Security Warning:**
@@ -281,7 +757,6 @@ If you get "cannot be opened because it is from an unidentified developer":
 ```bash
 # Remove quarantine attribute
 xattr -d com.apple.quarantine /usr/local/bin/localup
-xattr -d com.apple.quarantine /usr/local/bin/localup-relay
 ```
 
 **Windows SmartScreen Warning:**
@@ -293,7 +768,106 @@ If Windows blocks the executable:
 Or use PowerShell:
 ```powershell
 Unblock-File -Path .\localup.exe
-Unblock-File -Path .\localup-relay.exe
+```
+
+**Docker Installation Issues:**
+
+*"Docker daemon not running"*:
+```bash
+# Start Docker daemon
+docker run hello-world
+
+# Or start Docker Desktop (macOS/Windows)
+# Linux: sudo systemctl start docker
+```
+
+*"Cannot locate image" when building*:
+```bash
+# Ensure Dockerfile is in the repository root
+docker build -f Dockerfile -t localup:latest .
+
+# Check Docker build context
+docker build -f Dockerfile -t localup:latest . --progress=plain
+```
+
+*"Exec format error" in container*:
+The image was built with a Linux binary but container runtime is different. Solution:
+```bash
+# Rebuild the image (this compiles Linux binary inside Docker)
+docker build --no-cache -f Dockerfile -t localup:latest .
+```
+
+*"Address already in use" when running container*:
+```bash
+# List running containers
+docker ps
+
+# Find and stop the container using the port
+docker stop <container-id>
+
+# Or use a different port
+docker run -p 8081:8080 localup:latest relay --http-port 8080
+```
+
+**Docker Networking Issues:**
+
+*"Connection refused" when accessing relay from another container*:
+**Problem**: Container trying to connect to `localhost:4443` but relay is in a different container.
+
+**Solutions**:
+```bash
+# Option 1: Use Docker Compose with shared network (recommended)
+# See "Using Docker Compose" section above
+
+# Option 2: For standalone containers, use the Docker bridge gateway
+# macOS/Windows Docker Desktop:
+docker run --rm localup:latest connect \
+  --relay host.docker.internal:4443 \
+  --port 3000 \
+  --protocol http
+
+# Linux (using Docker bridge gateway 172.17.0.1):
+docker run --rm localup:latest connect \
+  --relay 172.17.0.1:4443 \
+  --port 3000 \
+  --protocol http
+
+# Option 3: Run on host network (shares host's network stack)
+docker run --rm --network host localup:latest connect \
+  --relay localhost:4443 \
+  --port 3000 \
+  --protocol http
+```
+
+*"Token authentication failed"*:
+```bash
+# Ensure relay and client use the same JWT secret
+# Generate token with same secret:
+TOKEN=$(docker run --rm localup:latest generate-token \
+  --secret "same-secret-as-relay" \
+  --sub "myapp" \
+  --token-only)
+
+# Use the generated token in the client:
+docker run --rm localup:latest connect \
+  --relay localhost:4443 \
+  --token "$TOKEN" \
+  --port 3000 \
+  --protocol http
+```
+
+*"Port mapping not working"*:
+```bash
+# Verify port is exposed correctly:
+docker ps
+# Should show: 0.0.0.0:8080->8080/tcp
+
+# Check if port is in use on host:
+lsof -i :8080  # macOS/Linux
+netstat -ano | findstr :8080  # Windows
+
+# Use a different host port:
+docker run -p 8081:8080 localup:latest relay --http-port 8080
 ```
 
 ---
@@ -305,6 +879,15 @@ Unblock-File -Path .\localup-relay.exe
 brew upgrade localup
 ```
 
+**Docker:**
+```bash
+# Rebuild from latest source (pulls latest dependencies)
+docker build --no-cache -f Dockerfile -t localup:latest .
+
+# Or pull latest image from GitHub Container Registry
+docker pull ghcr.io/davidviejo/localup:latest
+```
+
 **Manual:**
 
 Download and install the latest version following the manual installation steps above.
@@ -313,9 +896,9 @@ Download and install the latest version following the manual installation steps 
 ```bash
 cd localup
 git pull origin main
-cargo build --release -p localup-cli -p localup-exit-node
-sudo cp target/release/localup-cli /usr/local/bin/localup
-sudo cp target/release/localup-exit-node /usr/local/bin/localup-relay
+cargo build --release
+sudo cp target/release/localup /usr/local/bin/
+sudo chmod +x /usr/local/bin/localup
 ```
 
 ---
@@ -327,11 +910,23 @@ sudo cp target/release/localup-exit-node /usr/local/bin/localup-relay
 brew uninstall localup
 ```
 
+**Docker:**
+```bash
+# Stop running container
+docker stop localup-relay
+docker rm localup-relay
+
+# Remove image
+docker rmi localup:latest
+
+# Or remove from GitHub Container Registry
+docker rmi ghcr.io/davidviejo/localup:latest
+```
+
 **Manual:**
 ```bash
-# Remove binaries
+# Remove binary
 sudo rm /usr/local/bin/localup
-sudo rm /usr/local/bin/localup-relay
 
 # Remove configuration (optional)
 rm -rf ~/.config/localup
@@ -356,7 +951,7 @@ openssl req -x509 -newkey rsa:4096 -nodes \
   -subj "/CN=localhost"
 
 # Start relay (in-memory database)
-localup-relay
+localup relay
 
 # Relay is now running on:
 # - Control plane: localhost:4443
@@ -371,8 +966,8 @@ localup-relay
 # Terminal 1: Start local HTTP server
 python3 -m http.server 3000
 
-# Terminal 2: Create tunnel
-localup http --port 3000 --relay localhost:4443 --subdomain myapp
+# Terminal 2: Create tunnel (using standalone mode with global flags)
+localup --port 3000 --protocol http --relay localhost:4443 --subdomain myapp
 
 # Your local server is now accessible at:
 # http://myapp.localhost:8080
@@ -395,18 +990,15 @@ openssl req -x509 -newkey rsa:4096 -nodes \
   -keyout key.pem -out cert.pem -days 365 \
   -subj "/CN=localhost"
 
-localup-relay --tls-addr 0.0.0.0:443
+localup relay --tls-addr 0.0.0.0:443 --jwt-secret "demo-secret"
 
 # Terminal 2: Start local TLS service
 # (e.g., nginx with TLS, or any TLS server on port 3443)
 python3 -m http.server --bind 127.0.0.1 3443
 
-# Terminal 3: Create TLS tunnel with SNI routing
-localup tls \
-  --port 3443 \
-  --relay localhost:4443 \
-  --sni-hostname api.example.com \
-  --token demo-token
+# Terminal 3: Create TLS tunnel with SNI routing (using standalone mode)
+localup --port 3443 --protocol tls --relay localhost:4443 \
+  --subdomain api.example.com --token "demo-secret"
 
 # Terminal 4: Test the tunnel
 openssl s_client -connect localhost:443 -servername api.example.com
@@ -479,13 +1071,13 @@ Localup can be self-hosted on your own infrastructure (VPS, on-premises, Kuberne
 
 ```bash
 # Terminal 1: Start relay with in-memory database
-localup-relay
+localup relay
 
 # Terminal 2: Start a local HTTP server
 python3 -m http.server 3000
 
 # Terminal 3: Create a tunnel
-localup http --port 3000 --relay localhost:4443 --subdomain myapp
+localup --port 3000 --protocol http --relay localhost:4443 --subdomain myapp
 
 # Access at: http://myapp.localhost:8080
 ```
@@ -513,7 +1105,7 @@ mkdir -p ~/.localup
 cd ~/.localup
 
 # 2. Start relay with persistent SQLite
-localup-relay \
+localup relay \
   --database-url "sqlite://./tunnel.db?mode=rwc" \
   --http-addr "0.0.0.0:8080" \
   --https-addr "0.0.0.0:8443" \
@@ -523,8 +1115,9 @@ localup-relay \
   --jwt-secret "your-secret-key-change-this"
 
 # 3. In another terminal, create tunnels
-localup http \
+localup \
   --port 3000 \
+  --protocol http \
   --relay "relay.yourcompany.local:4443" \
   --subdomain "staging-app" \
   --token "your-secret-key-change-this"
@@ -618,7 +1211,7 @@ openssl req -x509 -newkey rsa:4096 -nodes \
 **Step 4: Start Relay Server**
 
 ```bash
-localup-relay \
+localup relay \
   --control-addr "0.0.0.0:4443" \
   --http-addr "0.0.0.0:80" \
   --https-addr "0.0.0.0:443" \
@@ -646,7 +1239,7 @@ User=localup
 WorkingDirectory=/opt/localup
 Environment="RUST_LOG=info"
 
-ExecStart=/usr/local/bin/localup-relay \
+ExecStart=/usr/local/bin/localup relay \
   --control-addr "0.0.0.0:4443" \
   --http-addr "0.0.0.0:80" \
   --https-addr "0.0.0.0:443" \
@@ -675,12 +1268,12 @@ sudo chmod 755 /opt/localup
 
 # Enable and start
 sudo systemctl daemon-reload
-sudo systemctl enable localup-relay
-sudo systemctl start localup-relay
+sudo systemctl enable localup
+sudo systemctl start localup
 
 # Check status
-sudo systemctl status localup-relay
-sudo journalctl -u localup-relay -f
+sudo systemctl status localup
+sudo journalctl -u localup -f
 ```
 
 **Step 6: Firewall Configuration**
@@ -895,14 +1488,16 @@ localup-relay \
   --database-url "sqlite://./tunnel.db?mode=rwc"
 
 # Terminal 2 (On internal machine behind NAT): Expose PostgreSQL
-localup tcp \
+localup \
   --port 5432 \
+  --protocol tcp \
   --relay "relay.mycompany.com:4443" \
   --token "your-secret-token"
 
 # Terminal 3 (On internal machine): Expose web app
-localup http \
+localup \
   --port 3000 \
+  --protocol http \
   --relay "relay.mycompany.com:4443" \
   --subdomain "staging-app" \
   --token "your-secret-token"
@@ -935,8 +1530,9 @@ localup-relay \
   --database-url "postgres://localup:pass@postgres-secondary:5432/localup_db"
 
 # Client: Connect to nearest relay
-localup http \
+localup \
   --port 3000 \
+  --protocol http \
   --relay "relay-us.mycompany.com:4443" \
   --subdomain "myapp"
 ```
@@ -949,13 +1545,13 @@ localup http \
 
 ```bash
 # Run with in-memory SQLite (no persistence)
-localup-relay
+localup relay
 
 # Or with persistent SQLite
-localup-relay --database-url "sqlite://./tunnel.db?mode=rwc"
+localup relay --database-url "sqlite://./tunnel.db?mode=rwc"
 
 # If building from source:
-cargo run --release -p localup-exit-node
+cargo run --release
 ```
 
 ### Production Setup
@@ -971,7 +1567,7 @@ See **Self-Hosting Scenarios** section above for complete production configurati
 ### Relay Configuration Options
 
 ```bash
-localup-relay [OPTIONS]
+localup relay [OPTIONS]
 
 Options:
   --control-addr <ADDR>         Control plane address [default: 0.0.0.0:4443]
@@ -991,16 +1587,16 @@ Options:
 
 ```bash
 # Create service file
-sudo tee /etc/systemd/system/localup-exit-node.service > /dev/null <<EOF
+sudo tee /etc/systemd/system/localup.service > /dev/null <<EOF
 [Unit]
-Description=Tunnel Exit Node
+Description=Localup Relay Server
 After=network.target postgresql.service
 
 [Service]
 Type=simple
 User=tunnel
 WorkingDirectory=/opt/tunnel
-ExecStart=/usr/local/bin/localup-exit-node \\
+ExecStart=/usr/local/bin/localup relay \\
   --database-url "postgres://tunnel:password@localhost/localup_db" \\
   --domain "tunnel.example.com" \\
   --jwt-secret "CHANGE_THIS_SECRET" \\
@@ -1027,11 +1623,11 @@ sudo chown tunnel:tunnel /opt/tunnel/*.pem
 
 # Enable and start
 sudo systemctl daemon-reload
-sudo systemctl enable localup-exit-node
-sudo systemctl start localup-exit-node
+sudo systemctl enable localup
+sudo systemctl start localup
 
 # Check status
-sudo systemctl status localup-exit-node
+sudo systemctl status localup
 ```
 
 ### SNI Server Setup
@@ -1051,7 +1647,7 @@ SNI (Server Name Indication) allows multiple TLS services to run on the same por
 ```bash
 # Start relay with SNI server on port 443
 # No certificates required - relay only reads SNI hostname from ClientHello
-localup-relay \
+localup relay \
   --control-addr "0.0.0.0:4443" \
   --tls-addr "0.0.0.0:443" \
   --jwt-secret "your-secret-key"
@@ -1063,23 +1659,23 @@ Host multiple TLS services on the same relay with different hostnames:
 
 ```bash
 # Terminal 1: Start relay with SNI on port 443
-localup-relay \
+localup relay \
   --control-addr "0.0.0.0:4443" \
   --tls-addr "0.0.0.0:443" \
   --jwt-secret "demo-token"
 
 # Terminal 2: Expose first TLS service (api.example.com)
-localup tls \
+localup --protocol tls \
   --port 3443 \
   --relay localhost:4443 \
-  --sni-hostname "api.example.com" \
+  --subdomain "api.example.com" \
   --token "demo-token"
 
 # Terminal 3: Expose second TLS service (db.example.com)
-localup tls \
+localup --protocol tls \
   --port 4443 \
   --relay localhost:4443 \
-  --sni-hostname "db.example.com" \
+  --subdomain "db.example.com" \
   --token "demo-token"
 
 # Terminal 4: Test routing
@@ -1246,52 +1842,57 @@ println!("Secure URL: {}", tunnel.url());
 
 ```bash
 # HTTP tunnel
-localup http \
+localup \
   --port 3000 \
+  --protocol http \
   --relay localhost:4443 \
   --subdomain myapp \
   --token demo-token
 
 # TCP tunnel (e.g., PostgreSQL)
-localup tcp \
+localup \
   --port 5432 \
+  --protocol tcp \
   --relay localhost:4443 \
   --token demo-token
 
 # TLS tunnel (SNI-based passthrough)
-localup tls \
+localup \
   --port 3443 \
+  --protocol tls \
   --relay tunnel.example.com:4443 \
-  --sni-hostname api.example.com \
+  --subdomain api.example.com \
   --token demo-token
 
 # HTTPS tunnel
-localup https \
+localup \
   --port 3000 \
+  --protocol https \
   --relay tunnel.example.com:4443 \
   --subdomain myapp \
   --token demo-token
 
 # TLS tunnel with SNI (passthrough, no decryption at relay)
-localup tls \
+localup \
   --port 3443 \
+  --protocol tls \
   --relay tunnel.example.com:4443 \
-  --sni-hostname api.example.com \
+  --subdomain api.example.com \
   --token demo-token
 
 # Multiple TLS services on same relay (run in separate terminals)
 # Terminal 1:
-localup tls \
+localup --protocol tls \
   --port 3443 \
   --relay tunnel.example.com:4443 \
-  --sni-hostname api.example.com \
+  --subdomain api.example.com \
   --token demo-token
 
 # Terminal 2:
-localup tls \
+localup --protocol tls \
   --port 4443 \
   --relay tunnel.example.com:4443 \
-  --sni-hostname db.example.com \
+  --subdomain db.example.com \
   --token demo-token
 
 # Clients connect with:
@@ -1490,7 +2091,7 @@ sqlite::memory:
 **"Address already in use"**
 ```bash
 lsof -i :8080
-localup-exit-node --http-addr 0.0.0.0:8081
+localup relay --http-addr 0.0.0.0:8081
 ```
 
 **"Certificate not found"**

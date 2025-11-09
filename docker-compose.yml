@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  # Relay server - accepts incoming tunnel connections
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: localup:latest
+    container_name: localup-relay
+    ports:
+      - "4443:4443/udp"  # QUIC control plane (UDP)
+      - "18080:18080"    # HTTP server
+      - "18443:18443"    # HTTPS server
+    volumes:
+      - ./relay-cert.pem:/app/relay-cert.pem:ro
+      - ./relay-key.pem:/app/relay-key.pem:ro
+    environment:
+      RUST_LOG: info
+      LOCALUP_JWT_SECRET: "my-super-secret-key"
+    networks:
+      - localup-net
+    entrypoint: ["localup"]
+    command:
+      - "relay"
+      - "--localup-addr"
+      - "0.0.0.0:4443"
+      - "--http-addr"
+      - "0.0.0.0:18080"
+      - "--https-addr"
+      - "0.0.0.0:18443"
+      - "--tls-cert"
+      - "/app/relay-cert.pem"
+      - "--tls-key"
+      - "/app/relay-key.pem"
+      - "--jwt-secret"
+      - "my-super-secret-key"
+    healthcheck:
+      test: ["CMD", "localup", "--help"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Example: Web server to expose via tunnel (internal only, no host port exposed)
+  web:
+    image: python:3.11-slim
+    container_name: localup-web
+    networks:
+      - localup-net
+    command: python3 -m http.server 127.0.0.1 3000
+
+  # Example: Agent that creates a tunnel to the web server
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: localup:latest
+    container_name: localup-agent
+    networks:
+      - localup-net
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+    entrypoint: ["localup"]
+    command:
+      - "--address"
+      - "web:3000"
+      - "--relay"
+      - "relay:4443"
+      - "--protocol"
+      - "http"
+      - "--subdomain"
+      - "myapp"
+      - "--token"
+      - "my-super-secret-key"
+
+networks:
+  localup-net:
+    driver: bridge

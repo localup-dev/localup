@@ -1942,6 +1942,7 @@ dependencies = [
  "localup-router",
  "localup-server-https",
  "localup-server-tcp",
+ "localup-server-tcp-proxy",
  "localup-server-tls",
  "localup-transport",
  "localup-transport-quic",

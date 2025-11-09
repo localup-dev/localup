@@ -893,3 +893,325 @@ localup-dev/
 - ✅ Implementation notes → `thoughts/IMPLEMENTATION_NOTES.md`
 - ✅ Exploration findings → `thoughts/CODEBASE_EXPLORATION.md`
 - ❌ Root-level documentation without explicit request
+
+## Docker Setup (Session: HTTPS Certificate Support)
+
+### Files Created/Modified
+
+**Docker Files:**
+- **`Dockerfile`** (multi-stage build): Compiles Rust binary in builder stage, runs on Ubuntu 24.04 runtime
+- **`Dockerfile.prebuilt`**: Alternative build using pre-compiled binary (faster builds)
+- **`docker-compose.yml`**: Complete multi-service setup (relay + web + agent) with TLS certificate volumes
+- **`.dockerignore`**: Excludes unnecessary files from Docker build context
+
+**TLS Certificates:**
+- **`relay-cert.pem`**: Self-signed X.509 certificate (CN=localhost, valid 365 days)
+- **`relay-key.pem`**: 2048-bit RSA private key for TLS
+- Generated with: `openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem -days 365 -nodes -subj "/CN=localhost"`
+
+**Documentation Updates:**
+- **`README.md`**: Added comprehensive Docker sections with HTTPS examples
+- **`scripts/install-local-from-source.sh`**: Updated to install single unified `localup` binary
+
+### Port Configuration
+
+**Standard Port Mapping** (used consistently across all Docker examples):
+- **4443/UDP**: QUIC control plane (relay ↔ clients)
+- **18080/TCP**: HTTP server (relay)
+- **18443/TCP**: HTTPS server (relay with TLS certificates)
+
+**Rationale**: Using ports 18080/18443 avoids conflicts with common local development ports (8080/8443).
+
+### Docker Examples in README
+
+1. **Docker Build** (multi-stage from source)
+   ```bash
+   docker build -f Dockerfile -t localup:latest .
+   ```
+
+2. **Relay Server** (with HTTPS support)
+   ```bash
+   docker run -d \
+     -p 4443:4443/udp \
+     -p 18080:18080 \
+     -p 18443:18443 \
+     -v "$(pwd)/relay-cert.pem:/app/relay-cert.pem:ro" \
+     -v "$(pwd)/relay-key.pem:/app/relay-key.pem:ro" \
+     localup:latest relay \
+       --localup-addr 0.0.0.0:4443 \
+       --http-addr 0.0.0.0:18080 \
+       --https-addr 0.0.0.0:18443 \
+       --tls-cert /app/relay-cert.pem \
+       --tls-key /app/relay-key.pem \
+       --jwt-secret "my-super-secret-key"
+   ```
+
+3. **Tunnel Creation** (standalone mode)
+   ```bash
+   docker run --rm localup:latest \
+     --port 3000 \
+     --protocol http \
+     --relay host.docker.internal:4443 \
+     --subdomain myapp \
+     --token "YOUR_JWT_TOKEN"
+   # Access: http://localhost:18080/myapp
+   ```
+
+4. **Docker Compose** (complete setup with relay + web + agent)
+   - Automatic certificate volume mounting
+   - Health checks on relay service
+   - Internal Docker network for service communication
+   - Agent creates HTTP tunnel to web service
+
+### Key Docker Setup Decisions
+
+1. **Volume Mounting for Certificates**: Certificates mounted as read-only volumes from host
+   - Allows easy certificate rotation without rebuilding image
+   - Secures permissions (`:ro` flag prevents modification in container)
+
+2. **Multi-Stage Build**: Compiles binary in builder stage, runs on lightweight Ubuntu 24.04
+   - Binary ABI compatibility ensured (GLIBC 2.39+ in runtime image)
+   - Reduced image size (only runtime dependencies in final layer)
+   - Reproducible builds (everything compiled inside Docker)
+
+3. **Health Checks**: Relay service checks `localup --help` command
+   - Ensures binary works before Docker Compose considers service healthy
+   - Prevents dependent services (agent) from starting too early
+
+4. **Environment Variables**: TLS paths set in container (not host)
+   - Makes Docker examples portable across different hosts
+   - Follows Docker best practices for path configuration
+
+### Generating Custom Certificates
+
+For different hostnames or Subject Alternative Names:
+
+```bash
+# Single hostname (localhost)
+openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem \
+  -days 365 -nodes -subj "/CN=localhost"
+
+# Production hostname
+openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem \
+  -days 365 -nodes -subj "/CN=relay.example.com"
+
+# With multiple Subject Alternative Names (SANs)
+openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem \
+  -days 365 -nodes -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,DNS:127.0.0.1,DNS:host.docker.internal"
+```
+
+### Testing Docker Examples
+
+All examples in README are designed to be copy-paste ready:
+- Include build step explicitly
+- Use `host.docker.internal` for macOS/Windows Docker Desktop
+- Include port numbers in access URLs
+- Show both HTTP and HTTPS access patterns
+- Include cleanup commands (docker stop/rm, docker-compose down)
+
+### Important: TLS Certificate Flags
+
+**Correction**: The relay command uses `--tls-cert` and `--tls-key` flags, NOT `--cert-path` and `--key-path`.
+
+**Correct usage:**
+```bash
+localup relay \
+  --localup-addr 0.0.0.0:4443 \
+  --http-addr 0.0.0.0:18080 \
+  --https-addr 0.0.0.0:18443 \
+  --tls-cert /app/relay-cert.pem \
+  --tls-key /app/relay-key.pem \
+  --jwt-secret "my-super-secret-key"
+```
+
+All README examples have been corrected to use `--tls-cert` and `--tls-key`.
+
+## JWT Authentication (Session: Simplified Validation)
+
+### Overview
+
+The system uses JWT (JSON Web Tokens) for authentication between clients and the relay server. JWT tokens are signed with a shared secret that must match between token generation and validation.
+
+### Token Structure
+
+A JWT token has three parts separated by dots:
+```
+header.payload.signature
+```
+
+Example decoded payload:
+```json
+{
+  "sub": "myapp",          // subject (tunnel ID)
+  "iat": 1762681328,       // issued at (timestamp)
+  "exp": 1762767728,       // expiration (timestamp)
+  "iss": "localup-relay",  // issuer
+  "aud": "localup-client", // audience
+  "protocols": [],         // protocols allowed
+  "regions": []            // regions allowed
+}
+```
+
+### Validation Approach
+
+**Signature-Only Validation**: The relay validates JWT tokens by verifying ONLY the signature and expiration, ignoring all claims:
+
+**Validated**:
+1. ✅ **Signature Verification**: The token must be signed with the correct secret (HMAC-SHA256 or RSA-256)
+2. ✅ **Expiration**: The token must not be expired (checks `exp` claim)
+
+**NOT Validated** (explicitly disabled):
+1. ❌ **Issuer Claim** (`iss`): Relay does NOT check who issued the token
+2. ❌ **Audience Claim** (`aud`): Relay does NOT check who the token is for
+3. ❌ **Not-Before Claim** (`nbf`): Relay does NOT check when token becomes valid
+4. ❌ **Any Other Claims**: Custom claims are not validated
+
+This means you can generate tokens with any issuer/audience/subject values - as long as they're signed with the correct secret and not expired, they'll be accepted.
+
+**Implementation** ([localup-auth/src/jwt.rs:229-234](crates/localup-auth/src/jwt.rs#L229-L234)):
+```rust
+pub fn new(secret: &[u8]) -> Self {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;    // Check expiration
+    validation.validate_aud = false;   // Don't check audience
+    validation.validate_nbf = false;   // Don't check not-before
+    // Signature is always verified (implicit)
+    Self { decoding_key, validation }
+}
+```
+
+### Generating Tokens
+
+Use the CLI to generate tokens:
+
+```bash
+# Generate token for tunnel "myapp" with 24-hour validity
+./target/release/localup generate-token \
+  --secret "my-super-secret-key" \
+  --localup-id "myapp"
+```
+
+Output includes the token and usage instructions:
+```
+✅ JWT Token generated successfully!
+
+Token: eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJteWFwcCIsImlhdCI6MTc2MjY4MTMyOCwiZXhwIjoxNzYyNzY3NzI4LCJpc3MiOiJsb2NhbHVwLXJlbGF5IiwiYXVkIjoibG9jYWx1cC1jbGllbnQiLCJwcm90b2NvbHMiOltdLCJyZWdpb25zIjpbXX0.kYFPGNTd9mNHOcA9OFzCkf2jliyLj5sxNY3CZ-NPUVo
+
+Token details:
+  - Localup ID: myapp
+  - Expires in: 24 hour(s)
+  - Expires at: 2025-11-10 10:42:08 +01:00
+```
+
+### Using Tokens
+
+Pass the token when creating a tunnel:
+
+```bash
+# CLI mode
+./target/release/localup \
+  --port 3000 \
+  --relay localhost:4443 \
+  --token "eyJ0eXAiOiJKV1QiLC..." \
+  --protocol http
+
+# Docker mode
+docker run -e TUNNEL_AUTH_TOKEN="eyJ0eXAiOiJKV1QiLC..." ...
+```
+
+### Token Configuration
+
+Generate with custom validity:
+
+```bash
+# 48-hour token
+./target/release/localup generate-token \
+  --secret "my-super-secret-key" \
+  --localup-id "myapp" \
+  --hours 48
+
+# 1-hour token
+./target/release/localup generate-token \
+  --secret "my-super-secret-key" \
+  --localup-id "myapp" \
+  --hours 1
+```
+
+### Important: Secret Matching
+
+The **secret must match exactly** between token generation and relay validation:
+
+```bash
+# Token generation
+./target/release/localup generate-token \
+  --secret "my-super-secret-key"  # This secret
+
+# Relay validation
+docker run ... \
+  -e LOCALUP_JWT_SECRET="my-super-secret-key"  # Must match exactly
+```
+
+If the secrets don't match, you'll see:
+```
+ERROR localup_control::handler: Authentication failed for tunnel ...: JWT verification failed
+```
+
+### Implementation Details
+
+**Token Generation** (localup-cli/src/main.rs:1744-1745):
+```rust
+let claims = JwtClaims::new(
+    localup_id.clone(),
+    "localup-relay".to_string(),    // issuer
+    "localup-client".to_string(),   // audience
+    Duration::hours(hours),
+);
+let token = JwtValidator::encode(secret.as_bytes(), &claims)?;
+```
+
+**Token Validation** (localup-lib/src/relay.rs:440-441):
+```rust
+// Only verify JWT signature using the secret - no issuer/audience checks
+let jwt_validator = Arc::new(JwtValidator::new(&jwt_secret));
+```
+
+**Handler Authentication** (localup-control/src/handler.rs:225-235):
+```rust
+if let Some(ref validator) = self.jwt_validator {
+    if let Err(e) = validator.validate(&auth_token) {
+        error!("Authentication failed for tunnel {}: {}", localup_id, e);
+        return Err(format!("Authentication failed: {}", e));
+    }
+}
+```
+
+### Security Considerations
+
+⚠️ **Important**: Simplified validation (signature-only) is appropriate for:
+- Internal deployments where you control token generation
+- Development/testing environments
+- Scenarios where all clients trust the same secret
+
+For production deployments with untrusted clients, consider:
+- Adding issuer/audience validation for claim verification
+- Using RS256 (RSA) instead of HS256 (HMAC) for asymmetric verification
+- Implementing token revocation/blacklisting
+- Rate limiting on token generation
+
+### Error Message Flow to Client
+
+Authentication errors are automatically communicated from relay server to client:
+
+**Server-side** ([localup-control/src/handler.rs:225-235](crates/localup-control/src/handler.rs#L225-L235)):
+- Relay validates JWT signature and expiration
+- If validation fails, relay sends `Disconnect { reason: "..." }` message to client
+- Relay also logs error for debugging
+
+**Client-side** ([localup-client/src/localup.rs:295-303](crates/localup-client/src/localup.rs#L295-L303)):
+- Client receives Disconnect message from relay
+- Client checks if reason contains "Authentication failed", "JWT", etc.
+- Client displays error in red: `❌ Authentication failed: <reason>`
+- Client exits with error (no retry)
+
+**Result**: User sees authentication errors printed to stderr immediately when connecting, no need to check server logs. Errors like "JWT verification failed" or "Token expired" appear on the client terminal instantly.

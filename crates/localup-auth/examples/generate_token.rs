@@ -21,11 +21,11 @@ struct Args {
     localup_id: String,
 
     /// Issuer (optional)
-    #[arg(long, default_value = "localup-client")]
+    #[arg(long, default_value = "localup-relay")]
     issuer: String,
 
     /// Audience (optional)
-    #[arg(long, default_value = "localup-exit-node")]
+    #[arg(long, default_value = "localup-client")]
     audience: String,
 
     /// Token validity in hours (default: 24)

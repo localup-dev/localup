@@ -28,6 +28,11 @@ struct Cli {
     #[arg(short, long, global = true)]
     port: Option<u16>,
 
+    /// Local address to expose (host:port format) (standalone mode)
+    /// Alternative to --port. Use this to bind to a specific address
+    #[arg(long, global = true)]
+    address: Option<String>,
+
     /// Protocol to use (http, https, tcp, tls) (standalone mode)
     #[arg(long, global = true)]
     protocol: Option<String>,
@@ -73,7 +78,10 @@ enum Commands {
         name: String,
         /// Local port to expose
         #[arg(short, long)]
-        port: u16,
+        port: Option<u16>,
+        /// Local address to expose (host:port format) - alternative to --port
+        #[arg(long)]
+        address: Option<String>,
         /// Protocol (http, https, tcp, tls)
         #[arg(long, default_value = "http")]
         protocol: String,
@@ -291,9 +299,10 @@ enum Commands {
         #[arg(long, env = "TUNNEL_JWT_SECRET")]
         secret: String,
 
-        /// Tunnel ID (optional, defaults to "client")
-        #[arg(long, default_value = "client")]
-        localup_id: String,
+        /// Subject/Tunnel identifier (optional, if not specified a random UUID is generated)
+        /// Use this to identify the tunnel in logs and routing
+        #[arg(long)]
+        sub: Option<String>,
 
         /// Token validity in hours (default: 24)
         #[arg(long, default_value = "24")]
@@ -313,6 +322,10 @@ enum Commands {
         /// If not specified, all addresses are allowed
         #[arg(long = "address")]
         allowed_addresses: Vec<String>,
+
+        /// Output only the JWT token (useful for scripts)
+        #[arg(long)]
+        token_only: bool,
     },
 }
 
@@ -361,6 +374,7 @@ async fn main() -> Result<()> {
         Some(Commands::Add {
             name,
             port,
+            address,
             protocol,
             token,
             subdomain,
@@ -371,6 +385,7 @@ async fn main() -> Result<()> {
         }) => handle_add_tunnel(
             name,
             port,
+            address,
             protocol,
             token,
             subdomain,
@@ -484,19 +499,21 @@ async fn main() -> Result<()> {
         }
         Some(Commands::GenerateToken {
             secret,
-            localup_id,
+            sub,
             hours,
             reverse_tunnel,
             allowed_agents,
             allowed_addresses,
+            token_only,
         }) => {
             handle_generate_token_command(
                 secret,
-                localup_id,
+                sub,
                 hours,
                 reverse_tunnel,
                 allowed_agents,
                 allowed_addresses,
+                token_only,
             )
             .await
         }
@@ -569,7 +586,8 @@ fn handle_service_command(command: ServiceCommands) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 fn handle_add_tunnel(
     name: String,
-    port: u16,
+    port: Option<u16>,
+    address: Option<String>,
     protocol: String,
     token: Option<String>,
     subdomain: Option<String>,
@@ -580,8 +598,21 @@ fn handle_add_tunnel(
 ) -> Result<()> {
     let store = localup_store::TunnelStore::new()?;
 
+    // Parse port and address - user must provide one or the other
+    let (local_host, local_port) = if let Some(addr) = address {
+        // User provided --address
+        parse_local_address(&addr)?
+    } else if let Some(p) = port {
+        // User provided --port
+        (String::from("localhost"), p)
+    } else {
+        return Err(anyhow::anyhow!(
+            "Either --port or --address must be provided for tunnel configuration"
+        ));
+    };
+
     // Parse protocol
-    let protocol_config = parse_protocol(&protocol, port, subdomain, domain, remote_port)?;
+    let protocol_config = parse_protocol(&protocol, local_port, subdomain, domain, remote_port)?;
 
     // Parse exit node
     let exit_node = if let Some(relay_addr) = relay {
@@ -593,7 +624,7 @@ fn handle_add_tunnel(
 
     // Create tunnel config
     let config = TunnelConfig {
-        local_host: "localhost".to_string(),
+        local_host,
         protocols: vec![protocol_config],
         auth_token: token.unwrap_or_default(),
         exit_node,
@@ -735,16 +766,53 @@ fn handle_disable_tunnel(name: String) -> Result<()> {
     Ok(())
 }
 
+/// Parse port/address string into (host, port)
+/// Supports:
+/// - "3000" -> ("localhost", 3000)
+/// - "127.0.0.1:3000" -> ("127.0.0.1", 3000)
+/// - "example.com:8080" -> ("example.com", 8080)
+fn parse_local_address(addr_str: &str) -> Result<(String, u16)> {
+    if addr_str.contains(':') {
+        // Full address with host:port
+        let parts: Vec<&str> = addr_str.rsplitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(anyhow::anyhow!(
+                "Invalid address format: {}. Expected 'host:port' or just 'port'",
+                addr_str
+            ));
+        }
+        let host = parts[1].to_string();
+        let port: u16 = parts[0].parse().context(format!(
+            "Invalid port number '{}' in address '{}'",
+            parts[0], addr_str
+        ))?;
+        Ok((host, port))
+    } else {
+        // Just a port number, default to localhost
+        let port: u16 = addr_str.parse().context(format!(
+            "Invalid port number '{}'. Must be a number or 'host:port' format",
+            addr_str
+        ))?;
+        Ok(("localhost".to_string(), port))
+    }
+}
+
 async fn run_standalone(cli: Cli) -> Result<()> {
     // Check if required arguments are present for standalone mode
-    if cli.port.is_none() || cli.token.is_none() {
-        eprintln!("Error: Standalone mode requires --port and --token arguments");
+    if cli.token.is_none() {
+        eprintln!("Error: Standalone mode requires --token argument");
         eprintln!();
         eprintln!("Usage:");
         eprintln!("  localup --port <PORT> --protocol <PROTOCOL> --token <TOKEN>");
+        eprintln!("  localup --address <HOST:PORT> --protocol <PROTOCOL> --token <TOKEN>");
+        eprintln!();
+        eprintln!("Examples:");
+        eprintln!("  localup --port 3000 --protocol http --token <TOKEN>");
+        eprintln!("  localup --address 127.0.0.1:8080 --protocol http --token <TOKEN>");
         eprintln!();
         eprintln!("Or use tunnel management commands:");
         eprintln!("  localup add <name> --port <PORT> --token <TOKEN>");
+        eprintln!("  localup add <name> --address <HOST:PORT> --token <TOKEN>");
         eprintln!("  localup daemon start");
         eprintln!("  localup service install");
         eprintln!();
@@ -752,18 +820,30 @@ async fn run_standalone(cli: Cli) -> Result<()> {
         std::process::exit(1);
     }
 
-    let port = cli.port.unwrap();
     let token = cli.token.unwrap();
     let protocol_str = cli.protocol.unwrap_or_else(|| "http".to_string());
 
+    // Parse port and address - user must provide one or the other
+    let (local_host, local_port) = if let Some(addr) = cli.address {
+        // User provided --address
+        parse_local_address(&addr)?
+    } else if let Some(p) = cli.port {
+        // User provided --port
+        (String::from("localhost"), p)
+    } else {
+        return Err(anyhow::anyhow!(
+            "Either --port or --address must be provided for standalone mode"
+        ));
+    };
+
     info!("🚀 Tunnel CLI starting (standalone mode)...");
     info!("Protocol: {}", protocol_str);
-    info!("Local port: {}", port);
+    info!("Local address: {}:{}", local_host, local_port);
 
     // Parse protocol configuration
     let protocol = parse_protocol(
         &protocol_str,
-        port,
+        local_port,
         cli.subdomain.clone(),
         cli.domain.clone(),
         cli.remote_port,
@@ -781,7 +861,7 @@ async fn run_standalone(cli: Cli) -> Result<()> {
 
     // Build tunnel configuration
     let config = TunnelConfig {
-        local_host: "localhost".to_string(),
+        local_host,
         protocols: vec![protocol],
         auth_token: token.clone(),
         exit_node,
@@ -816,13 +896,24 @@ async fn run_standalone(cli: Cli) -> Result<()> {
                 "⏳ Waiting {} seconds before reconnecting...",
                 backoff_seconds
             );
-            tokio::time::sleep(tokio::time::Duration::from_secs(backoff_seconds)).await;
-        }
 
-        // Check if user pressed Ctrl+C during backoff
-        if cancel_rx.try_recv().is_ok() {
-            info!("Shutdown requested, exiting...");
-            break;
+            // Use select! to make sleep cancellable by Ctrl+C
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(backoff_seconds)) => {
+                    // Sleep completed normally
+                }
+                _ = cancel_rx.recv() => {
+                    // Ctrl+C was pressed during sleep
+                    info!("Shutdown requested, exiting...");
+                    break;
+                }
+            }
+        } else {
+            // Check if user pressed Ctrl+C (non-blocking when backoff is 0)
+            if cancel_rx.try_recv().is_ok() {
+                info!("Shutdown requested, exiting...");
+                break;
+            }
         }
 
         info!(
@@ -840,7 +931,7 @@ async fn run_standalone(cli: Cli) -> Result<()> {
                 if let Some(url) = client.public_url() {
                     println!();
                     println!("🌍 Your local server is now public!");
-                    println!("📍 Local:  http://localhost:{}", port);
+                    println!("📍 Local:  http://localhost:{}", local_port);
                     println!("🌐 Public: {}", url);
                     println!();
                 }
@@ -870,7 +961,7 @@ async fn run_standalone(cli: Cli) -> Result<()> {
                     drop(listener); // Release the port for the server to bind
 
                     // Local upstream URL for replay functionality
-                    let local_upstream = format!("http://localhost:{}", port);
+                    let local_upstream = format!("http://localhost:{}", local_port);
 
                     tokio::spawn(async move {
                         let server =
@@ -1321,13 +1412,15 @@ async fn handle_relay_command(
     domain: String,
     jwt_secret: Option<String>,
     log_level: String,
-    _tcp_port_range: Option<String>,
+    tcp_port_range: Option<String>,
     _api_addr: String,
     _no_api: bool,
     database_url: Option<String>,
 ) -> Result<()> {
     use localup_auth::JwtValidator;
-    use localup_control::{AgentRegistry, TunnelConnectionManager, TunnelHandler};
+    use localup_control::{
+        AgentRegistry, PortAllocator as PortAllocatorTrait, TunnelConnectionManager, TunnelHandler,
+    };
     use localup_router::RouteRegistry;
     use localup_server_https::{HttpsServer, HttpsServerConfig};
     use localup_server_tcp::{TcpServer, TcpServerConfig};
@@ -1365,18 +1458,42 @@ async fn handle_relay_command(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to run database migrations: {}", e))?;
 
+    // Initialize TCP port allocator if TCP range provided
+    let port_allocator = if let Some(ref tcp_range) = tcp_port_range {
+        let (start, end) = parse_port_range(tcp_range)?;
+        info!(
+            "TCP port range: {}-{} ({} ports available)",
+            start,
+            end,
+            end - start + 1
+        );
+        Some(Arc::new(PortAllocator::new(start, end)))
+    } else {
+        None
+    };
+
+    // Start cleanup task for expired port reservations
+    if let Some(ref allocator) = port_allocator {
+        let allocator_clone = allocator.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // Check every minute
+            loop {
+                interval.tick().await;
+                allocator_clone.cleanup_expired();
+            }
+        });
+        info!("✅ Port reservation cleanup task started (checks every 60s)");
+    }
+
     // Create shared route registry
     let registry = Arc::new(RouteRegistry::new());
     info!("✅ Route registry initialized");
 
     // Create JWT validator for tunnel authentication
+    // Note: Only validates signature and expiration (no issuer/audience validation)
     let jwt_validator = if let Some(jwt_secret) = jwt_secret {
-        let validator = Arc::new(
-            JwtValidator::new(jwt_secret.as_bytes())
-                .with_audience("localup-client".to_string())
-                .with_issuer("localup-exit-node".to_string()),
-        );
-        info!("✅ JWT authentication enabled");
+        let validator = Arc::new(JwtValidator::new(jwt_secret.as_bytes()));
+        info!("✅ JWT authentication enabled (signature only)");
         Some(validator)
     } else {
         info!("⚠️  Running without JWT authentication (not recommended for production)");
@@ -1462,7 +1579,7 @@ async fn handle_relay_command(
     };
 
     // Create tunnel handler
-    let localup_handler = TunnelHandler::new(
+    let mut localup_handler = TunnelHandler::new(
         localup_manager.clone(),
         registry.clone(),
         jwt_validator.clone(),
@@ -1470,6 +1587,57 @@ async fn handle_relay_command(
         pending_requests.clone(),
     )
     .with_agent_registry(agent_registry.clone());
+
+    // Add port allocator if TCP range was provided
+    if let Some(ref allocator) = port_allocator {
+        localup_handler =
+            localup_handler.with_port_allocator(allocator.clone() as Arc<dyn PortAllocatorTrait>);
+        info!("✅ TCP port allocator configured");
+
+        // Add TCP proxy spawner
+        let localup_manager_for_spawner = localup_manager.clone();
+        let db_for_spawner = db.clone();
+        let spawner: localup_control::TcpProxySpawner =
+            Arc::new(move |localup_id: String, port: u16| {
+                let manager = localup_manager_for_spawner.clone();
+                let localup_id_clone = localup_id.clone();
+                let db_clone = db_for_spawner.clone();
+
+                Box::pin(async move {
+                    use localup_server_tcp_proxy::{TcpProxyServer, TcpProxyServerConfig};
+                    use std::net::SocketAddr;
+
+                    let bind_addr: SocketAddr = format!("0.0.0.0:{}", port)
+                        .parse()
+                        .map_err(|e| format!("Invalid bind address: {}", e))?;
+
+                    let config = TcpProxyServerConfig {
+                        bind_addr,
+                        localup_id: localup_id.clone(),
+                    };
+
+                    let proxy_server =
+                        TcpProxyServer::new(config, manager.clone()).with_database(db_clone);
+
+                    // Note: No callback needed - TCP proxy opens new QUIC streams directly
+
+                    // Start the proxy server in a background task
+                    tokio::spawn(async move {
+                        if let Err(e) = proxy_server.start().await {
+                            error!(
+                                "TCP proxy server error for tunnel {}: {}",
+                                localup_id_clone, e
+                            );
+                        }
+                    });
+
+                    Ok(())
+                })
+            });
+
+        localup_handler = localup_handler.with_tcp_proxy_spawner(spawner);
+        info!("✅ TCP proxy spawner configured");
+    }
 
     let localup_handler = Arc::new(localup_handler);
 
@@ -1656,20 +1824,25 @@ async fn handle_agent_server_command(
 
 async fn handle_generate_token_command(
     secret: String,
-    localup_id: String,
+    sub: Option<String>,
     hours: i64,
     reverse_tunnel: bool,
     allowed_agents: Vec<String>,
     allowed_addresses: Vec<String>,
+    token_only: bool,
 ) -> Result<()> {
     use chrono::Duration;
     use localup_auth::{JwtClaims, JwtValidator};
+    use uuid::Uuid;
+
+    // Generate a unique subject if not provided, or use the provided one
+    let subject = sub.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     // Create claims with the specified validity period
     let mut claims = JwtClaims::new(
-        localup_id.clone(),
-        "localup-cli".to_string(),
+        subject.clone(),
         "localup-relay".to_string(),
+        "localup-client".to_string(),
         Duration::hours(hours),
     );
 
@@ -1687,41 +1860,46 @@ async fn handle_generate_token_command(
     // Encode the token
     let token = JwtValidator::encode(secret.as_bytes(), &claims)?;
 
-    // Display the token
-    println!();
-    println!("✅ JWT Token generated successfully!");
-    println!();
-    println!("Token: {}", token);
-    println!();
-    println!("Token details:");
-    println!("  - Localup ID: {}", claims.sub);
-    println!("  - Expires in: {} hour(s)", hours);
-    println!("  - Expires at: {}", claims.exp_formatted());
-    println!(
-        "  - Reverse tunnel: {}",
-        if reverse_tunnel {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    );
+    // Output token only if requested (useful for scripts)
+    if token_only {
+        println!("{}", token);
+    } else {
+        // Display the token with details
+        println!();
+        println!("✅ JWT Token generated successfully!");
+        println!();
+        println!("Token: {}", token);
+        println!();
+        println!("Token details:");
+        println!("  - Subject: {}", subject);
+        println!("  - Expires in: {} hour(s)", hours);
+        println!("  - Expires at: {}", claims.exp_formatted());
+        println!(
+            "  - Reverse tunnel: {}",
+            if reverse_tunnel {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
 
-    if reverse_tunnel {
-        if let Some(ref agents) = claims.allowed_agents {
-            println!("  - Allowed agents: {}", agents.join(", "));
-        } else {
-            println!("  - Allowed agents: all");
+        if reverse_tunnel {
+            if let Some(ref agents) = claims.allowed_agents {
+                println!("  - Allowed agents: {}", agents.join(", "));
+            } else {
+                println!("  - Allowed agents: all");
+            }
+            if let Some(ref addrs) = claims.allowed_addresses {
+                println!("  - Allowed addresses: {}", addrs.join(", "));
+            } else {
+                println!("  - Allowed addresses: all");
+            }
         }
-        if let Some(ref addrs) = claims.allowed_addresses {
-            println!("  - Allowed addresses: {}", addrs.join(", "));
-        } else {
-            println!("  - Allowed addresses: all");
-        }
+        println!();
+        println!("Use this token in your client configuration:");
+        println!("  localup --token {}", token);
+        println!();
     }
-    println!();
-    println!("Use this token in your client configuration:");
-    println!("  localup --token {}", token);
-    println!();
 
     Ok(())
 }
@@ -1737,4 +1915,296 @@ fn init_logging(log_level: &str) -> Result<()> {
         .init();
 
     Ok(())
+}
+
+// TCP Port Allocator and related types (for handle_relay_command)
+use chrono::{DateTime, Utc};
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
+
+/// Allocation state for a port
+#[derive(Debug, Clone)]
+struct PortAllocation {
+    port: u16,
+    state: AllocationState,
+}
+
+#[derive(Debug, Clone)]
+enum AllocationState {
+    Active,
+    Reserved { until: DateTime<Utc> },
+}
+
+pub struct PortAllocator {
+    range_start: u16,
+    range_end: u16,
+    available_ports: Mutex<HashSet<u16>>,
+    allocated_ports: Mutex<HashMap<String, PortAllocation>>, // localup_id -> allocation
+    reservation_ttl_seconds: i64,
+}
+
+impl PortAllocator {
+    pub fn new(range_start: u16, range_end: u16) -> Self {
+        Self::with_reservation_ttl(range_start, range_end, 300) // Default 5 minute reservation
+    }
+
+    pub fn with_reservation_ttl(range_start: u16, range_end: u16, ttl_seconds: i64) -> Self {
+        let mut available = HashSet::new();
+        for port in range_start..=range_end {
+            available.insert(port);
+        }
+
+        Self {
+            range_start,
+            range_end,
+            available_ports: Mutex::new(available),
+            allocated_ports: Mutex::new(HashMap::new()),
+            reservation_ttl_seconds: ttl_seconds,
+        }
+    }
+
+    /// Check if a port is actually available at the OS level
+    fn is_port_available(port: u16) -> bool {
+        use std::net::{SocketAddr, TcpListener};
+
+        // Try to bind to 0.0.0.0:port
+        let addr: SocketAddr = format!("0.0.0.0:{}", port).parse().unwrap();
+        TcpListener::bind(addr).is_ok()
+    }
+
+    /// Generate a deterministic port number from localup_id hash
+    /// This ensures the same localup_id always gets the same port (if available)
+    fn hash_to_port(&self, localup_id: &str) -> u16 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        localup_id.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        let range_size = (self.range_end - self.range_start + 1) as u64;
+        let port_offset = (hash % range_size) as u16;
+        self.range_start + port_offset
+    }
+
+    /// Clean up expired reservations (should be called periodically)
+    pub fn cleanup_expired(&self) {
+        let mut available = self.available_ports.lock().unwrap();
+        let mut allocated = self.allocated_ports.lock().unwrap();
+        let now = Utc::now();
+
+        let expired: Vec<String> = allocated
+            .iter()
+            .filter_map(|(localup_id, allocation)| match &allocation.state {
+                AllocationState::Reserved { until } if *until < now => Some(localup_id.clone()),
+                _ => None,
+            })
+            .collect();
+
+        for localup_id in expired {
+            if let Some(allocation) = allocated.remove(&localup_id) {
+                available.insert(allocation.port);
+                info!(
+                    "Cleaned up expired port reservation for tunnel {} (port {})",
+                    localup_id, allocation.port
+                );
+            }
+        }
+    }
+}
+
+impl localup_control::PortAllocator for PortAllocator {
+    fn allocate(&self, localup_id: &str, requested_port: Option<u16>) -> Result<u16, String> {
+        let mut available = self.available_ports.lock().unwrap();
+        let mut allocated = self.allocated_ports.lock().unwrap();
+
+        // Check if already allocated (active or reserved)
+        if let Some(allocation) = allocated.get(localup_id) {
+            let port = allocation.port;
+            // Reactivate if it was reserved
+            if matches!(allocation.state, AllocationState::Reserved { .. }) {
+                info!(
+                    "Reusing reserved port {} for reconnecting tunnel {}",
+                    port, localup_id
+                );
+                allocated.insert(
+                    localup_id.to_string(),
+                    PortAllocation {
+                        port,
+                        state: AllocationState::Active,
+                    },
+                );
+            }
+            return Ok(port);
+        }
+
+        // If user requested a specific port, try to allocate it
+        if let Some(req_port) = requested_port {
+            if available.contains(&req_port) && Self::is_port_available(req_port) {
+                // Requested port is available!
+                available.remove(&req_port);
+                allocated.insert(
+                    localup_id.to_string(),
+                    PortAllocation {
+                        port: req_port,
+                        state: AllocationState::Active,
+                    },
+                );
+                info!(
+                    "✅ Allocated requested port {} for tunnel {}",
+                    req_port, localup_id
+                );
+                return Ok(req_port);
+            } else if available.contains(&req_port) && !Self::is_port_available(req_port) {
+                // Port in our pool but in use by another process
+                available.remove(&req_port);
+                return Err(format!(
+                    "Requested port {} is in use by another process",
+                    req_port
+                ));
+            } else {
+                // Port not in our allocation range
+                return Err(format!(
+                    "Requested port {} is not available (already allocated or out of range)",
+                    req_port
+                ));
+            }
+        }
+
+        // No specific port requested, try to allocate deterministic port based on localup_id hash
+        let preferred_port = self.hash_to_port(localup_id);
+
+        if available.contains(&preferred_port) && Self::is_port_available(preferred_port) {
+            // Preferred port is available in our tracking AND at OS level!
+            available.remove(&preferred_port);
+            allocated.insert(
+                localup_id.to_string(),
+                PortAllocation {
+                    port: preferred_port,
+                    state: AllocationState::Active,
+                },
+            );
+            info!(
+                "🎯 Allocated deterministic port {} for tunnel {} (hash-based)",
+                preferred_port, localup_id
+            );
+            return Ok(preferred_port);
+        } else if available.contains(&preferred_port) && !Self::is_port_available(preferred_port) {
+            // Port was in our available set but is actually in use - remove it from tracking
+            warn!("Port {} was marked available but is in use by another process, removing from available pool", preferred_port);
+            available.remove(&preferred_port);
+        }
+
+        // Preferred port not available, try nearby ports (within ±10 range)
+        for offset in 1..=10 {
+            for &port in &[
+                preferred_port.saturating_add(offset),
+                preferred_port.saturating_sub(offset),
+            ] {
+                if port >= self.range_start && port <= self.range_end && available.contains(&port) {
+                    // Verify port is actually available at OS level
+                    if Self::is_port_available(port) {
+                        available.remove(&port);
+                        allocated.insert(
+                            localup_id.to_string(),
+                            PortAllocation {
+                                port,
+                                state: AllocationState::Active,
+                            },
+                        );
+                        info!(
+                            "Allocated nearby port {} for tunnel {} (preferred {} was taken)",
+                            port, localup_id, preferred_port
+                        );
+                        return Ok(port);
+                    } else {
+                        // Port in use by another process, remove from available pool
+                        warn!(
+                            "Port {} was marked available but is in use, removing from pool",
+                            port
+                        );
+                        available.remove(&port);
+                    }
+                }
+            }
+        }
+
+        // Fallback: allocate any available port, checking OS-level availability
+        let available_ports: Vec<u16> = available.iter().copied().collect();
+        for &port in &available_ports {
+            if Self::is_port_available(port) {
+                available.remove(&port);
+                allocated.insert(
+                    localup_id.to_string(),
+                    PortAllocation {
+                        port,
+                        state: AllocationState::Active,
+                    },
+                );
+                info!(
+                    "Allocated fallback port {} for tunnel {} (preferred {} was taken)",
+                    port, localup_id, preferred_port
+                );
+                return Ok(port);
+            } else {
+                // Port in use by another process, remove from available pool
+                warn!(
+                    "Port {} was marked available but is in use, removing from pool",
+                    port
+                );
+                available.remove(&port);
+            }
+        }
+
+        Err("No available ports in range (all ports in use)".to_string())
+    }
+
+    fn deallocate(&self, localup_id: &str) {
+        let mut allocated = self.allocated_ports.lock().unwrap();
+
+        // Instead of immediately freeing, mark as reserved for reconnection
+        if let Some(allocation) = allocated.get_mut(localup_id) {
+            if matches!(allocation.state, AllocationState::Active) {
+                let until = Utc::now() + chrono::Duration::seconds(self.reservation_ttl_seconds);
+                allocation.state = AllocationState::Reserved { until };
+                info!(
+                    "Port {} for tunnel {} marked as reserved until {} (TTL: {}s)",
+                    allocation.port,
+                    localup_id,
+                    until.format("%Y-%m-%d %H:%M:%S"),
+                    self.reservation_ttl_seconds
+                );
+            }
+        }
+    }
+
+    fn get_allocated_port(&self, localup_id: &str) -> Option<u16> {
+        self.allocated_ports
+            .lock()
+            .unwrap()
+            .get(localup_id)
+            .map(|alloc| alloc.port)
+    }
+}
+
+fn parse_port_range(range_str: &str) -> Result<(u16, u16)> {
+    let parts: Vec<&str> = range_str.split('-').collect();
+    if parts.len() != 2 {
+        return Err(anyhow::anyhow!(
+            "Invalid port range format. Expected: START-END (e.g., 10000-20000)"
+        ));
+    }
+
+    let start: u16 = parts[0]
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid start port: {}", parts[0]))?;
+    let end: u16 = parts[1]
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid end port: {}", parts[1]))?;
+
+    if start >= end {
+        return Err(anyhow::anyhow!("Start port must be less than end port"));
+    }
+
+    Ok((start, end))
 }

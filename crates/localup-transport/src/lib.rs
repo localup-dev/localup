@@ -53,6 +53,13 @@ pub enum TransportError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
+    #[error("Failed to bind to {address}: {reason}\n\nTroubleshooting:\n  • Check if another process is using this port: lsof -i :{port}\n  • Try using a different address or port")]
+    BindError {
+        address: String,
+        port: u16,
+        reason: String,
+    },
+
     #[error("Stream closed")]
     StreamClosed,
 

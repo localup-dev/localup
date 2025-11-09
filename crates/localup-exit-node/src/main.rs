@@ -310,14 +310,10 @@ async fn main() -> Result<()> {
     info!("Routes will be registered automatically when tunnels connect");
 
     // Create JWT validator for tunnel authentication
-    // Token is issued by exit node for clients/agents (aud=tunnel-client, iss=tunnel-exit-node)
+    // Note: Only validates signature and expiration (no issuer/audience validation)
     let jwt_validator = if let Some(jwt_secret) = args.jwt_secret {
-        let validator = Arc::new(
-            JwtValidator::new(jwt_secret.as_bytes())
-                .with_audience("localup-client".to_string())
-                .with_issuer("localup-exit-node".to_string()),
-        );
-        info!("✅ JWT authentication enabled");
+        let validator = Arc::new(JwtValidator::new(jwt_secret.as_bytes()));
+        info!("✅ JWT authentication enabled (signature only)");
         Some(validator)
     } else {
         info!("⚠️  Running without JWT authentication (not recommended for production)");

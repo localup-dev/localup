@@ -437,11 +437,8 @@ impl<P> RelayBuilder<P> {
         let jwt_secret = self
             .jwt_secret
             .unwrap_or_else(|| b"default-secret".to_vec());
-        let jwt_validator = Arc::new(
-            JwtValidator::new(&jwt_secret)
-                .with_issuer("localup-relay".to_string())
-                .with_audience("localup-client".to_string()),
-        );
+        // Only verify JWT signature using the secret - no issuer/audience checks
+        let jwt_validator = Arc::new(JwtValidator::new(&jwt_secret));
 
         // Create trait implementations - use custom or defaults
         let _storage = self

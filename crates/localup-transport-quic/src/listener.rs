@@ -29,8 +29,16 @@ impl QuicListener {
 
         let server_config = config.build_server_config()?;
 
-        let endpoint =
-            Endpoint::server(server_config, bind_addr).map_err(TransportError::IoError)?;
+        let endpoint = Endpoint::server(server_config, bind_addr).map_err(|e| {
+            let port = bind_addr.port();
+            let address = bind_addr.ip().to_string();
+            let reason = e.to_string();
+            TransportError::BindError {
+                address,
+                port,
+                reason,
+            }
+        })?;
 
         let local_addr = endpoint.local_addr().map_err(TransportError::IoError)?;
 

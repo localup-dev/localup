@@ -20,6 +20,7 @@ localup-auth = { path = "../localup-auth" }
 localup-control = { path = "../localup-control" }
 localup-server-https = { path = "../localup-server-https" }
 localup-server-tcp = { path = "../localup-server-tcp" }
+localup-server-tcp-proxy = { path = "../localup-server-tcp-proxy" }
 localup-server-tls = { path = "../localup-server-tls" }
 localup-transport = { path = "../localup-transport" }
 localup-transport-quic = { path = "../localup-transport-quic" }

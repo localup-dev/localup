@@ -26,6 +26,13 @@ pub enum HttpsServerError {
 
     #[error("Route error: {0}")]
     RouteError(String),
+
+    #[error("Failed to bind to {address}: {reason}\n\nTroubleshooting:\n  • Check if another process is using this port: lsof -i :{port}\n  • Try using a different address or port")]
+    BindError {
+        address: String,
+        port: u16,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +121,16 @@ impl HttpsServer {
         let acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
         // Bind TCP listener
-        let listener = TcpListener::bind(local_addr).await?;
+        let listener = TcpListener::bind(local_addr).await.map_err(|e| {
+            let port = local_addr.port();
+            let address = local_addr.ip().to_string();
+            let reason = e.to_string();
+            HttpsServerError::BindError {
+                address,
+                port,
+                reason,
+            }
+        })?;
         let bound_addr = listener.local_addr()?;
 
         info!("HTTPS server listening on {}", bound_addr);

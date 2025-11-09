@@ -25,6 +25,13 @@ pub enum TcpProxyServerError {
 
     #[error("Tunnel error: {0}")]
     TunnelError(String),
+
+    #[error("Failed to bind to {address}: {reason}\n\nTroubleshooting:\n  • Check if another process is using this port: lsof -i :{port}\n  • Try using a different address or port")]
+    BindError {
+        address: String,
+        port: u16,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -85,7 +92,18 @@ impl TcpProxyServer {
     }
 
     pub async fn start(self) -> Result<(), TcpProxyServerError> {
-        let listener = TcpListener::bind(&self.config.bind_addr).await?;
+        let listener = TcpListener::bind(&self.config.bind_addr)
+            .await
+            .map_err(|e| {
+                let port = self.config.bind_addr.port();
+                let address = self.config.bind_addr.ip().to_string();
+                let reason = e.to_string();
+                TcpProxyServerError::BindError {
+                    address,
+                    port,
+                    reason,
+                }
+            })?;
         let addr = listener.local_addr()?;
         let target_port = addr.port();
 
