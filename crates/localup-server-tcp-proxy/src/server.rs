@@ -91,19 +91,51 @@ impl TcpProxyServer {
         self
     }
 
-    pub async fn start(self) -> Result<(), TcpProxyServerError> {
-        let listener = TcpListener::bind(&self.config.bind_addr)
-            .await
-            .map_err(|e| {
-                let port = self.config.bind_addr.port();
-                let address = self.config.bind_addr.ip().to_string();
-                let reason = e.to_string();
-                TcpProxyServerError::BindError {
-                    address,
-                    port,
-                    reason,
+    async fn bind_with_retry(&self) -> Result<TcpListener, TcpProxyServerError> {
+        // Retry bind logic to handle TIME_WAIT state gracefully (up to 3 attempts with 1 second delays)
+        for attempt in 1..=3 {
+            match TcpListener::bind(&self.config.bind_addr).await {
+                Ok(listener) => {
+                    if attempt > 1 {
+                        info!(
+                            "Successfully bound to {} on attempt {}/3",
+                            self.config.bind_addr, attempt
+                        );
+                    }
+                    return Ok(listener);
                 }
-            })?;
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempt < 3 => {
+                    warn!(
+                        "Port {} is in use (attempt {}/3, may be in TIME_WAIT state), retrying in 1 second...",
+                        self.config.bind_addr.port(), attempt
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    let port = self.config.bind_addr.port();
+                    let address = self.config.bind_addr.ip().to_string();
+                    let reason = e.to_string();
+                    return Err(TcpProxyServerError::BindError {
+                        address,
+                        port,
+                        reason,
+                    });
+                }
+            }
+        }
+
+        // If all retries failed, return error
+        let port = self.config.bind_addr.port();
+        let address = self.config.bind_addr.ip().to_string();
+        Err(TcpProxyServerError::BindError {
+            address,
+            port,
+            reason: "Address in use after 3 retry attempts".to_string(),
+        })
+    }
+
+    pub async fn start(self) -> Result<(), TcpProxyServerError> {
+        let listener = self.bind_with_retry().await?;
         let addr = listener.local_addr()?;
         let target_port = addr.port();
 

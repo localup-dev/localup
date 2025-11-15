@@ -235,8 +235,12 @@ impl TunnelConnector {
                     // 0 means auto-allocate, specific port means request that port
                     port: remote_port.unwrap_or(0),
                 },
-                ProtocolConfig::Tls { sni_hostname, .. } => Protocol::Tls {
-                    port: 8443,
+
+                ProtocolConfig::Tls {
+                    local_port: _,
+                    sni_hostname,
+                } => Protocol::Tls {
+                    port: 8443, // TLS server port (SNI-based routing)
                     sni_pattern: sni_hostname.clone().unwrap_or_else(|| "*".to_string()),
                 },
             })
@@ -553,6 +557,21 @@ impl TunnelConnection {
                                     &config_clone,
                                     &metrics_clone,
                                     stream_id,
+                                )
+                                .await;
+                            }
+                            Ok(Some(TunnelMessage::TlsConnect {
+                                stream_id,
+                                sni,
+                                client_hello,
+                            })) => {
+                                debug!("TLS connect on stream {}: SNI={}", stream.stream_id(), sni);
+                                Self::handle_tls_stream(
+                                    stream,
+                                    &config_clone,
+                                    &metrics_clone,
+                                    stream_id,
+                                    client_hello,
                                 )
                                 .await;
                             }
@@ -908,6 +927,152 @@ impl TunnelConnection {
         // Wait for both tasks
         let _ = tokio::join!(local_to_quic, quic_to_local);
         debug!("TCP stream handler finished (stream {})", stream_id);
+    }
+
+    /// Handle a TLS connection on a dedicated QUIC stream
+    async fn handle_tls_stream(
+        mut stream: localup_transport_quic::stream::QuicStream,
+        config: &TunnelConfig,
+        _metrics: &MetricsStore,
+        stream_id: u32,
+        client_hello: Vec<u8>,
+    ) {
+        // Get local TLS port from first TLS protocol
+        let local_port = config.protocols.first().and_then(|p| match p {
+            ProtocolConfig::Tls { local_port, .. } => Some(*local_port),
+            _ => None,
+        });
+
+        let local_port = match local_port {
+            Some(port) => port,
+            None => {
+                error!("No TLS protocol configured");
+                let _ = stream
+                    .send_message(&TunnelMessage::TlsClose { stream_id })
+                    .await;
+                return;
+            }
+        };
+
+        // Connect to local TLS service
+        let local_addr = format!("{}:{}", config.local_host, local_port);
+        let local_socket = match TcpStream::connect(&local_addr).await {
+            Ok(sock) => sock,
+            Err(e) => {
+                error!(
+                    "Failed to connect to local TLS service at {}: {}",
+                    local_addr, e
+                );
+                let _ = stream
+                    .send_message(&TunnelMessage::TlsClose { stream_id })
+                    .await;
+                return;
+            }
+        };
+
+        debug!("Connected to local TLS service at {}", local_addr);
+
+        // Split both streams for bidirectional communication WITHOUT MUTEXES
+        let (mut local_read, mut local_write) = local_socket.into_split();
+        let (mut quic_send, mut quic_recv) = stream.split();
+
+        // Task to read from local TLS and send to QUIC stream
+        // Now owns quic_send exclusively - no mutex needed!
+        let local_to_quic = tokio::spawn(async move {
+            let mut buffer = vec![0u8; 8192];
+            loop {
+                match local_read.read(&mut buffer).await {
+                    Ok(0) => {
+                        // Local socket closed
+                        debug!("Local TLS socket closed (stream {})", stream_id);
+                        let _ = quic_send
+                            .send_message(&TunnelMessage::TlsClose { stream_id })
+                            .await;
+                        let _ = quic_send.finish().await;
+                        break;
+                    }
+                    Ok(n) => {
+                        debug!("Read {} bytes from local TLS (stream {})", n, stream_id);
+                        let data_msg = TunnelMessage::TlsData {
+                            stream_id,
+                            data: buffer[..n].to_vec(),
+                        };
+                        if let Err(e) = quic_send.send_message(&data_msg).await {
+                            error!("Failed to send TlsData on QUIC stream: {}", e);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error reading from local TLS: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Task to read from QUIC stream and send to local TLS
+        // Now owns quic_recv exclusively - no mutex needed!
+        let quic_to_local = tokio::spawn(async move {
+            // First, send the initial client_hello to the local TLS service
+            if let Err(e) = local_write.write_all(&client_hello).await {
+                error!("Failed to send ClientHello to local TLS service: {}", e);
+                return;
+            }
+            debug!(
+                "Sent {} bytes (ClientHello) to local TLS service (stream {})",
+                client_hello.len(),
+                stream_id
+            );
+
+            // Now handle bidirectional TLS data forwarding
+            loop {
+                let msg = quic_recv.recv_message().await;
+
+                match msg {
+                    Ok(Some(TunnelMessage::TlsData { stream_id: _, data })) => {
+                        if data.is_empty() {
+                            debug!(
+                                "Received close signal from QUIC stream (stream {})",
+                                stream_id
+                            );
+                            break;
+                        }
+                        debug!(
+                            "Received {} bytes from QUIC stream (stream {})",
+                            data.len(),
+                            stream_id
+                        );
+                        if let Err(e) = local_write.write_all(&data).await {
+                            error!("Failed to write to local TLS service: {}", e);
+                            break;
+                        }
+                        if let Err(e) = local_write.flush().await {
+                            error!("Failed to flush local TLS: {}", e);
+                            break;
+                        }
+                    }
+                    Ok(Some(TunnelMessage::TlsClose { stream_id: _ })) => {
+                        debug!("Received TlsClose from QUIC stream (stream {})", stream_id);
+                        break;
+                    }
+                    Ok(None) => {
+                        debug!("QUIC stream closed (stream {})", stream_id);
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Error reading from QUIC stream: {}", e);
+                        break;
+                    }
+                    Ok(Some(msg)) => {
+                        warn!("Unexpected message on TLS stream: {:?}", msg);
+                    }
+                }
+            }
+        });
+
+        // Wait for both tasks
+        let _ = tokio::join!(local_to_quic, quic_to_local);
+        debug!("TLS stream handler finished (stream {})", stream_id);
     }
 
     async fn handle_http_request_static(

@@ -24,49 +24,49 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// Local port to expose (standalone mode)
-    #[arg(short, long, global = true)]
+    /// Local port to expose (standalone mode only)
+    #[arg(short, long)]
     port: Option<u16>,
 
-    /// Local address to expose (host:port format) (standalone mode)
+    /// Local address to expose (host:port format) (standalone mode only)
     /// Alternative to --port. Use this to bind to a specific address
-    #[arg(long, global = true)]
+    #[arg(long)]
     address: Option<String>,
 
-    /// Protocol to use (http, https, tcp, tls) (standalone mode)
-    #[arg(long, global = true)]
+    /// Protocol to use (http, https, tcp, tls) (standalone mode only)
+    #[arg(long)]
     protocol: Option<String>,
 
-    /// Authentication token / JWT secret (standalone mode)
-    #[arg(short, long, env = "TUNNEL_AUTH_TOKEN", global = true)]
+    /// Authentication token / JWT secret (standalone mode only)
+    #[arg(short, long, env = "TUNNEL_AUTH_TOKEN")]
     token: Option<String>,
 
-    /// Subdomain for HTTP/HTTPS tunnels (standalone mode)
-    #[arg(short, long, global = true)]
+    /// Subdomain for HTTP/HTTPS tunnels (standalone mode only)
+    #[arg(short, long)]
     subdomain: Option<String>,
 
-    /// Custom domain for HTTPS tunnels (standalone mode)
-    #[arg(long, global = true)]
+    /// Custom domain for HTTPS tunnels (standalone mode only)
+    #[arg(long)]
     domain: Option<String>,
 
-    /// Relay server address (standalone mode)
-    #[arg(short, long, env, global = true)]
+    /// Relay server address (standalone mode only)
+    #[arg(short, long, env)]
     relay: Option<String>,
 
-    /// Remote port for TCP/TLS tunnels (standalone mode)
-    #[arg(long, global = true)]
+    /// Remote port for TCP/TLS tunnels (standalone mode only)
+    #[arg(long)]
     remote_port: Option<u16>,
 
     /// Log level (trace, debug, info, warn, error)
-    #[arg(long, default_value = "info", global = true)]
+    #[arg(long, default_value = "info")]
     log_level: String,
 
-    /// Port for metrics web dashboard
-    #[arg(long, default_value = "9090", global = true)]
+    /// Port for metrics web dashboard (standalone mode only)
+    #[arg(long, default_value = "9090")]
     metrics_port: u16,
 
-    /// Disable metrics collection and web dashboard
-    #[arg(long, global = true)]
+    /// Disable metrics collection and web dashboard (standalone mode only)
+    #[arg(long)]
     no_metrics: bool,
 }
 
@@ -198,57 +198,8 @@ enum Commands {
     },
     /// Run as exit node / relay server
     Relay {
-        /// HTTP server bind address
-        #[arg(long, default_value = "0.0.0.0:8080")]
-        http_addr: String,
-
-        /// Tunnel control port for client connections (QUIC)
-        #[arg(long, default_value = "0.0.0.0:4443")]
-        localup_addr: String,
-
-        /// HTTPS server bind address (requires TLS certificates)
-        #[arg(long)]
-        https_addr: Option<String>,
-
-        /// TLS/SNI server bind address
-        #[arg(long)]
-        tls_addr: Option<String>,
-
-        /// TLS certificate file path (PEM format)
-        #[arg(long)]
-        tls_cert: Option<String>,
-
-        /// TLS private key file path (PEM format)
-        #[arg(long)]
-        tls_key: Option<String>,
-
-        /// Public domain name for this relay
-        #[arg(long, default_value = "localhost")]
-        domain: String,
-
-        /// JWT secret for authenticating tunnel clients
-        #[arg(long, env)]
-        jwt_secret: Option<String>,
-
-        /// Log level (trace, debug, info, warn, error)
-        #[arg(long, default_value = "info")]
-        log_level: String,
-
-        /// TCP port range for raw TCP tunnels (format: "10000-20000")
-        #[arg(long)]
-        tcp_port_range: Option<String>,
-
-        /// API server bind address
-        #[arg(long, default_value = "127.0.0.1:3080")]
-        api_addr: String,
-
-        /// Disable API server
-        #[arg(long)]
-        no_api: bool,
-
-        /// Database URL for storing traffic logs
-        #[arg(long, env)]
-        database_url: Option<String>,
+        #[command(subcommand)]
+        command: RelayCommands,
     },
     /// Run as agent server (combines relay and agent functionality)
     AgentServer {
@@ -318,14 +269,189 @@ enum Commands {
         allowed_agents: Vec<String>,
 
         /// Allowed target addresses for reverse tunnels (repeatable, format: host:port)
-        /// Example: --address 192.168.1.100:8080 --address 10.0.0.5:22
+        /// Example: --allowed-address 192.168.1.100:8080 --allowed-address 10.0.0.5:22
         /// If not specified, all addresses are allowed
-        #[arg(long = "address")]
+        #[arg(long = "allowed-address")]
         allowed_addresses: Vec<String>,
 
         /// Output only the JWT token (useful for scripts)
         #[arg(long)]
         token_only: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RelayCommands {
+    /// TCP tunnel relay (port-based routing)
+    Tcp {
+        /// Tunnel control port for client connections (QUIC)
+        #[arg(long, default_value = "0.0.0.0:4443")]
+        localup_addr: String,
+
+        /// TCP port range for raw TCP tunnels (format: "10000-20000")
+        #[arg(long, default_value = "10000-20000")]
+        tcp_port_range: String,
+
+        /// Public domain name for this relay
+        #[arg(long, default_value = "localhost")]
+        domain: String,
+
+        /// JWT secret for authenticating tunnel clients
+        #[arg(long, env = "JWT_SECRET")]
+        jwt_secret: Option<String>,
+
+        /// Log level (trace, debug, info, warn, error)
+        #[arg(long, default_value = "info")]
+        log_level: String,
+
+        /// API server bind address
+        #[arg(long, default_value = "127.0.0.1:3080")]
+        api_addr: String,
+
+        /// Disable API server
+        #[arg(long)]
+        no_api: bool,
+
+        /// Database URL for storing traffic logs
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: Option<String>,
+    },
+
+    /// TLS/SNI relay (SNI-based routing, no certificates needed)
+    Tls {
+        /// Tunnel control port for client connections (QUIC)
+        #[arg(long, default_value = "0.0.0.0:4443")]
+        localup_addr: String,
+
+        /// TLS/SNI server bind address
+        #[arg(long, default_value = "0.0.0.0:4443")]
+        tls_addr: String,
+
+        /// Public domain name for this relay
+        #[arg(long, default_value = "localhost")]
+        domain: String,
+
+        /// JWT secret for authenticating tunnel clients
+        #[arg(long, env = "JWT_SECRET")]
+        jwt_secret: Option<String>,
+
+        /// Log level (trace, debug, info, warn, error)
+        #[arg(long, default_value = "info")]
+        log_level: String,
+
+        /// API server bind address
+        #[arg(long, default_value = "127.0.0.1:3080")]
+        api_addr: String,
+
+        /// Disable API server
+        #[arg(long)]
+        no_api: bool,
+
+        /// Database URL for storing traffic logs
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: Option<String>,
+    },
+
+    /// HTTP/HTTPS relay (host-based routing with TLS termination)
+    Http {
+        /// Tunnel control port for client connections (QUIC)
+        #[arg(long, default_value = "0.0.0.0:4443")]
+        localup_addr: String,
+
+        /// HTTP server bind address
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        http_addr: String,
+
+        /// HTTPS server bind address (requires TLS certificates)
+        #[arg(long)]
+        https_addr: Option<String>,
+
+        /// TLS certificate file path (PEM format)
+        #[arg(long)]
+        tls_cert: Option<String>,
+
+        /// TLS private key file path (PEM format)
+        #[arg(long)]
+        tls_key: Option<String>,
+
+        /// Public domain name for this relay
+        #[arg(long, default_value = "localhost")]
+        domain: String,
+
+        /// JWT secret for authenticating tunnel clients
+        #[arg(long, env = "JWT_SECRET")]
+        jwt_secret: Option<String>,
+
+        /// Log level (trace, debug, info, warn, error)
+        #[arg(long, default_value = "info")]
+        log_level: String,
+
+        /// API server bind address
+        #[arg(long, default_value = "127.0.0.1:3080")]
+        api_addr: String,
+
+        /// Disable API server
+        #[arg(long)]
+        no_api: bool,
+
+        /// Database URL for storing traffic logs
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: Option<String>,
+    },
+
+    /// All protocols (TCP, TLS, HTTP, HTTPS)
+    All {
+        /// Tunnel control port for client connections (QUIC)
+        #[arg(long, default_value = "0.0.0.0:4443")]
+        localup_addr: String,
+
+        /// HTTP server bind address
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        http_addr: String,
+
+        /// HTTPS server bind address (requires TLS certificates)
+        #[arg(long)]
+        https_addr: Option<String>,
+
+        /// TLS/SNI server bind address
+        #[arg(long)]
+        tls_addr: Option<String>,
+
+        /// TLS certificate file path (PEM format)
+        #[arg(long)]
+        tls_cert: Option<String>,
+
+        /// TLS private key file path (PEM format)
+        #[arg(long)]
+        tls_key: Option<String>,
+
+        /// TCP port range for raw TCP tunnels (format: "10000-20000")
+        #[arg(long, default_value = "10000-20000")]
+        tcp_port_range: String,
+
+        /// Public domain name for this relay
+        #[arg(long, default_value = "localhost")]
+        domain: String,
+
+        /// JWT secret for authenticating tunnel clients
+        #[arg(long, env = "JWT_SECRET")]
+        jwt_secret: Option<String>,
+
+        /// Log level (trace, debug, info, warn, error)
+        #[arg(long, default_value = "info")]
+        log_level: String,
+
+        /// API server bind address
+        #[arg(long, default_value = "127.0.0.1:3080")]
+        api_addr: String,
+
+        /// Disable API server
+        #[arg(long)]
+        no_api: bool,
+
+        /// Database URL for storing traffic logs
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: Option<String>,
     },
 }
 
@@ -441,38 +567,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Some(Commands::Relay {
-            http_addr,
-            localup_addr,
-            https_addr,
-            tls_addr,
-            tls_cert,
-            tls_key,
-            domain,
-            jwt_secret,
-            log_level,
-            tcp_port_range,
-            api_addr,
-            no_api,
-            database_url,
-        }) => {
-            handle_relay_command(
-                http_addr,
-                localup_addr,
-                https_addr,
-                tls_addr,
-                tls_cert,
-                tls_key,
-                domain,
-                jwt_secret,
-                log_level,
-                tcp_port_range,
-                api_addr,
-                no_api,
-                database_url,
-            )
-            .await
-        }
+        Some(Commands::Relay { command }) => handle_relay_subcommand(command).await,
         Some(Commands::AgentServer {
             listen,
             cert,
@@ -1402,6 +1497,128 @@ async fn handle_agent_command(
     Ok(())
 }
 
+async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
+    match command {
+        RelayCommands::Tcp {
+            localup_addr,
+            tcp_port_range,
+            domain,
+            jwt_secret,
+            log_level,
+            api_addr,
+            no_api,
+            database_url,
+        } => {
+            handle_relay_command(
+                String::new(), // http_addr - not used for TCP
+                localup_addr,
+                None, // https_addr
+                None, // tls_addr
+                None, // tls_cert
+                None, // tls_key
+                domain,
+                jwt_secret,
+                log_level,
+                Some(tcp_port_range),
+                api_addr,
+                no_api,
+                database_url,
+            )
+            .await
+        }
+        RelayCommands::Tls {
+            localup_addr,
+            tls_addr,
+            domain,
+            jwt_secret,
+            log_level,
+            api_addr,
+            no_api,
+            database_url,
+        } => {
+            handle_relay_command(
+                String::new(), // http_addr - not used for TLS
+                localup_addr,
+                None, // https_addr
+                Some(tls_addr),
+                None, // tls_cert
+                None, // tls_key
+                domain,
+                jwt_secret,
+                log_level,
+                None, // tcp_port_range
+                api_addr,
+                no_api,
+                database_url,
+            )
+            .await
+        }
+        RelayCommands::Http {
+            localup_addr,
+            http_addr,
+            https_addr,
+            tls_cert,
+            tls_key,
+            domain,
+            jwt_secret,
+            log_level,
+            api_addr,
+            no_api,
+            database_url,
+        } => {
+            handle_relay_command(
+                http_addr,
+                localup_addr,
+                https_addr,
+                None, // tls_addr
+                tls_cert,
+                tls_key,
+                domain,
+                jwt_secret,
+                log_level,
+                None, // tcp_port_range
+                api_addr,
+                no_api,
+                database_url,
+            )
+            .await
+        }
+        RelayCommands::All {
+            localup_addr,
+            http_addr,
+            https_addr,
+            tls_addr,
+            tls_cert,
+            tls_key,
+            tcp_port_range,
+            domain,
+            jwt_secret,
+            log_level,
+            api_addr,
+            no_api,
+            database_url,
+        } => {
+            handle_relay_command(
+                http_addr,
+                localup_addr,
+                https_addr,
+                tls_addr,
+                tls_cert,
+                tls_key,
+                domain,
+                jwt_secret,
+                log_level,
+                Some(tcp_port_range),
+                api_addr,
+                no_api,
+                database_url,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_relay_command(
     http_addr: String,
     localup_addr: String,
@@ -1435,7 +1652,9 @@ async fn handle_relay_command(
         .or_else(|_| tracing_subscriber::EnvFilter::try_new(&log_level));
 
     info!("🚀 Starting tunnel exit node");
-    info!("HTTP endpoint: {}", http_addr);
+    if !http_addr.is_empty() {
+        info!("HTTP endpoint: {}", http_addr);
+    }
     info!("Tunnel control: {}", localup_addr);
     info!("Public domain: {}", domain);
     info!("Subdomains will be: {{name}}.{}", domain);
@@ -1510,24 +1729,31 @@ async fn handle_relay_command(
     // Create pending requests tracker
     let pending_requests = Arc::new(localup_control::PendingRequests::new());
 
-    // Start HTTP server
-    let http_addr_parsed: SocketAddr = http_addr.parse()?;
-    let http_config = TcpServerConfig {
-        bind_addr: http_addr_parsed,
-    };
-    let http_server = TcpServer::new(http_config, registry.clone())
-        .with_localup_manager(localup_manager.clone())
-        .with_pending_requests(pending_requests.clone())
-        .with_database(db.clone());
+    // Start HTTP server (only if address is not empty)
+    let mut http_port: Option<u16> = None;
+    let http_handle = if !http_addr.is_empty() {
+        let http_addr_parsed: SocketAddr = http_addr.parse()?;
+        http_port = Some(http_addr_parsed.port());
+        let http_config = TcpServerConfig {
+            bind_addr: http_addr_parsed,
+        };
+        let http_server = TcpServer::new(http_config, registry.clone())
+            .with_localup_manager(localup_manager.clone())
+            .with_pending_requests(pending_requests.clone())
+            .with_database(db.clone());
 
-    let http_handle = tokio::spawn(async move {
-        info!("Starting HTTP relay server");
-        if let Err(e) = http_server.start().await {
-            error!("HTTP server error: {}", e);
-        }
-    });
+        Some(tokio::spawn(async move {
+            info!("Starting HTTP relay server");
+            if let Err(e) = http_server.start().await {
+                error!("HTTP server error: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
 
     // Start HTTPS server if configured
+    let mut https_port: Option<u16> = None;
     let https_handle = if let Some(ref https_addr) = https_addr {
         let cert_path = tls_cert
             .as_ref()
@@ -1537,6 +1763,7 @@ async fn handle_relay_command(
             .ok_or_else(|| anyhow::anyhow!("HTTPS server requires --tls-key"))?;
 
         let https_addr_parsed: SocketAddr = https_addr.parse()?;
+        https_port = Some(https_addr_parsed.port());
         let https_config = HttpsServerConfig {
             bind_addr: https_addr_parsed,
             cert_path: cert_path.clone(),
@@ -1558,13 +1785,17 @@ async fn handle_relay_command(
     };
 
     // Start TLS/SNI server if configured
+    let mut tls_port: Option<u16> = None;
     let _tls_handle = if let Some(ref tls_addr_str) = tls_addr {
         let tls_addr_parsed: SocketAddr = tls_addr_str.parse()?;
+        tls_port = Some(tls_addr_parsed.port());
+        info!("🔐 TLS port extracted: {}", tls_port.unwrap_or(0));
         let tls_config = TlsServerConfig {
             bind_addr: tls_addr_parsed,
         };
 
-        let tls_server = TlsServer::new(tls_config, registry.clone());
+        let tls_server = TlsServer::new(tls_config, registry.clone())
+            .with_localup_manager(localup_manager.clone());
         info!("✅ TLS/SNI server configured (routes based on Server Name Indication)");
 
         let tls_addr_display = tls_addr_str.clone();
@@ -1587,6 +1818,20 @@ async fn handle_relay_command(
         pending_requests.clone(),
     )
     .with_agent_registry(agent_registry.clone());
+
+    // Configure actual relay ports
+    if let Some(port) = http_port {
+        info!("📡 Configuring HTTP relay port: {}", port);
+        localup_handler = localup_handler.with_http_port(port);
+    }
+    if let Some(port) = https_port {
+        info!("📡 Configuring HTTPS relay port: {}", port);
+        localup_handler = localup_handler.with_https_port(port);
+    }
+    if let Some(port) = tls_port {
+        info!("📡 Configuring TLS relay port: {}", port);
+        localup_handler = localup_handler.with_tls_port(port);
+    }
 
     // Add port allocator if TCP range was provided
     if let Some(ref allocator) = port_allocator {
@@ -1693,7 +1938,9 @@ async fn handle_relay_command(
 
     info!("✅ Tunnel exit node is running");
     info!("Ready to accept incoming connections");
-    info!("  - HTTP traffic: {}", http_addr);
+    if !http_addr.is_empty() {
+        info!("  - HTTP traffic: {}", http_addr);
+    }
     if let Some(ref https_addr) = https_addr {
         info!("  - HTTPS traffic: {}", https_addr);
     }
@@ -1711,7 +1958,9 @@ async fn handle_relay_command(
     }
 
     // Graceful shutdown
-    http_handle.abort();
+    if let Some(handle) = http_handle {
+        handle.abort();
+    }
     if let Some(handle) = https_handle {
         handle.abort();
     }
@@ -1721,6 +1970,7 @@ async fn handle_relay_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_agent_server_command(
     listen: String,
     cert: Option<String>,

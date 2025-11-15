@@ -2209,9 +2209,11 @@ name = "localup-server-tls"
 version = "0.1.0"
 dependencies = [
  "localup-cert",
+ "localup-control",
  "localup-proto",
  "localup-router",
  "localup-transport",
+ "localup-transport-quic",
  "rustls 0.23.32",
  "thiserror 1.0.69",
  "tokio",

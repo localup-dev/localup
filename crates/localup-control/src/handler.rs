@@ -47,6 +47,12 @@ pub struct TunnelHandler {
     tcp_proxy_spawner: Option<TcpProxySpawner>,
     agent_registry: Option<Arc<AgentRegistry>>,
     agent_connection_manager: Arc<crate::connection::AgentConnectionManager>,
+    /// Actual TLS port the relay is listening on
+    tls_port: Option<u16>,
+    /// Actual HTTP port the relay is listening on
+    http_port: Option<u16>,
+    /// Actual HTTPS port the relay is listening on
+    https_port: Option<u16>,
 }
 
 impl TunnelHandler {
@@ -68,6 +74,9 @@ impl TunnelHandler {
             tcp_proxy_spawner: None,
             agent_registry: None,
             agent_connection_manager: Arc::new(crate::connection::AgentConnectionManager::new()),
+            tls_port: None,
+            http_port: None,
+            https_port: None,
         }
     }
 
@@ -88,6 +97,21 @@ impl TunnelHandler {
 
     pub fn with_domain_provider(mut self, domain_provider: Arc<dyn DomainProvider>) -> Self {
         self.domain_provider = Some(domain_provider);
+        self
+    }
+
+    pub fn with_tls_port(mut self, port: u16) -> Self {
+        self.tls_port = Some(port);
+        self
+    }
+
+    pub fn with_http_port(mut self, port: u16) -> Self {
+        self.http_port = Some(port);
+        self
+    }
+
+    pub fn with_https_port(mut self, port: u16) -> Self {
+        self.https_port = Some(port);
         self
     }
 
@@ -266,17 +290,44 @@ impl TunnelHandler {
                     error!("Failed to register route for tunnel {}: {}", localup_id, e);
 
                     // Send error response and close connection
-                    let error_msg = if e.to_string().contains("already exists") {
+                    let error_str = e.to_string();
+                    debug!("Error string for route registration: '{}' (contains 'already exists': {}, contains 'not available': {})",
+                        error_str, error_str.contains("already exists"), error_str.contains("not available"));
+
+                    let error_msg = if error_str.contains("already exists") {
                         "Subdomain is already in use by another tunnel".to_string()
+                    } else if error_str.contains("not available") {
+                        // Preserve the specific error message from allocator
+                        error_str
                     } else {
                         format!("Failed to register route: {}", e)
                     };
 
-                    let _ = control_stream
+                    // Send Disconnect message with detailed reason
+                    debug!(
+                        "Sending Disconnect message to tunnel {} with reason: {}",
+                        localup_id, error_msg
+                    );
+                    if let Err(send_err) = control_stream
                         .send_message(&TunnelMessage::Disconnect {
                             reason: error_msg.clone(),
                         })
-                        .await;
+                        .await
+                    {
+                        error!(
+                            "Failed to send Disconnect message to tunnel {}: {}",
+                            localup_id, send_err
+                        );
+                    } else {
+                        debug!(
+                            "Disconnect message sent successfully to tunnel {}",
+                            localup_id
+                        );
+                    }
+
+                    // Give the client a moment to receive the Disconnect message before closing
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
                     return Err(error_msg);
                 }
             }
@@ -1326,11 +1377,21 @@ impl TunnelHandler {
                         }
                     };
 
+                    // Use actual HTTPS relay port if configured
+                    let actual_port = self.https_port.unwrap_or(443);
+                    let url_with_port = if actual_port == 443 {
+                        // Standard HTTPS port - omit from URL
+                        format!("https://{}", host)
+                    } else {
+                        // Non-standard port - include in URL
+                        format!("https://{}:{}", host, actual_port)
+                    };
+
                     endpoints.push(Endpoint {
                         protocol: endpoint_protocol,
                         // HTTP and HTTPS tunnels use HTTPS (TLS termination at exit node)
-                        public_url: format!("https://{}", host),
-                        port: None,
+                        public_url: url_with_port,
+                        port: Some(actual_port),
                     });
                 }
                 Protocol::Tcp { port } => {
@@ -1342,14 +1403,19 @@ impl TunnelHandler {
                     });
                 }
                 Protocol::Tls { port, sni_pattern } => {
-                    // TLS endpoint - port will be allocated during registration
+                    // TLS endpoint - use actual relay TLS port if configured, otherwise use client's requested port
+                    let actual_port = self.tls_port.unwrap_or(*port);
+                    debug!(
+                        "Building TLS endpoint: relay_port={:?}, client_port={}, actual_port={}",
+                        self.tls_port, port, actual_port
+                    );
                     endpoints.push(Endpoint {
                         protocol: protocol.clone(),
                         public_url: format!(
                             "tls://{}:{} (SNI: {})",
-                            self.domain, port, sni_pattern
+                            self.domain, actual_port, sni_pattern
                         ),
-                        port: Some(*port),
+                        port: Some(actual_port),
                     });
                 }
             }
@@ -1427,7 +1493,25 @@ impl TunnelHandler {
                     Err("TCP tunnels not supported (no port allocator)".to_string())
                 }
             }
-            _ => Ok(None),
+            Protocol::Tls { sni_pattern, .. } => {
+                // Register TLS route based on SNI pattern
+                let route_key = RouteKey::TlsSni(sni_pattern.clone());
+                let route_target = RouteTarget {
+                    localup_id: localup_id.to_string(),
+                    target_addr: format!("tunnel:{}", localup_id), // Special marker for tunnel routing
+                    metadata: Some("via-tunnel".to_string()),
+                };
+
+                self.route_registry
+                    .register(route_key, route_target)
+                    .map_err(|e| e.to_string())?;
+
+                debug!(
+                    "Registered TLS route for SNI pattern {} -> tunnel:{}",
+                    sni_pattern, localup_id
+                );
+                Ok(None)
+            }
         }
     }
 
@@ -1448,7 +1532,11 @@ impl TunnelHandler {
                     info!("Deallocated TCP port for tunnel {}", localup_id);
                 }
             }
-            _ => {}
+            Protocol::Tls { sni_pattern, .. } => {
+                let route_key = RouteKey::TlsSni(sni_pattern.clone());
+                let _ = self.route_registry.unregister(&route_key);
+                debug!("Unregistered TLS route for SNI pattern: {}", sni_pattern);
+            }
         }
     }
 }
