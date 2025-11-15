@@ -138,15 +138,13 @@ jobs:
           CC_aarch64_unknown_linux_gnu: ${{ matrix.cross == true && 'aarch64-linux-gnu-gcc' || '' }}
           AR_aarch64_unknown_linux_gnu: ${{ matrix.cross == true && 'aarch64-linux-gnu-ar' || '' }}
         run: |
-          cargo build --release --target ${{ matrix.target }} -p localup -p localup-agent-server -p localup-exit-node
+          cargo build --release --target ${{ matrix.target }} -p localup-cli
 
       # Strip binaries (Unix only)
       - name: Strip binaries (Unix)
         if: runner.os != 'Windows'
         run: |
           ${{ matrix.strip }} target/${{ matrix.target }}/release/localup
-          ${{ matrix.strip }} target/${{ matrix.target }}/release/localup-relay
-          ${{ matrix.strip }} target/${{ matrix.target }}/release/localup-agent-server
 
       # Create archives (Unix - tar.gz)
       - name: Create release archives (Unix)
@@ -157,14 +155,6 @@ jobs:
           # Package localup CLI
           tar -czf release/localup-${{ matrix.archive_name }}.tar.gz \
             -C target/${{ matrix.target }}/release localup
-
-          # Package localup-relay
-          tar -czf release/localup-relay-${{ matrix.archive_name }}.tar.gz \
-            -C target/${{ matrix.target }}/release localup-relay
-
-          # Package localup-agent-server
-          tar -czf release/localup-agent-server-${{ matrix.archive_name }}.tar.gz \
-            -C target/${{ matrix.target }}/release localup-agent-server
 
           # Create checksums
           cd release
@@ -180,14 +170,6 @@ jobs:
           # Package localup CLI
           Compress-Archive -Path target/${{ matrix.target }}/release/localup.exe `
             -DestinationPath release/localup-${{ matrix.archive_name }}.zip
-
-          # Package localup-relay
-          Compress-Archive -Path target/${{ matrix.target }}/release/localup-relay.exe `
-            -DestinationPath release/localup-relay-${{ matrix.archive_name }}.zip
-
-          # Package localup-agent-server
-          Compress-Archive -Path target/${{ matrix.target }}/release/localup-agent-server.exe `
-            -DestinationPath release/localup-agent-server-${{ matrix.archive_name }}.zip
 
           # Create checksums
           cd release
@@ -276,15 +258,15 @@ jobs:
             Download the appropriate binary for your platform:
 
             ### Linux
-            - **AMD64**: `localup-linux-amd64.tar.gz`, `localup-relay-linux-amd64.tar.gz`, `localup-agent-server-linux-amd64.tar.gz`
-            - **ARM64**: `localup-linux-arm64.tar.gz`, `localup-relay-linux-arm64.tar.gz`, `localup-agent-server-linux-arm64.tar.gz`
+            - **AMD64**: `localup-linux-amd64.tar.gz`
+            - **ARM64**: `localup-linux-arm64.tar.gz`
 
             ### macOS
-            - **Intel (AMD64)**: `localup-macos-amd64.tar.gz`, `localup-relay-macos-amd64.tar.gz`, `localup-agent-server-macos-amd64.tar.gz`
-            - **Apple Silicon (ARM64)**: `localup-macos-arm64.tar.gz`, `localup-relay-macos-arm64.tar.gz`, `localup-agent-server-macos-arm64.tar.gz`
+            - **Intel (AMD64)**: `localup-macos-amd64.tar.gz`
+            - **Apple Silicon (ARM64)**: `localup-macos-arm64.tar.gz`
 
             ### Windows
-            - **AMD64**: `localup-windows-amd64.zip`, `localup-relay-windows-amd64.zip`, `localup-agent-server-windows-amd64.zip`
+            - **AMD64**: `localup-windows-amd64.zip`
 
             ### Verify Downloads
 
@@ -295,8 +277,8 @@ jobs:
             sha256sum -c checksums-<platform>.txt
 
             # Or check against combined checksums
-            sha256sum tunnel-<platform>-<arch>.tar.gz
-            grep tunnel-<platform>-<arch> SHA256SUMS.txt
+            sha256sum localup-<platform>-<arch>.tar.gz
+            grep localup-<platform>-<arch> SHA256SUMS.txt
             ```
 
             ### Extract and Install
@@ -304,17 +286,13 @@ jobs:
             **Unix (Linux/macOS)**:
             ```bash
             tar -xzf localup-<platform>-<arch>.tar.gz
-            tar -xzf localup-relay-<platform>-<arch>.tar.gz
-            tar -xzf localup-agent-server-<platform>-<arch>.tar.gz
-            sudo mv localup localup-relay localup-agent-server /usr/local/bin/
-            chmod +x /usr/local/bin/localup /usr/local/bin/localup-relay /usr/local/bin/localup-agent-server
+            sudo mv localup /usr/local/bin/
+            chmod +x /usr/local/bin/localup
             ```
 
             **Windows**:
             ```powershell
             Expand-Archive localup-windows-amd64.zip -DestinationPath .
-            Expand-Archive localup-relay-windows-amd64.zip -DestinationPath .
-            Expand-Archive localup-agent-server-windows-amd64.zip -DestinationPath .
             # Add to PATH or move to desired location
             ```
           files: |
