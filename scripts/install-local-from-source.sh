@@ -3,6 +3,12 @@
 # Installation script for localup
 # Builds from source and installs the localup binary to /usr/local/bin with sudo
 # Supports macOS and Linux
+#
+# Usage:
+#   ./scripts/install-local-from-source.sh              # Clean rebuild (always full rebuild)
+#
+# Environment variables:
+#   INSTALL_PREFIX=/custom/path  # Override installation prefix (default: /usr/local)
 
 set -e
 
@@ -65,16 +71,30 @@ fi
 echo -e "${GREEN}✓ Running from correct directory${NC}"
 echo ""
 
-# Build localup binary in release mode
-echo -e "${YELLOW}→ Building localup in release mode...${NC}"
-echo "(This may take a few minutes on first build)"
+# Always clean build artifacts to prevent caching issues
+echo -e "${YELLOW}→ Cleaning previous build artifacts...${NC}"
+cargo clean
+echo -e "${GREEN}✓ Build artifacts cleaned${NC}"
 echo ""
 
-if cargo build --release 2>&1 | tail -20; then
-  echo ""
+# Build localup binary in release mode
+echo -e "${YELLOW}→ Building localup in release mode...${NC}"
+echo "(Full clean rebuild from scratch - no caching)"
+echo ""
+
+# Disable incremental compilation to ensure all changes are built
+export CARGO_INCREMENTAL=0
+
+# Build with proper error handling - capture exit code
+cargo build -p localup-cli --release
+BUILD_EXIT_CODE=$?
+
+echo ""
+
+if [ $BUILD_EXIT_CODE -eq 0 ]; then
   echo -e "${GREEN}✓ Build completed successfully${NC}"
 else
-  echo -e "${RED}✗ Build failed${NC}"
+  echo -e "${RED}✗ Build failed with exit code $BUILD_EXIT_CODE${NC}"
   exit 1
 fi
 echo ""
