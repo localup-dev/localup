@@ -192,7 +192,7 @@ fi
 # Test 13: localup generate-token with basic args (should succeed)
 test_count=$((test_count + 1))
 echo -n "Testing: localup generate-token generates token ... "
-if $LOCALUP_BIN generate-token --secret 'test-secret' --localup-id 'myapp' 2>/dev/null | grep -q 'JWT Token generated'; then
+if $LOCALUP_BIN generate-token --secret 'test-secret' --sub 'myapp' 2>/dev/null | grep -q 'JWT Token generated'; then
     echo -e "${GREEN}✓${NC}"
     test_passed=$((test_passed + 1))
 else
@@ -203,7 +203,7 @@ fi
 # Test 14: localup generate-token with reverse tunnel options (should succeed)
 test_count=$((test_count + 1))
 echo -n "Testing: localup generate-token with reverse tunnel ... "
-if $LOCALUP_BIN generate-token --secret 'test-secret' --localup-id 'myapp' --reverse-tunnel --agent agent-1 2>/dev/null | grep -q 'Reverse tunnel: enabled'; then
+if $LOCALUP_BIN generate-token --secret 'test-secret' --sub 'myapp' --reverse-tunnel --agent agent-1 2>/dev/null | grep -q 'Reverse tunnel: enabled'; then
     echo -e "${GREEN}✓${NC}"
     test_passed=$((test_passed + 1))
 else

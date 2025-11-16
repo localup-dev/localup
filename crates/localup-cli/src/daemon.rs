@@ -2,7 +2,7 @@
 //!
 //! Runs multiple tunnel connections concurrently and manages their lifecycle.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use localup_client::TunnelClient;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -64,18 +64,20 @@ impl Daemon {
         info!("🚀 Daemon starting...");
 
         // Load and start all enabled tunnels
-        let enabled_tunnels = self
-            .store
-            .list_enabled()
-            .context("Failed to load tunnel configurations")?;
+        match self.store.list_enabled() {
+            Ok(enabled_tunnels) => {
+                info!("Found {} enabled tunnel(s)", enabled_tunnels.len());
 
-        info!("Found {} enabled tunnel(s)", enabled_tunnels.len());
-
-        for stored_tunnel in enabled_tunnels {
-            let name = stored_tunnel.name.clone();
-            info!("Starting tunnel: {}", name);
-            if let Err(e) = self.start_tunnel(stored_tunnel).await {
-                error!("Failed to start tunnel '{}': {}", name, e);
+                for stored_tunnel in enabled_tunnels {
+                    let name = stored_tunnel.name.clone();
+                    info!("Starting tunnel: {}", name);
+                    if let Err(e) = self.start_tunnel(stored_tunnel).await {
+                        error!("Failed to start tunnel '{}': {}", name, e);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to load tunnel configurations: {}. Daemon will still run but no tunnels started.", e);
             }
         }
 

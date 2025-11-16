@@ -104,15 +104,15 @@ async fn test_daemon_get_status_command() {
         let _ = daemon.run(command_rx).await;
     });
 
-    // Give daemon time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Give daemon more time to start and initialize (increased for CI stability)
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Request status
     let (status_tx, mut status_rx) = mpsc::channel(1);
     command_tx
         .send(DaemonCommand::GetStatus(status_tx))
         .await
-        .unwrap();
+        .expect("Daemon should be running and accepting commands");
 
     // Receive status
     let status = timeout(Duration::from_secs(1), status_rx.recv())

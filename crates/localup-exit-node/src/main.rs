@@ -601,6 +601,9 @@ async fn main() -> Result<()> {
     if let Some(handle) = https_handle {
         handle.abort();
     }
+    if let Some(handle) = tls_handle {
+        handle.abort();
+    }
     if let Some(handle) = api_handle {
         handle.abort();
     }
