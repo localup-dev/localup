@@ -108,7 +108,7 @@ For end-to-end encrypted services with SNI-based routing (no certificates needed
 ```bash
 
 # Terminal 1: Start relay with TLS/SNI server (no certificates needed)
-cargo run -p localup-cli -- relay tls \
+localup relay tls \
   --localup-addr "0.0.0.0:14443" \
   --tls-addr "0.0.0.0:18443" \
   --jwt-secret "my-jwt-secret"
@@ -126,7 +126,7 @@ openssl s_server -cert tls-service-cert.pem -key tls-service-key.pem \
 export TOKEN=$(localup generate-token --secret "my-jwt-secret" --sub "api" --token-only)
 
 # Terminal 4: Expose your TLS service to the relay (SNI-based routing)
-cargo run -p localup-cli -- --port 3443 --protocol tls --relay localhost:14443 --subdomain api.example.com --token "$TOKEN"
+localup --port 3443 --protocol tls --relay localhost:14443 --subdomain api.example.com --token "$TOKEN"
 
 # Terminal 5: Test the tunnel (relay routes based on SNI hostname)
 openssl s_client -connect localhost:18443 -servername api.example.com
