@@ -73,15 +73,15 @@ jobs:
             strip: aarch64-linux-gnu-strip
             cross: true
 
-          # macOS AMD64 (Intel)
+          # macOS AMD64 (Intel) - Cross-compiled on Apple Silicon runner
           - target: x86_64-apple-darwin
-            os: macos-13  # Intel runner
+            os: macos-14  # Apple Silicon runner (cross-compile for Intel)
             archive_name: macos-amd64
             strip: strip
 
           # macOS ARM64 (Apple Silicon)
           - target: aarch64-apple-darwin
-            os: macos-14  # Apple Silicon runner
+            os: macos-14  # Apple Silicon runner (native)
             archive_name: macos-arm64
             strip: strip
 
