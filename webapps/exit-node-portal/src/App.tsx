@@ -10,9 +10,11 @@ import AuthTokens from './pages/AuthTokens';
 import Tunnels from './pages/Tunnels';
 import TunnelDetail from './pages/TunnelDetail';
 import { client } from './api/client/client.gen';
+
 client.setConfig({
   baseUrl: '',
 });
+
 // Note: Auth checking is now handled by individual pages via getCurrentUser() API call
 // No client-side auth state - pages check with backend and redirect if needed
 

@@ -242,11 +242,47 @@ pub async fn get_tunnel(
             )
         })?;
 
-    // If found in database history, return as disconnected tunnel
+    // If found in database history, return as disconnected tunnel with endpoints
     if tcp_exists.is_some() || http_exists.is_some() {
+        let mut endpoints = vec![];
+
+        // Add TCP endpoint if found
+        if let Some(tcp_conn) = tcp_exists {
+            endpoints.push(TunnelEndpoint {
+                protocol: TunnelProtocol::Tcp {
+                    port: tcp_conn.target_port as u16,
+                },
+                public_url: format!("tcp://relay:{}", tcp_conn.target_port),
+                port: Some(tcp_conn.target_port as u16),
+            });
+        }
+
+        // Add HTTP/HTTPS endpoint if found
+        if let Some(http_req) = http_exists {
+            // Extract subdomain from host header (e.g., "myapp.localhost" -> "myapp")
+            let subdomain = http_req
+                .host
+                .as_ref()
+                .and_then(|h| h.split('.').next())
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Assume HTTP for now (we don't store TLS info in captured_requests)
+            endpoints.push(TunnelEndpoint {
+                protocol: TunnelProtocol::Http {
+                    subdomain: subdomain.clone(),
+                },
+                public_url: http_req
+                    .host
+                    .clone()
+                    .unwrap_or_else(|| format!("{}.localhost", subdomain)),
+                port: Some(80), // Default HTTP port
+            });
+        }
+
         let tunnel = Tunnel {
             id: id.clone(),
-            endpoints: vec![], // No endpoints for disconnected tunnels
+            endpoints,
             status: TunnelStatus::Disconnected,
             region: "unknown".to_string(),
             connected_at: chrono::Utc::now(), // TODO: Get actual connected_at from DB

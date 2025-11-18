@@ -1,5 +1,10 @@
 import { useNavigate, useParams } from 'react-router-dom';
-import { useTunnels, useTunnelRequests, useTunnelTcpConnections } from '../hooks/useApi';
+import { useQuery } from '@tanstack/react-query';
+import {
+  getTunnelOptions,
+  listRequestsOptions,
+  listTcpConnectionsOptions,
+} from '../api/client/@tanstack/react-query.gen';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 
@@ -65,24 +70,43 @@ export default function TunnelDetail() {
   const { tunnelId } = useParams<{ tunnelId: string }>();
   const navigate = useNavigate();
 
-  // Fetch tunnels to get tunnel details
-  const { data: tunnelsData, isLoading: tunnelsLoading, error: tunnelsError } = useTunnels();
-  const tunnels = tunnelsData?.tunnels || [];
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const tunnel = tunnels.find((t: any) => t.id === tunnelId);
+  // Fetch tunnel by ID
+  const { data: tunnel, isLoading, error } = useQuery({
+    ...getTunnelOptions({
+      path: {
+        id: tunnelId!,
+      },
+    }),
+    enabled: !!tunnelId,
+  });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const isTcp = tunnel?.endpoints.some((e: any) => e.protocol.type === 'tcp');
 
   // Fetch requests or TCP connections based on tunnel type
-  const { data: requestsData } = useTunnelRequests(!isTcp && tunnelId ? tunnelId : null);
+  const { data: requestsData } = useQuery({
+    ...listRequestsOptions({
+      query: {
+        localup_id: tunnelId || undefined,
+        limit: 50,
+      },
+    }),
+    enabled: !!tunnelId && !isTcp,
+  });
   const requests = requestsData?.requests || [];
 
-  const { data: tcpConnectionsData } = useTunnelTcpConnections(isTcp && tunnelId ? tunnelId : null);
+  const { data: tcpConnectionsData } = useQuery({
+    ...listTcpConnectionsOptions({
+      query: {
+        localup_id: tunnelId || undefined,
+        limit: 100,
+      },
+    }),
+    enabled: !!tunnelId && !!isTcp,
+  });
   const tcpConnections = tcpConnectionsData?.connections || [];
 
-  if (tunnelsLoading) {
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-muted-foreground">Loading tunnel details...</div>
@@ -90,10 +114,10 @@ export default function TunnelDetail() {
     );
   }
 
-  if (tunnelsError) {
+  if (error) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
-        <div className="text-destructive">Error loading tunnel: {tunnelsError.message}</div>
+        <div className="text-destructive">Error loading tunnel: {error.message}</div>
       </div>
     );
   }

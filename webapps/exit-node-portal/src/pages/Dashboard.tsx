@@ -56,7 +56,7 @@ export default function Dashboard() {
       steps: [
         {
           title: 'Download the installer',
-          command: 'https://github.com/localup/localup/releases/latest',
+          command: 'https://github.com/localup-dev/localup/releases/latest',
           description: 'Download the Windows installer from GitHub releases',
         },
       ],
@@ -244,7 +244,7 @@ export default function Dashboard() {
                   <span className="mr-2">•</span>
                   <span>
                     Check out the{' '}
-                    <a href="https://github.com/localup/localup" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">
+                    <a href="https://github.com/localup-dev/localup" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">
                       documentation
                     </a>{' '}
                     for advanced features
