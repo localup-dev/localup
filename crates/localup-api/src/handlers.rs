@@ -1,11 +1,13 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
-    Json,
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
+    Extension, Json,
 };
 use std::sync::Arc;
 use tracing::{debug, info};
 
+use crate::middleware::AuthUser;
 use crate::models::*;
 use crate::AppState;
 
@@ -510,4 +512,1530 @@ pub async fn list_tcp_connections(
         offset,
         limit,
     }))
+}
+
+// Custom domain management handlers
+
+use base64::Engine;
+use chrono::Utc;
+use localup_cert::AcmeClient;
+use localup_relay_db::entities::custom_domain;
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use tracing::error;
+
+/// Upload a custom domain certificate
+#[utoipa::path(
+    post,
+    path = "/api/domains",
+    request_body = UploadCustomDomainRequest,
+    responses(
+        (status = 201, description = "Certificate uploaded successfully", body = UploadCustomDomainResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn upload_custom_domain(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UploadCustomDomainRequest>,
+) -> Result<(StatusCode, Json<UploadCustomDomainResponse>), (StatusCode, Json<ErrorResponse>)> {
+    info!("Uploading custom domain certificate for: {}", req.domain);
+
+    // Decode base64 PEM content
+    let cert_pem = base64::engine::general_purpose::STANDARD
+        .decode(&req.cert_pem)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid base64 in cert_pem: {}", e),
+                    code: Some("INVALID_BASE64".to_string()),
+                }),
+            )
+        })?;
+
+    let key_pem = base64::engine::general_purpose::STANDARD
+        .decode(&req.key_pem)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Invalid base64 in key_pem: {}", e),
+                    code: Some("INVALID_BASE64".to_string()),
+                }),
+            )
+        })?;
+
+    // Save to temporary files
+    let cert_dir = std::path::Path::new("./.certs");
+    tokio::fs::create_dir_all(cert_dir).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to create cert directory: {}", e),
+                code: Some("CERT_DIR_CREATE_FAILED".to_string()),
+            }),
+        )
+    })?;
+
+    let cert_path = cert_dir.join(format!("{}.crt", req.domain));
+    let key_path = cert_dir.join(format!("{}.key", req.domain));
+
+    tokio::fs::write(&cert_path, &cert_pem).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to write certificate: {}", e),
+                code: Some("CERT_WRITE_FAILED".to_string()),
+            }),
+        )
+    })?;
+
+    tokio::fs::write(&key_path, &key_pem).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to write private key: {}", e),
+                code: Some("KEY_WRITE_FAILED".to_string()),
+            }),
+        )
+    })?;
+
+    // Validate certificate can be loaded
+    AcmeClient::load_certificate_from_files(
+        cert_path.to_str().unwrap(),
+        key_path.to_str().unwrap(),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid certificate or key: {}", e),
+                code: Some("INVALID_CERT".to_string()),
+            }),
+        )
+    })?;
+
+    info!("Certificate validated successfully for {}", req.domain);
+
+    // TODO: Extract expiration from certificate
+    let expires_at = Utc::now() + chrono::Duration::days(90);
+
+    // Save to database
+    let domain_model = custom_domain::ActiveModel {
+        domain: Set(req.domain.clone()),
+        cert_path: Set(Some(cert_path.to_string_lossy().to_string())),
+        key_path: Set(Some(key_path.to_string_lossy().to_string())),
+        status: Set(localup_relay_db::entities::custom_domain::DomainStatus::Active),
+        provisioned_at: Set(Utc::now()),
+        expires_at: Set(Some(expires_at)),
+        auto_renew: Set(req.auto_renew),
+        error_message: Set(None),
+    };
+
+    domain_model.insert(&state.db).await.map_err(|e| {
+        error!("Database error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to save domain: {}", e),
+                code: Some("DB_INSERT_FAILED".to_string()),
+            }),
+        )
+    })?;
+
+    info!("Custom domain {} saved to database", req.domain);
+
+    Ok((
+        StatusCode::CREATED,
+        Json(UploadCustomDomainResponse {
+            domain: req.domain,
+            status: CustomDomainStatus::Active,
+            message: "Certificate uploaded and validated successfully".to_string(),
+        }),
+    ))
+}
+
+/// List all custom domains
+#[utoipa::path(
+    get,
+    path = "/api/domains",
+    responses(
+        (status = 200, description = "List of custom domains", body = CustomDomainList),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn list_custom_domains(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<CustomDomainList>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Listing custom domains");
+
+    let domains = custom_domain::Entity::find()
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to list domains: {}", e),
+                    code: Some("DB_QUERY_FAILED".to_string()),
+                }),
+            )
+        })?;
+
+    let total = domains.len();
+    let domains = domains
+        .into_iter()
+        .map(|d| crate::models::CustomDomain {
+            domain: d.domain,
+            status: match d.status {
+                localup_relay_db::entities::custom_domain::DomainStatus::Pending => {
+                    CustomDomainStatus::Pending
+                }
+                localup_relay_db::entities::custom_domain::DomainStatus::Active => {
+                    CustomDomainStatus::Active
+                }
+                localup_relay_db::entities::custom_domain::DomainStatus::Expired => {
+                    CustomDomainStatus::Expired
+                }
+                localup_relay_db::entities::custom_domain::DomainStatus::Failed => {
+                    CustomDomainStatus::Failed
+                }
+            },
+            provisioned_at: d.provisioned_at,
+            expires_at: d.expires_at,
+            auto_renew: d.auto_renew,
+            error_message: d.error_message,
+        })
+        .collect();
+
+    Ok(Json(CustomDomainList { domains, total }))
+}
+
+/// Get a specific custom domain
+#[utoipa::path(
+    get,
+    path = "/api/domains/{domain}",
+    params(
+        ("domain" = String, Path, description = "Domain name")
+    ),
+    responses(
+        (status = 200, description = "Custom domain details", body = CustomDomain),
+        (status = 404, description = "Domain not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn get_custom_domain(
+    State(state): State<Arc<AppState>>,
+    Path(domain): Path<String>,
+) -> Result<Json<crate::models::CustomDomain>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Getting custom domain: {}", domain);
+
+    let domain_model = custom_domain::Entity::find()
+        .filter(custom_domain::Column::Domain.eq(&domain))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to get domain: {}", e),
+                    code: Some("DB_QUERY_FAILED".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Domain not found: {}", domain),
+                    code: Some("DOMAIN_NOT_FOUND".to_string()),
+                }),
+            )
+        })?;
+
+    Ok(Json(crate::models::CustomDomain {
+        domain: domain_model.domain,
+        status: match domain_model.status {
+            localup_relay_db::entities::custom_domain::DomainStatus::Pending => {
+                CustomDomainStatus::Pending
+            }
+            localup_relay_db::entities::custom_domain::DomainStatus::Active => {
+                CustomDomainStatus::Active
+            }
+            localup_relay_db::entities::custom_domain::DomainStatus::Expired => {
+                CustomDomainStatus::Expired
+            }
+            localup_relay_db::entities::custom_domain::DomainStatus::Failed => {
+                CustomDomainStatus::Failed
+            }
+        },
+        provisioned_at: domain_model.provisioned_at,
+        expires_at: domain_model.expires_at,
+        auto_renew: domain_model.auto_renew,
+        error_message: domain_model.error_message,
+    }))
+}
+
+/// Delete a custom domain
+#[utoipa::path(
+    delete,
+    path = "/api/domains/{domain}",
+    params(
+        ("domain" = String, Path, description = "Domain name")
+    ),
+    responses(
+        (status = 204, description = "Domain deleted successfully"),
+        (status = 404, description = "Domain not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn delete_custom_domain(
+    State(state): State<Arc<AppState>>,
+    Path(domain): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    info!("Deleting custom domain: {}", domain);
+
+    // Find the domain first to get file paths
+    let domain_model = custom_domain::Entity::find()
+        .filter(custom_domain::Column::Domain.eq(&domain))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to find domain: {}", e),
+                    code: Some("DB_QUERY_FAILED".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Domain not found: {}", domain),
+                    code: Some("DOMAIN_NOT_FOUND".to_string()),
+                }),
+            )
+        })?;
+
+    // Delete certificate files
+    if let Some(cert_path) = &domain_model.cert_path {
+        let _ = tokio::fs::remove_file(cert_path).await;
+    }
+    if let Some(key_path) = &domain_model.key_path {
+        let _ = tokio::fs::remove_file(key_path).await;
+    }
+
+    // Delete from database
+    custom_domain::Entity::delete_by_id(domain)
+        .exec(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to delete domain: {}", e),
+                    code: Some("DB_DELETE_FAILED".to_string()),
+                }),
+            )
+        })?;
+
+    info!("Custom domain {} deleted successfully", domain_model.domain);
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Initiate ACME challenge for a domain
+#[utoipa::path(
+    post,
+    path = "/api/domains/challenge/initiate",
+    request_body = InitiateChallengeRequest,
+    responses(
+        (status = 200, description = "Challenge initiated", body = InitiateChallengeResponse),
+        (status = 501, description = "ACME not yet implemented", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn initiate_challenge(
+    Json(req): Json<InitiateChallengeRequest>,
+) -> Result<Json<InitiateChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!(
+        "Initiating {} challenge for domain: {}",
+        req.challenge_type, req.domain
+    );
+
+    // For now, return a mock response showing what the user needs to do
+    // In the future, this will call the ACME client
+    let challenge_id = uuid::Uuid::new_v4().to_string();
+    let expires_at = Utc::now() + chrono::Duration::hours(1);
+
+    let challenge = if req.challenge_type == "dns-01" {
+        ChallengeInfo::Dns01 {
+            domain: req.domain.clone(),
+            record_name: format!("_acme-challenge.{}", req.domain),
+            record_value: format!("mock-dns-token-{}", &challenge_id[..8]),
+            instructions: vec![
+                "1. Add a TXT record to your DNS:".to_string(),
+                format!("   Name: _acme-challenge.{}", req.domain),
+                format!("   Value: mock-dns-token-{}", &challenge_id[..8]),
+                "2. Wait for DNS propagation (can take up to 48 hours)".to_string(),
+                "3. Call POST /api/domains/challenge/complete with the challenge_id".to_string(),
+            ],
+        }
+    } else {
+        // Default to HTTP-01
+        let token = format!("mock-http-token-{}", &challenge_id[..8]);
+        ChallengeInfo::Http01 {
+            domain: req.domain.clone(),
+            token: token.clone(),
+            key_authorization: format!("{}.mock-key-auth", token),
+            file_path: format!("http://{}/.well-known/acme-challenge/{}", req.domain, token),
+            instructions: vec![
+                "1. Create the directory: .well-known/acme-challenge/".to_string(),
+                format!("2. Create a file named: {}", token),
+                format!("3. File content: {}.mock-key-auth", token),
+                format!(
+                    "4. Ensure it's accessible at: http://{}/.well-known/acme-challenge/{}",
+                    req.domain, token
+                ),
+                "5. Call POST /api/domains/challenge/complete with the challenge_id".to_string(),
+            ],
+        }
+    };
+
+    Ok(Json(InitiateChallengeResponse {
+        domain: req.domain,
+        challenge,
+        challenge_id,
+        expires_at,
+    }))
+}
+
+/// Complete/verify ACME challenge
+#[utoipa::path(
+    post,
+    path = "/api/domains/challenge/complete",
+    request_body = CompleteChallengeRequest,
+    responses(
+        (status = 200, description = "Challenge completed, certificate issued", body = UploadCustomDomainResponse),
+        (status = 501, description = "ACME not yet implemented", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn complete_challenge(
+    Json(_req): Json<CompleteChallengeRequest>,
+) -> Result<Json<UploadCustomDomainResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // This will be implemented when ACME client is fully integrated
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ErrorResponse {
+            error: "ACME challenge completion not yet implemented. Please upload certificates manually via POST /api/domains for now.".to_string(),
+            code: Some("NOT_IMPLEMENTED".to_string()),
+        }),
+    ))
+}
+
+// ============================================================================
+// Authentication Handlers
+// ============================================================================
+
+use chrono::Duration;
+use localup_auth::{hash_password, verify_password, JwtClaims, JwtValidator};
+use localup_relay_db::entities::{prelude::User as UserEntity, user};
+use uuid::Uuid;
+
+/// Get authentication configuration
+#[utoipa::path(
+    get,
+    path = "/api/auth/config",
+    responses(
+        (status = 200, description = "Authentication configuration", body = AuthConfig),
+    ),
+    tag = "auth"
+)]
+pub async fn auth_config(State(state): State<Arc<AppState>>) -> Json<crate::models::AuthConfig> {
+    Json(crate::models::AuthConfig {
+        signup_enabled: state.allow_signup,
+    })
+}
+
+/// Register a new user
+#[utoipa::path(
+    post,
+    path = "/api/auth/register",
+    request_body = RegisterRequest,
+    responses(
+        (status = 201, description = "User registered successfully", body = RegisterResponse),
+        (status = 400, description = "Invalid request or email already exists", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "auth"
+)]
+pub async fn register(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::user;
+
+    // Check if public signup is allowed
+    if !state.allow_signup {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Public registration is disabled. Please contact your administrator for an invitation.".to_string(),
+                code: Some("SIGNUP_DISABLED".to_string()),
+            }),
+        ));
+    }
+
+    // Validate email format (basic check)
+    if !req.email.contains('@') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid email format".to_string(),
+                code: Some("INVALID_EMAIL".to_string()),
+            }),
+        ));
+    }
+
+    // Validate password length
+    if req.password.len() < 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Password must be at least 8 characters".to_string(),
+                code: Some("WEAK_PASSWORD".to_string()),
+            }),
+        ));
+    }
+
+    // Check if email already exists
+    let existing_user = UserEntity::find()
+        .filter(user::Column::Email.eq(&req.email))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error checking email: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    if existing_user.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Email already registered".to_string(),
+                code: Some("EMAIL_EXISTS".to_string()),
+            }),
+        ));
+    }
+
+    // Hash password
+    let password_hash = hash_password(&req.password).map_err(|e| {
+        tracing::error!("Password hashing error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("HASH_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    // Create user
+    let user_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+
+    let new_user = user::ActiveModel {
+        id: Set(user_id),
+        email: Set(req.email.clone()),
+        password_hash: Set(password_hash),
+        full_name: Set(req.full_name.clone()),
+        role: Set(user::UserRole::User),
+        is_active: Set(true),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
+
+    let user = new_user.insert(&state.db).await.map_err(|e| {
+        tracing::error!("Database error creating user: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("DB_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    // Auto-create default auth token for tunnel authentication
+    use localup_relay_db::entities::auth_token;
+    use sha2::{Digest, Sha256};
+
+    let auth_token_id = Uuid::new_v4();
+    let jwt_secret = b"temporary-secret-change-me-in-production";
+
+    // Generate JWT auth token (never expires for default token)
+    let auth_claims = JwtClaims::new(
+        auth_token_id.to_string(),
+        "localup-relay".to_string(),
+        "localup-tunnel".to_string(),
+        Duration::days(36500), // ~100 years for "never expires"
+    )
+    .with_user_id(user_id.to_string())
+    .with_token_type("auth".to_string());
+
+    let auth_token_jwt = JwtValidator::encode(jwt_secret, &auth_claims).map_err(|e| {
+        tracing::error!("JWT encoding error for auth token: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("JWT_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    // Hash the auth token using SHA-256
+    let mut hasher = Sha256::new();
+    hasher.update(auth_token_jwt.as_bytes());
+    let auth_token_hash = format!("{:x}", hasher.finalize());
+
+    // Store auth token in database
+    let new_auth_token = auth_token::ActiveModel {
+        id: Set(auth_token_id),
+        user_id: Set(user_id),
+        team_id: Set(None),
+        name: Set("Default".to_string()),
+        description: Set(Some(
+            "Auto-generated default authentication token".to_string(),
+        )),
+        token_hash: Set(auth_token_hash),
+        last_used_at: Set(None),
+        expires_at: Set(None), // Never expires
+        is_active: Set(true),
+        created_at: Set(now),
+    };
+
+    new_auth_token
+        .insert(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error creating default auth token: {}", e);
+            // Log error but don't fail registration - user can create token later
+            tracing::warn!(
+                "Failed to create default auth token for user {}, they can create one later",
+                user_id
+            );
+        })
+        .ok(); // Ignore error to not block registration
+
+    tracing::info!("Created default auth token for user {}", user_id);
+
+    // Generate session token (7 days validity)
+    // TODO: Get JWT secret from config/environment
+    let jwt_secret = b"temporary-secret-change-me-in-production";
+    let user_role_str = match user.role {
+        user::UserRole::Admin => "admin",
+        user::UserRole::User => "user",
+    };
+    let claims = JwtClaims::new(
+        user_id.to_string(),
+        "localup-relay".to_string(),
+        "localup-web-ui".to_string(),
+        Duration::days(7),
+    )
+    .with_user_id(user_id.to_string())
+    .with_user_role(user_role_str.to_string())
+    .with_token_type("session".to_string());
+    let token = JwtValidator::encode(jwt_secret, &claims).map_err(|e| {
+        tracing::error!("JWT encoding error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("JWT_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    let expires_at = now + Duration::days(7);
+
+    // Create HTTP-only cookie with session token
+    let cookie = format!(
+        "session_token={}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        token,
+        7 * 24 * 60 * 60 // 7 days in seconds
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
+
+    let response = Json(RegisterResponse {
+        user: crate::models::User {
+            id: user.id.to_string(),
+            email: user.email,
+            full_name: user.full_name,
+            role: match user.role {
+                user::UserRole::Admin => crate::models::UserRole::Admin,
+                user::UserRole::User => crate::models::UserRole::User,
+            },
+            is_active: user.is_active,
+            created_at: user.created_at,
+            updated_at: user.updated_at,
+        },
+        token, // Will be removed from model next
+        expires_at,
+        auth_token: auth_token_jwt,
+    });
+
+    Ok((StatusCode::CREATED, headers, response))
+}
+
+/// Login with email and password
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Login successful", body = LoginResponse),
+        (status = 401, description = "Invalid credentials", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "auth"
+)]
+pub async fn login(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // Find user by email
+    let user = UserEntity::find()
+        .filter(user::Column::Email.eq(&req.email))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error finding user: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "Invalid email or password".to_string(),
+                    code: Some("INVALID_CREDENTIALS".to_string()),
+                }),
+            )
+        })?;
+
+    // Check if account is active
+    if !user.is_active {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Account is disabled".to_string(),
+                code: Some("ACCOUNT_DISABLED".to_string()),
+            }),
+        ));
+    }
+
+    // Verify password
+    let password_valid = verify_password(&req.password, &user.password_hash).map_err(|e| {
+        tracing::error!("Password verification error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("VERIFY_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    if !password_valid {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Invalid email or password".to_string(),
+                code: Some("INVALID_CREDENTIALS".to_string()),
+            }),
+        ));
+    }
+
+    // Auto-create default auth token if user doesn't have one (for existing users)
+    use localup_relay_db::entities::auth_token;
+    use sha2::{Digest, Sha256};
+
+    let existing_default_token = AuthTokenEntity::find()
+        .filter(auth_token::Column::UserId.eq(user.id))
+        .filter(auth_token::Column::Name.eq("Default"))
+        .one(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+    if existing_default_token.is_none() {
+        let auth_token_id = Uuid::new_v4();
+        let jwt_secret = b"temporary-secret-change-me-in-production";
+        let now = chrono::Utc::now();
+
+        // Generate JWT auth token (never expires for default token)
+        let auth_claims = JwtClaims::new(
+            auth_token_id.to_string(),
+            "localup-relay".to_string(),
+            "localup-tunnel".to_string(),
+            Duration::days(36500), // ~100 years
+        )
+        .with_user_id(user.id.to_string())
+        .with_token_type("auth".to_string());
+
+        if let Ok(auth_token_jwt) = JwtValidator::encode(jwt_secret, &auth_claims) {
+            // Hash the auth token using SHA-256
+            let mut hasher = Sha256::new();
+            hasher.update(auth_token_jwt.as_bytes());
+            let auth_token_hash = format!("{:x}", hasher.finalize());
+
+            // Store auth token in database
+            let new_auth_token = auth_token::ActiveModel {
+                id: Set(auth_token_id),
+                user_id: Set(user.id),
+                team_id: Set(None),
+                name: Set("Default".to_string()),
+                description: Set(Some(
+                    "Auto-generated default authentication token".to_string(),
+                )),
+                token_hash: Set(auth_token_hash),
+                last_used_at: Set(None),
+                expires_at: Set(None), // Never expires
+                is_active: Set(true),
+                created_at: Set(now),
+            };
+
+            if let Err(e) = new_auth_token.insert(&state.db).await {
+                tracing::warn!(
+                    "Failed to create default auth token for user {} on login: {}",
+                    user.id,
+                    e
+                );
+            } else {
+                tracing::info!(
+                    "Created default auth token for existing user {} on login",
+                    user.id
+                );
+            }
+        }
+    }
+
+    // Generate session token (7 days validity)
+    // TODO: Get JWT secret from config/environment
+    let jwt_secret = b"temporary-secret-change-me-in-production";
+    let now = chrono::Utc::now();
+    let user_role_str = match user.role {
+        user::UserRole::Admin => "admin",
+        user::UserRole::User => "user",
+    };
+    let claims = JwtClaims::new(
+        user.id.to_string(),
+        "localup-relay".to_string(),
+        "localup-web-ui".to_string(),
+        Duration::days(7),
+    )
+    .with_user_id(user.id.to_string())
+    .with_user_role(user_role_str.to_string())
+    .with_token_type("session".to_string());
+    let token = JwtValidator::encode(jwt_secret, &claims).map_err(|e| {
+        tracing::error!("JWT encoding error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("JWT_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    let expires_at = now + Duration::days(7);
+
+    // Create HTTP-only cookie with session token
+    let cookie = format!(
+        "session_token={}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        token,
+        7 * 24 * 60 * 60 // 7 days in seconds
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
+
+    let response = Json(LoginResponse {
+        user: crate::models::User {
+            id: user.id.to_string(),
+            email: user.email,
+            full_name: user.full_name,
+            role: match user.role {
+                user::UserRole::Admin => crate::models::UserRole::Admin,
+                user::UserRole::User => crate::models::UserRole::User,
+            },
+            is_active: user.is_active,
+            created_at: user.created_at,
+            updated_at: user.updated_at,
+        },
+        token, // Will be removed from model next
+        expires_at,
+    });
+
+    Ok((headers, response))
+}
+
+/// Logout (clear session cookie)
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    responses(
+        (status = 200, description = "Logout successful"),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "auth"
+)]
+pub async fn logout() -> impl IntoResponse {
+    // Clear the session cookie by setting Max-Age=0
+    let cookie = "session_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0";
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
+
+    (
+        headers,
+        Json(serde_json::json!({
+            "message": "Logged out successfully"
+        })),
+    )
+}
+
+/// Get current authenticated user
+#[utoipa::path(
+    get,
+    path = "/api/auth/me",
+    responses(
+        (status = 200, description = "Current user info", body = inline(Object)),
+        (status = 401, description = "Not authenticated", body = ErrorResponse)
+    ),
+    tag = "auth"
+)]
+pub async fn get_current_user(
+    Extension(auth_user): Extension<crate::middleware::AuthUser>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    // Find user in database
+    let user = UserEntity::find_by_id(Uuid::parse_str(&auth_user.user_id).unwrap())
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error finding user: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "User not found".to_string(),
+                    code: Some("USER_NOT_FOUND".to_string()),
+                }),
+            )
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "user": {
+            "id": user.id.to_string(),
+            "email": user.email,
+            "username": user.full_name,
+            "role": user.role,
+            "is_active": user.is_active,
+            "created_at": user.created_at,
+        }
+    })))
+}
+
+/// Get user's teams
+#[utoipa::path(
+    get,
+    path = "/api/teams",
+    responses(
+        (status = 200, description = "List of user's teams", body = inline(Object)),
+        (status = 401, description = "Not authenticated", body = ErrorResponse)
+    ),
+    tag = "teams"
+)]
+pub async fn list_user_teams(
+    Extension(auth_user): Extension<crate::middleware::AuthUser>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::{prelude::*, team, team_member};
+    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter};
+
+    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid user ID format".to_string(),
+                code: Some("INVALID_USER_ID".to_string()),
+            }),
+        )
+    })?;
+
+    // Find all team memberships for this user
+    let team_memberships = TeamMember::find()
+        .filter(team_member::Column::UserId.eq(user_id))
+        .find_also_related(Team)
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error finding team memberships: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    // Map to response format
+    let teams: Vec<serde_json::Value> = team_memberships
+        .into_iter()
+        .filter_map(|(membership, team_opt)| {
+            team_opt.map(|team| {
+                let role_str = match membership.role {
+                    team_member::TeamRole::Owner => "owner",
+                    team_member::TeamRole::Admin => "admin",
+                    team_member::TeamRole::Member => "member",
+                };
+                serde_json::json!({
+                    "id": team.id.to_string(),
+                    "name": team.name,
+                    "slug": team.slug,
+                    "role": role_str,
+                    "created_at": team.created_at,
+                })
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "teams": teams
+    })))
+}
+
+// ============================================================================
+// Auth Token Management Handlers
+// ============================================================================
+
+use localup_relay_db::entities::{auth_token, prelude::AuthToken as AuthTokenEntity};
+use sha2::{Digest, Sha256};
+
+/// Create a new auth token (API key for tunnel authentication)
+#[utoipa::path(
+    post,
+    path = "/api/auth-tokens",
+    request_body = CreateAuthTokenRequest,
+    responses(
+        (status = 201, description = "Auth token created successfully", body = CreateAuthTokenResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "auth-tokens",
+    security(("bearer_auth" = []))
+)]
+pub async fn create_auth_token(
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
+    Json(req): Json<CreateAuthTokenRequest>,
+) -> Result<(StatusCode, Json<CreateAuthTokenResponse>), (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::auth_token;
+
+    // Validate name
+    if req.name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Token name cannot be empty".to_string(),
+                code: Some("INVALID_NAME".to_string()),
+            }),
+        ));
+    }
+
+    // Get user_id from authenticated user
+    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid user ID format".to_string(),
+                code: Some("INVALID_USER_ID".to_string()),
+            }),
+        )
+    })?;
+
+    let token_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+
+    // Calculate expiration
+    let expires_at = req.expires_in_days.map(|days| now + Duration::days(days));
+
+    // Generate JWT auth token
+    let jwt_secret = b"temporary-secret-change-me-in-production";
+    let mut claims = JwtClaims::new(
+        token_id.to_string(),
+        "localup-relay".to_string(),
+        "localup-tunnel".to_string(),
+        if let Some(exp_at) = expires_at {
+            exp_at - now
+        } else {
+            Duration::days(36500) // ~100 years for "never expires"
+        },
+    )
+    .with_user_id(user_id.to_string())
+    .with_token_type("auth".to_string());
+
+    if let Some(ref team_id_str) = req.team_id {
+        claims = claims.with_team_id(team_id_str.clone());
+    }
+
+    let token = JwtValidator::encode(jwt_secret, &claims).map_err(|e| {
+        tracing::error!("JWT encoding error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("JWT_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    // Hash the token using SHA-256
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let token_hash = format!("{:x}", hasher.finalize());
+
+    // Store auth token in database
+    let team_id_uuid = req.team_id.as_ref().and_then(|id| Uuid::parse_str(id).ok());
+
+    let new_token = auth_token::ActiveModel {
+        id: Set(token_id),
+        user_id: Set(user_id),
+        team_id: Set(team_id_uuid),
+        name: Set(req.name.clone()),
+        description: Set(req.description.clone()),
+        token_hash: Set(token_hash),
+        last_used_at: Set(None),
+        expires_at: Set(expires_at),
+        is_active: Set(true),
+        created_at: Set(now),
+    };
+
+    let saved_token = new_token.insert(&state.db).await.map_err(|e| {
+        tracing::error!("Database error creating auth token: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("DB_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateAuthTokenResponse {
+            id: saved_token.id.to_string(),
+            name: saved_token.name,
+            token, // SHOWN ONLY ONCE!
+            expires_at: saved_token.expires_at,
+            created_at: saved_token.created_at,
+        }),
+    ))
+}
+
+/// List user's auth tokens
+#[utoipa::path(
+    get,
+    path = "/api/auth-tokens",
+    responses(
+        (status = 200, description = "List of auth tokens", body = AuthTokenList),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "auth-tokens",
+    security(("bearer_auth" = []))
+)]
+pub async fn list_auth_tokens(
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
+) -> Result<Json<AuthTokenList>, (StatusCode, Json<ErrorResponse>)> {
+    // Parse user_id from authenticated user
+    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid user ID format".to_string(),
+                code: Some("INVALID_USER_ID".to_string()),
+            }),
+        )
+    })?;
+
+    // Query all auth tokens for this user
+    let token_records = AuthTokenEntity::find()
+        .filter(auth_token::Column::UserId.eq(user_id))
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error listing tokens: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    // Convert to response format
+    let tokens: Vec<AuthToken> = token_records
+        .into_iter()
+        .map(|t| AuthToken {
+            id: t.id.to_string(),
+            user_id: t.user_id.to_string(),
+            team_id: t.team_id.map(|id| id.to_string()),
+            name: t.name,
+            description: t.description,
+            last_used_at: t.last_used_at,
+            expires_at: t.expires_at,
+            is_active: t.is_active,
+            created_at: t.created_at,
+        })
+        .collect();
+
+    let total = tokens.len();
+
+    Ok(Json(AuthTokenList { tokens, total }))
+}
+
+/// Get specific auth token details
+#[utoipa::path(
+    get,
+    path = "/api/auth-tokens/{id}",
+    params(
+        ("id" = String, Path, description = "Auth token ID")
+    ),
+    responses(
+        (status = 200, description = "Auth token details", body = AuthToken),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Token not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "auth-tokens",
+    security(("bearer_auth" = []))
+)]
+pub async fn get_auth_token(
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<String>,
+) -> Result<Json<AuthToken>, (StatusCode, Json<ErrorResponse>)> {
+    let token_id = Uuid::parse_str(&id).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid token ID format".to_string(),
+                code: Some("INVALID_ID".to_string()),
+            }),
+        )
+    })?;
+
+    // Parse authenticated user_id
+    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid user ID format".to_string(),
+                code: Some("INVALID_USER_ID".to_string()),
+            }),
+        )
+    })?;
+
+    let token = AuthTokenEntity::find_by_id(token_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error finding token: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Auth token not found".to_string(),
+                    code: Some("NOT_FOUND".to_string()),
+                }),
+            )
+        })?;
+
+    // Verify ownership: token must belong to authenticated user
+    if token.user_id != user_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "You don't have permission to access this token".to_string(),
+                code: Some("FORBIDDEN".to_string()),
+            }),
+        ));
+    }
+
+    Ok(Json(AuthToken {
+        id: token.id.to_string(),
+        user_id: token.user_id.to_string(),
+        team_id: token.team_id.map(|id| id.to_string()),
+        name: token.name,
+        description: token.description,
+        last_used_at: token.last_used_at,
+        expires_at: token.expires_at,
+        is_active: token.is_active,
+        created_at: token.created_at,
+    }))
+}
+
+/// Update auth token (name, description, or active status)
+#[utoipa::path(
+    patch,
+    path = "/api/auth-tokens/{id}",
+    params(
+        ("id" = String, Path, description = "Auth token ID")
+    ),
+    request_body = UpdateAuthTokenRequest,
+    responses(
+        (status = 200, description = "Auth token updated", body = AuthToken),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Token not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "auth-tokens",
+    security(("bearer_auth" = []))
+)]
+pub async fn update_auth_token(
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateAuthTokenRequest>,
+) -> Result<Json<AuthToken>, (StatusCode, Json<ErrorResponse>)> {
+    let token_id = Uuid::parse_str(&id).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid token ID format".to_string(),
+                code: Some("INVALID_ID".to_string()),
+            }),
+        )
+    })?;
+
+    // Parse authenticated user_id
+    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid user ID format".to_string(),
+                code: Some("INVALID_USER_ID".to_string()),
+            }),
+        )
+    })?;
+
+    let token = AuthTokenEntity::find_by_id(token_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error finding token: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Auth token not found".to_string(),
+                    code: Some("NOT_FOUND".to_string()),
+                }),
+            )
+        })?;
+
+    // Verify ownership: token must belong to authenticated user
+    if token.user_id != user_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "You don't have permission to modify this token".to_string(),
+                code: Some("FORBIDDEN".to_string()),
+            }),
+        ));
+    }
+
+    // Update token
+    let mut active_token: auth_token::ActiveModel = token.into();
+
+    if let Some(name) = req.name {
+        active_token.name = Set(name);
+    }
+    if let Some(description) = req.description {
+        active_token.description = Set(Some(description));
+    }
+    if let Some(is_active) = req.is_active {
+        active_token.is_active = Set(is_active);
+    }
+
+    let updated_token = active_token.update(&state.db).await.map_err(|e| {
+        tracing::error!("Database error updating token: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("DB_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    Ok(Json(AuthToken {
+        id: updated_token.id.to_string(),
+        user_id: updated_token.user_id.to_string(),
+        team_id: updated_token.team_id.map(|id| id.to_string()),
+        name: updated_token.name,
+        description: updated_token.description,
+        last_used_at: updated_token.last_used_at,
+        expires_at: updated_token.expires_at,
+        is_active: updated_token.is_active,
+        created_at: updated_token.created_at,
+    }))
+}
+
+/// Delete (revoke) an auth token
+#[utoipa::path(
+    delete,
+    path = "/api/auth-tokens/{id}",
+    params(
+        ("id" = String, Path, description = "Auth token ID")
+    ),
+    responses(
+        (status = 204, description = "Auth token deleted successfully"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "Token not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "auth-tokens",
+    security(("bearer_auth" = []))
+)]
+pub async fn delete_auth_token(
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let token_id = Uuid::parse_str(&id).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid token ID format".to_string(),
+                code: Some("INVALID_ID".to_string()),
+            }),
+        )
+    })?;
+
+    // Parse authenticated user_id
+    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid user ID format".to_string(),
+                code: Some("INVALID_USER_ID".to_string()),
+            }),
+        )
+    })?;
+
+    let token = AuthTokenEntity::find_by_id(token_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            tracing::error!("Database error finding token: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Auth token not found".to_string(),
+                    code: Some("NOT_FOUND".to_string()),
+                }),
+            )
+        })?;
+
+    // Verify ownership: token must belong to authenticated user
+    if token.user_id != user_id {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "You don't have permission to delete this token".to_string(),
+                code: Some("FORBIDDEN".to_string()),
+            }),
+        ));
+    }
+
+    // Delete token
+    let active_token: auth_token::ActiveModel = token.into();
+    active_token.delete(&state.db).await.map_err(|e| {
+        tracing::error!("Database error deleting token: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("DB_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -415,6 +415,7 @@ async fn main() -> Result<()> {
         args.domain.clone(),
         pending_requests.clone(),
     )
+    .with_database(db.clone())
     .with_agent_registry(agent_registry.clone());
 
     // Add port allocator if TCP range was provided
@@ -470,40 +471,39 @@ async fn main() -> Result<()> {
 
     let localup_handler = Arc::new(localup_handler);
 
-    // TODO: Re-enable API server after fixing tunnel-api
-    let api_handle: Option<tokio::task::JoinHandle<()>> = None;
-    info!("API server temporarily disabled");
-    //     // Start API server for dashboard/management
-    //     let api_handle = if !args.no_api {
-    //         let api_addr: SocketAddr = args.api_addr.parse()?;
-    //         let api_localup_manager = localup_manager.clone();
-    //         let api_db = db.clone();
-    //
-    //         info!("Starting API server on {}", api_addr);
-    //         info!("OpenAPI spec: http://{}/api/openapi.json", api_addr);
-    //         info!("Swagger UI: http://{}/swagger-ui", api_addr);
-    //
-    //         Some(tokio::spawn(async move {
-    //             // use localup_api::{ApiServer, ApiServerConfig};
-    //
-    //             let config = ApiServerConfig {
-    //                 bind_addr: api_addr,
-    //                 enable_cors: true,
-    //                 cors_origins: Some(vec![
-    //                     "http://localhost:3000".to_string(),
-    //                     "http://127.0.0.1:3000".to_string(),
-    //                 ]),
-    //             };
-    //
-    //             let server = ApiServer::new(config, api_localup_manager, api_db);
-    //             if let Err(e) = server.start().await {
-    //                 error!("API server error: {}", e);
-    //             }
-    //         }))
-    //     } else {
-    //         info!("API server disabled (--no-api flag)");
-    //         None
-    //     };
+    // Start API server for dashboard/management
+    let api_handle = if !args.no_api {
+        let api_addr: SocketAddr = args.api_addr.parse()?;
+        let api_localup_manager = localup_manager.clone();
+        let api_db = db.clone();
+
+        info!("Starting API server on {}", api_addr);
+        info!("OpenAPI spec: http://{}/api/openapi.json", api_addr);
+        info!("Swagger UI: http://{}/swagger-ui", api_addr);
+
+        Some(tokio::spawn(async move {
+            use localup_api::{ApiServer, ApiServerConfig};
+
+            let config = ApiServerConfig {
+                bind_addr: api_addr,
+                enable_cors: true,
+                cors_origins: Some(vec![
+                    "http://localhost:5173".to_string(),
+                    "http://127.0.0.1:5173".to_string(),
+                    "http://localhost:3000".to_string(),
+                    "http://127.0.0.1:3000".to_string(),
+                ]),
+            };
+
+            let server = ApiServer::new(config, api_localup_manager, api_db);
+            if let Err(e) = server.start().await {
+                error!("API server error: {}", e);
+            }
+        }))
+    } else {
+        info!("API server disabled (--no-api flag)");
+        None
+    };
 
     // Accept tunnel connections
     let localup_handle = if use_quic {

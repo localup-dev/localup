@@ -274,3 +274,369 @@ pub struct CapturedTcpConnectionList {
     /// Page size
     pub limit: usize,
 }
+
+/// Custom domain status
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CustomDomainStatus {
+    /// Certificate provisioning in progress
+    Pending,
+    /// Certificate active and valid
+    Active,
+    /// Certificate expired
+    Expired,
+    /// Certificate provisioning failed
+    Failed,
+}
+
+/// Custom domain information
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CustomDomain {
+    /// Domain name
+    pub domain: String,
+    /// Certificate status
+    pub status: CustomDomainStatus,
+    /// When the certificate was provisioned
+    pub provisioned_at: DateTime<Utc>,
+    /// When the certificate expires
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Whether to automatically renew the certificate
+    pub auto_renew: bool,
+    /// Error message if provisioning failed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+}
+
+/// Request to upload a custom domain certificate
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UploadCustomDomainRequest {
+    /// Domain name (e.g., "api.example.com")
+    pub domain: String,
+    /// Certificate in PEM format (base64 encoded)
+    pub cert_pem: String,
+    /// Private key in PEM format (base64 encoded)
+    pub key_pem: String,
+    /// Whether to automatically renew the certificate
+    #[serde(default = "default_auto_renew")]
+    pub auto_renew: bool,
+}
+
+fn default_auto_renew() -> bool {
+    true
+}
+
+/// Response after uploading a custom domain
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UploadCustomDomainResponse {
+    /// Domain name
+    pub domain: String,
+    /// Current status
+    pub status: CustomDomainStatus,
+    /// Success message
+    pub message: String,
+}
+
+/// List of custom domains
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CustomDomainList {
+    /// Custom domains
+    pub domains: Vec<CustomDomain>,
+    /// Total count
+    pub total: usize,
+}
+
+/// Request to initiate ACME challenge for a domain
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct InitiateChallengeRequest {
+    /// Domain name to validate
+    pub domain: String,
+    /// Challenge type (http-01 or dns-01)
+    #[serde(default = "default_challenge_type")]
+    pub challenge_type: String,
+}
+
+fn default_challenge_type() -> String {
+    "http-01".to_string()
+}
+
+/// Challenge information for domain validation
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ChallengeInfo {
+    /// HTTP-01 challenge
+    Http01 {
+        /// Domain being validated
+        domain: String,
+        /// Random token from ACME server
+        token: String,
+        /// Key authorization to serve
+        key_authorization: String,
+        /// Where to place the file
+        /// Format: http://{domain}/.well-known/acme-challenge/{token}
+        file_path: String,
+        /// Instructions for user
+        instructions: Vec<String>,
+    },
+    /// DNS-01 challenge
+    Dns01 {
+        /// Domain being validated
+        domain: String,
+        /// DNS record name (_acme-challenge.{domain})
+        record_name: String,
+        /// DNS TXT record value
+        record_value: String,
+        /// Instructions for user
+        instructions: Vec<String>,
+    },
+}
+
+/// Response after initiating a challenge
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct InitiateChallengeResponse {
+    /// Domain name
+    pub domain: String,
+    /// Challenge details
+    pub challenge: ChallengeInfo,
+    /// Challenge ID for completing the validation
+    pub challenge_id: String,
+    /// Expiration time for this challenge
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Request to complete/verify a challenge
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CompleteChallengeRequest {
+    /// Domain name
+    pub domain: String,
+    /// Challenge ID from initiate response
+    pub challenge_id: String,
+}
+
+// ============================================================================
+// Authentication Models
+// ============================================================================
+
+/// User registration request
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RegisterRequest {
+    /// User email address (must be unique)
+    pub email: String,
+    /// User password (minimum 8 characters)
+    pub password: String,
+    /// User full name (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+}
+
+/// User registration response
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RegisterResponse {
+    /// Newly created user
+    pub user: User,
+    /// Session token for immediate login
+    pub token: String,
+    /// Token expiration timestamp
+    pub expires_at: DateTime<Utc>,
+    /// Authentication token for tunnel connections (only shown once)
+    pub auth_token: String,
+}
+
+/// User login request
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LoginRequest {
+    /// User email address
+    pub email: String,
+    /// User password
+    pub password: String,
+}
+
+/// User login response
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct LoginResponse {
+    /// Logged in user
+    pub user: User,
+    /// Session token
+    pub token: String,
+    /// Token expiration timestamp
+    pub expires_at: DateTime<Utc>,
+}
+
+/// User role
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum UserRole {
+    /// System administrator with full access
+    Admin,
+    /// Regular user
+    User,
+}
+
+/// User information
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct User {
+    /// User UUID
+    pub id: String,
+    /// User email
+    pub email: String,
+    /// User full name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+    /// User role
+    pub role: UserRole,
+    /// Whether the account is active
+    pub is_active: bool,
+    /// When the user was created
+    pub created_at: DateTime<Utc>,
+    /// When the user was last updated
+    pub updated_at: DateTime<Utc>,
+}
+
+/// List of users
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UserList {
+    /// Users
+    pub users: Vec<User>,
+    /// Total count
+    pub total: usize,
+}
+
+/// Team role
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TeamRole {
+    /// Team owner with full access
+    Owner,
+    /// Team admin with elevated permissions
+    Admin,
+    /// Regular team member
+    Member,
+}
+
+/// Team information
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct Team {
+    /// Team UUID
+    pub id: String,
+    /// Team name
+    pub name: String,
+    /// Team slug (URL-friendly)
+    pub slug: String,
+    /// User ID of the team owner
+    pub owner_id: String,
+    /// When the team was created
+    pub created_at: DateTime<Utc>,
+    /// When the team was last updated
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Team member information
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TeamMember {
+    /// Team ID
+    pub team_id: String,
+    /// User information
+    pub user: User,
+    /// Role in the team
+    pub role: TeamRole,
+    /// When the user joined the team
+    pub joined_at: DateTime<Utc>,
+}
+
+/// List of teams
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TeamList {
+    /// Teams
+    pub teams: Vec<Team>,
+    /// Total count
+    pub total: usize,
+}
+
+/// Request to create an auth token
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateAuthTokenRequest {
+    /// User-defined name for this token
+    pub name: String,
+    /// Description of what this token is used for (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Token expiration in days (null = never expires)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_days: Option<i64>,
+    /// Team ID if this is a team token (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+}
+
+/// Response after creating an auth token
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CreateAuthTokenResponse {
+    /// Token ID
+    pub id: String,
+    /// Token name
+    pub name: String,
+    /// The actual JWT token (SHOWN ONLY ONCE!)
+    pub token: String,
+    /// When the token expires (null = never)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// When the token was created
+    pub created_at: DateTime<Utc>,
+}
+
+/// Auth token information (without the actual token value)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AuthToken {
+    /// Token ID
+    pub id: String,
+    /// User ID who owns this token
+    pub user_id: String,
+    /// Team ID if this is a team token
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+    /// Token name
+    pub name: String,
+    /// Token description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// When the token was last used
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<DateTime<Utc>>,
+    /// When the token expires (null = never)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Whether the token is active
+    pub is_active: bool,
+    /// When the token was created
+    pub created_at: DateTime<Utc>,
+}
+
+/// List of auth tokens
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AuthTokenList {
+    /// Auth tokens
+    pub tokens: Vec<AuthToken>,
+    /// Total count
+    pub total: usize,
+}
+
+/// Authentication configuration
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AuthConfig {
+    /// Whether public user registration is allowed
+    pub signup_enabled: bool,
+}
+
+/// Request to update an auth token
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct UpdateAuthTokenRequest {
+    /// Updated token name (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Updated description (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Whether the token is active (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_active: Option<bool>,
+}

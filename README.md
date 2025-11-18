@@ -25,6 +25,7 @@ localup relay http \
   --localup-addr=0.0.0.0:14443 \
   --http-addr=0.0.0.0:18080 \
   --https-addr=0.0.0.0:18443 \
+  --domain=localhost \
   --tls-cert=cert.pem --tls-key=key.pem \
   --jwt-secret="my-jwt-secret"
 
@@ -59,6 +60,7 @@ localup relay http \
   --localup-addr "0.0.0.0:14443" \
   --http-addr "0.0.0.0:18080" \
   --https-addr "0.0.0.0:18443" \
+  --domain "localhost" \
   --tls-cert=cert.pem --tls-key=key.pem \
   --jwt-secret "my-jwt-secret"
 
@@ -166,7 +168,6 @@ localup relay --help        # Shows available relay subcommands
 localup relay tcp --help    # Shows TCP relay options
 localup relay tls --help    # Shows TLS/SNI relay options
 localup relay http --help   # Shows HTTP/HTTPS relay options
-localup relay all --help    # Shows all protocol options
 localup generate-token --help
 ```
 
@@ -186,7 +187,6 @@ localup relay <SUBCOMMAND> [OPTIONS]
 - `tcp` - TCP tunnel relay (port-based routing, port allocation)
 - `tls` - TLS/SNI relay (SNI-based routing, no certificates needed)
 - `http` - HTTP/HTTPS relay (host-based routing, TLS termination)
-- `all` - All protocols (TCP, TLS, HTTP, HTTPS combined)
 
 ### Common Options (all subcommands)
 
@@ -204,6 +204,7 @@ localup relay <SUBCOMMAND> [OPTIONS]
 localup relay tcp [OPTIONS]
 
 --tcp-port-range <START-END>  TCP port range [default: 10000-20000]
+--domain <DOMAIN>             Public domain name for this relay [default: localhost]
 ```
 
 ### TLS/SNI Relay Options
@@ -212,6 +213,8 @@ localup relay tcp [OPTIONS]
 localup relay tls [OPTIONS]
 
 --tls-addr <ADDR>             TLS/SNI server address [default: 0.0.0.0:4443]
+--domain <DOMAIN>             Public domain name for this relay [default: localhost]
+                              Used for SNI-based routing: {subdomain}.{domain}
 ```
 
 ### HTTP/HTTPS Relay Options
@@ -221,22 +224,10 @@ localup relay http [OPTIONS]
 
 --http-addr <ADDR>            HTTP server address [default: 0.0.0.0:8080]
 --https-addr <ADDR>           HTTPS server address (optional)
+--domain <DOMAIN>             Base domain for subdomain routing [default: localhost]
+                              Tunnels create subdomains: {subdomain}.{domain}
 --tls-cert <PATH>             TLS certificate file (PEM format, required if --https-addr used)
 --tls-key <PATH>              TLS private key file (PEM format, required if --https-addr used)
-```
-
-### All Protocols Relay Options
-
-```bash
-localup relay all [OPTIONS]
-
-# Combines all options from tcp, tls, and http subcommands
---tcp-port-range <START-END>  TCP port range [default: 10000-20000]
---tls-addr <ADDR>             TLS/SNI server address [default: 0.0.0.0:4443]
---http-addr <ADDR>            HTTP server address [default: 0.0.0.0:8080]
---https-addr <ADDR>           HTTPS server address (optional)
---tls-cert <PATH>             TLS certificate file (optional)
---tls-key <PATH>              TLS private key file (optional)
 ```
 
 ### Client Options
@@ -268,6 +259,39 @@ localup [OPTIONS]
 ```bash
 localup generate-token --secret "your-secret-key" --sub "myapp" --token-only
 ```
+
+### Production Domain Configuration
+
+For production deployments with a real domain (e.g., `relay.example.com`):
+
+```bash
+# 1. Set up DNS wildcard record: *.relay.example.com → your-server-ip
+
+# 2. Get Let's Encrypt certificates (one-time setup)
+certbot certonly --standalone -d relay.example.com -d "*.relay.example.com"
+
+# 3. Start relay with your domain
+localup relay http \
+  --localup-addr "0.0.0.0:4443" \
+  --http-addr "0.0.0.0:80" \
+  --https-addr "0.0.0.0:443" \
+  --domain "relay.example.com" \
+  --tls-cert "/etc/letsencrypt/live/relay.example.com/fullchain.pem" \
+  --tls-key "/etc/letsencrypt/live/relay.example.com/privkey.pem" \
+  --jwt-secret "your-production-secret"
+
+# 4. Create tunnel from client
+export TOKEN=$(localup generate-token --secret "your-production-secret" --sub "api" --token-only)
+localup --port 8000 --relay relay.example.com:4443 --subdomain api --token "$TOKEN"
+
+# 5. Access your service
+# HTTP:  http://api.relay.example.com
+# HTTPS: https://api.relay.example.com
+```
+
+**Note**: The `--domain` flag determines how subdomains are constructed:
+- `--domain localhost` → tunnels accessible at `{subdomain}.localhost:PORT`
+- `--domain relay.example.com` → tunnels accessible at `{subdomain}.relay.example.com`
 
 ---
 

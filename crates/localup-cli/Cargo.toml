@@ -17,6 +17,7 @@ localup-agent = { path = "../localup-agent" }
 localup-exit-node = { path = "../localup-exit-node" }
 localup-agent-server = { path = "../localup-agent-server" }
 localup-auth = { path = "../localup-auth" }
+localup-api = { path = "../localup-api" }
 localup-control = { path = "../localup-control" }
 localup-server-https = { path = "../localup-server-https" }
 localup-server-tcp = { path = "../localup-server-tcp" }
@@ -37,6 +38,7 @@ dirs = "5.0"
 uuid = { version = "1.0", features = ["v4"] }
 ipnetwork = "0.20"
 chrono = { workspace = true }
+sea-orm = { workspace = true }
 
 [build-dependencies]
 chrono = { workspace = true }

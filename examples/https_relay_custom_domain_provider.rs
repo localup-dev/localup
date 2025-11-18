@@ -240,7 +240,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         protocols: vec![ProtocolConfig::Https {
             local_port,
             subdomain: None, // Let relay auto-generate: "acme-service-1"
-            custom_domain: None,
         }],
         auth_token,
         exit_node: ExitNodeConfig::Custom("127.0.0.1:4443".to_string()),

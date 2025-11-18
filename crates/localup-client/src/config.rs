@@ -28,7 +28,6 @@ pub enum ProtocolConfig {
     Https {
         local_port: u16,
         subdomain: Option<String>,
-        custom_domain: Option<String>,
     },
 }
 
@@ -137,7 +136,6 @@ mod tests {
             .protocol(ProtocolConfig::Https {
                 local_port: 3000,
                 subdomain: Some("myapp".to_string()),
-                custom_domain: None,
             })
             .auth_token("test-token".to_string())
             .build()

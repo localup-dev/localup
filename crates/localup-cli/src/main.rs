@@ -5,10 +5,10 @@ use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use localup_cli::{daemon, localup_store, service};
+use localup_cli::{config, daemon, localup_store, service};
 use localup_client::{
     ExitNodeConfig, MetricsServer, ProtocolConfig, ReverseTunnelClient, ReverseTunnelConfig,
     TunnelClient, TunnelConfig,
@@ -44,10 +44,6 @@ struct Cli {
     /// Subdomain for HTTP/HTTPS tunnels (standalone mode only)
     #[arg(short, long)]
     subdomain: Option<String>,
-
-    /// Custom domain for HTTPS tunnels (standalone mode only)
-    #[arg(long)]
-    domain: Option<String>,
 
     /// Relay server address (standalone mode only)
     #[arg(short, long, env)]
@@ -278,6 +274,24 @@ enum Commands {
         #[arg(long)]
         token_only: bool,
     },
+    /// Manage global CLI configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigCommands {
+    /// Set the default authentication token
+    SetToken {
+        /// Authentication token to store
+        token: String,
+    },
+    /// Get the default authentication token
+    GetToken,
+    /// Clear the default authentication token
+    ClearToken,
 }
 
 #[derive(Subcommand, Debug)]
@@ -315,6 +329,10 @@ enum RelayCommands {
         /// Database URL for storing traffic logs
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
+
+        /// Allow public user registration (disabled by default for security)
+        #[arg(long, env = "ALLOW_SIGNUP")]
+        allow_signup: bool,
     },
 
     /// TLS/SNI relay (SNI-based routing, no certificates needed)
@@ -350,6 +368,10 @@ enum RelayCommands {
         /// Database URL for storing traffic logs
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
+
+        /// Allow public user registration (disabled by default for security)
+        #[arg(long, env = "ALLOW_SIGNUP")]
+        allow_signup: bool,
     },
 
     /// HTTP/HTTPS relay (host-based routing with TLS termination)
@@ -397,61 +419,22 @@ enum RelayCommands {
         /// Database URL for storing traffic logs
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
-    },
 
-    /// All protocols (TCP, TLS, HTTP, HTTPS)
-    All {
-        /// Tunnel control port for client connections (QUIC)
-        #[arg(long, default_value = "0.0.0.0:4443")]
-        localup_addr: String,
+        /// Admin email for auto-creating admin user on startup
+        #[arg(long, env = "ADMIN_EMAIL")]
+        admin_email: Option<String>,
 
-        /// HTTP server bind address
-        #[arg(long, default_value = "0.0.0.0:8080")]
-        http_addr: String,
+        /// Admin password for auto-creating admin user on startup
+        #[arg(long, env = "ADMIN_PASSWORD")]
+        admin_password: Option<String>,
 
-        /// HTTPS server bind address (requires TLS certificates)
-        #[arg(long)]
-        https_addr: Option<String>,
+        /// Admin username for auto-creating admin user on startup (optional, defaults to email)
+        #[arg(long, env = "ADMIN_USERNAME")]
+        admin_username: Option<String>,
 
-        /// TLS/SNI server bind address
-        #[arg(long)]
-        tls_addr: Option<String>,
-
-        /// TLS certificate file path (PEM format)
-        #[arg(long)]
-        tls_cert: Option<String>,
-
-        /// TLS private key file path (PEM format)
-        #[arg(long)]
-        tls_key: Option<String>,
-
-        /// TCP port range for raw TCP tunnels (format: "10000-20000")
-        #[arg(long, default_value = "10000-20000")]
-        tcp_port_range: String,
-
-        /// Public domain name for this relay
-        #[arg(long, default_value = "localhost")]
-        domain: String,
-
-        /// JWT secret for authenticating tunnel clients
-        #[arg(long, env = "JWT_SECRET")]
-        jwt_secret: Option<String>,
-
-        /// Log level (trace, debug, info, warn, error)
-        #[arg(long, default_value = "info")]
-        log_level: String,
-
-        /// API server bind address
-        #[arg(long, default_value = "127.0.0.1:3080")]
-        api_addr: String,
-
-        /// Disable API server
-        #[arg(long)]
-        no_api: bool,
-
-        /// Database URL for storing traffic logs
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: Option<String>,
+        /// Allow public user registration (disabled by default for security)
+        #[arg(long, env = "ALLOW_SIGNUP")]
+        allow_signup: bool,
     },
 }
 
@@ -515,7 +498,6 @@ async fn main() -> Result<()> {
             protocol,
             token,
             subdomain,
-            domain,
             relay,
             remote_port,
             enabled,
@@ -612,6 +594,7 @@ async fn main() -> Result<()> {
             )
             .await
         }
+        Some(Commands::Config { ref command }) => handle_config_command(command).await,
         None => {
             // Standalone mode - run a single tunnel
             run_standalone(cli).await
@@ -686,7 +669,6 @@ fn handle_add_tunnel(
     protocol: String,
     token: Option<String>,
     subdomain: Option<String>,
-    domain: Option<String>,
     relay: Option<String>,
     remote_port: Option<u16>,
     enabled: bool,
@@ -707,7 +689,7 @@ fn handle_add_tunnel(
     };
 
     // Parse protocol
-    let protocol_config = parse_protocol(&protocol, local_port, subdomain, domain, remote_port)?;
+    let protocol_config = parse_protocol(&protocol, local_port, subdomain, remote_port)?;
 
     // Parse exit node
     let exit_node = if let Some(relay_addr) = relay {
@@ -787,14 +769,10 @@ fn handle_list_tunnels() -> Result<()> {
                 ProtocolConfig::Https {
                     local_port,
                     subdomain,
-                    custom_domain,
                 } => {
                     println!("    Protocol: HTTPS, Port: {}", local_port);
                     if let Some(sub) = subdomain {
                         println!("    Subdomain: {}", sub);
-                    }
-                    if let Some(domain) = custom_domain {
-                        println!("    Custom domain: {}", domain);
                     }
                 }
                 ProtocolConfig::Tcp {
@@ -940,7 +918,6 @@ async fn run_standalone(cli: Cli) -> Result<()> {
         &protocol_str,
         local_port,
         cli.subdomain.clone(),
-        cli.domain.clone(),
         cli.remote_port,
     )?;
 
@@ -1172,7 +1149,6 @@ fn parse_protocol(
     protocol: &str,
     port: u16,
     subdomain: Option<String>,
-    domain: Option<String>,
     remote_port: Option<u16>,
 ) -> Result<ProtocolConfig> {
     match protocol.to_lowercase().as_str() {
@@ -1183,7 +1159,6 @@ fn parse_protocol(
         "https" => Ok(ProtocolConfig::Https {
             local_port: port,
             subdomain,
-            custom_domain: domain,
         }),
         "tcp" => Ok(ProtocolConfig::Tcp {
             local_port: port,
@@ -1508,6 +1483,7 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             api_addr,
             no_api,
             database_url,
+            allow_signup,
         } => {
             handle_relay_command(
                 String::new(), // http_addr - not used for TCP
@@ -1523,6 +1499,10 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 api_addr,
                 no_api,
                 database_url,
+                None, // admin_email
+                None, // admin_password
+                None, // admin_username
+                allow_signup,
             )
             .await
         }
@@ -1535,6 +1515,7 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             api_addr,
             no_api,
             database_url,
+            allow_signup,
         } => {
             handle_relay_command(
                 String::new(), // http_addr - not used for TLS
@@ -1550,6 +1531,10 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 api_addr,
                 no_api,
                 database_url,
+                None, // admin_email
+                None, // admin_password
+                None, // admin_username
+                allow_signup,
             )
             .await
         }
@@ -1565,6 +1550,10 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             api_addr,
             no_api,
             database_url,
+            admin_email,
+            admin_password,
+            admin_username,
+            allow_signup,
         } => {
             handle_relay_command(
                 http_addr,
@@ -1580,38 +1569,10 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 api_addr,
                 no_api,
                 database_url,
-            )
-            .await
-        }
-        RelayCommands::All {
-            localup_addr,
-            http_addr,
-            https_addr,
-            tls_addr,
-            tls_cert,
-            tls_key,
-            tcp_port_range,
-            domain,
-            jwt_secret,
-            log_level,
-            api_addr,
-            no_api,
-            database_url,
-        } => {
-            handle_relay_command(
-                http_addr,
-                localup_addr,
-                https_addr,
-                tls_addr,
-                tls_cert,
-                tls_key,
-                domain,
-                jwt_secret,
-                log_level,
-                Some(tcp_port_range),
-                api_addr,
-                no_api,
-                database_url,
+                admin_email,
+                admin_password,
+                admin_username,
+                allow_signup,
             )
             .await
         }
@@ -1630,9 +1591,13 @@ async fn handle_relay_command(
     jwt_secret: Option<String>,
     log_level: String,
     tcp_port_range: Option<String>,
-    _api_addr: String,
-    _no_api: bool,
+    api_addr: String,
+    no_api: bool,
     database_url: Option<String>,
+    admin_email: Option<String>,
+    admin_password: Option<String>,
+    admin_username: Option<String>,
+    allow_signup: bool,
 ) -> Result<()> {
     use localup_auth::JwtValidator;
     use localup_control::{
@@ -1677,6 +1642,83 @@ async fn handle_relay_command(
         .await
         .map_err(|e| anyhow::anyhow!("Failed to run database migrations: {}", e))?;
 
+    // Auto-create admin user if credentials provided
+    if let (Some(email), Some(password)) = (admin_email, admin_password) {
+        use localup_auth::hash_password;
+        use localup_relay_db::entities::user;
+        use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+        // Check if user already exists
+        let existing_user = user::Entity::find()
+            .filter(user::Column::Email.eq(&email))
+            .one(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to check for existing user: {}", e))?;
+
+        if existing_user.is_none() {
+            let password_hash = hash_password(&password)
+                .map_err(|e| anyhow::anyhow!("Failed to hash admin password: {}", e))?;
+
+            let full_name = admin_username
+                .unwrap_or_else(|| email.split('@').next().unwrap_or("admin").to_string());
+            let user_id = uuid::Uuid::new_v4();
+
+            let new_user = user::ActiveModel {
+                id: Set(user_id),
+                email: Set(email.clone()),
+                password_hash: Set(password_hash),
+                full_name: Set(Some(full_name.clone())),
+                role: Set(user::UserRole::Admin),
+                is_active: Set(true),
+                created_at: Set(chrono::Utc::now()),
+                updated_at: Set(chrono::Utc::now()),
+            };
+
+            new_user
+                .insert(&db)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create admin user: {}", e))?;
+
+            // Create default team for the admin user
+            use localup_relay_db::entities::{team, team_member};
+            let team_name = format!("{}'s Team", full_name);
+            let team_id = uuid::Uuid::new_v4();
+
+            let new_team = team::ActiveModel {
+                id: Set(team_id),
+                name: Set(team_name.clone()),
+                slug: Set(full_name.to_lowercase().replace(' ', "-")),
+                owner_id: Set(user_id),
+                created_at: Set(chrono::Utc::now()),
+                updated_at: Set(chrono::Utc::now()),
+            };
+
+            new_team
+                .insert(&db)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create default team: {}", e))?;
+
+            // Add admin user as team owner
+            let new_team_member = team_member::ActiveModel {
+                team_id: Set(team_id),
+                user_id: Set(user_id),
+                role: Set(team_member::TeamRole::Owner),
+                joined_at: Set(chrono::Utc::now()),
+            };
+
+            new_team_member
+                .insert(&db)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to add admin to team: {}", e))?;
+
+            info!("✅ Admin user created: {} ({})", full_name, email);
+            info!("   Default team created: {}", team_name);
+            info!("   You can now log in at the web portal");
+        } else {
+            info!("ℹ️  Admin user already exists: {}", email);
+        }
+    }
+
     // Initialize TCP port allocator if TCP range provided
     let port_allocator = if let Some(ref tcp_range) = tcp_port_range {
         let (start, end) = parse_port_range(tcp_range)?;
@@ -1718,6 +1760,15 @@ async fn handle_relay_command(
         info!("⚠️  Running without JWT authentication (not recommended for production)");
         None
     };
+
+    // Log signup configuration
+    if allow_signup {
+        info!("✅ Public user registration enabled (--allow-signup)");
+        info!("   ⚠️  For production, consider disabling public signup for security");
+    } else {
+        info!("🔒 Public user registration disabled (invite-only mode)");
+        info!("   Admin can create users manually via the admin panel");
+    }
 
     // Create tunnel connection manager
     let localup_manager = Arc::new(TunnelConnectionManager::new());
@@ -1936,6 +1987,45 @@ async fn handle_relay_command(
         error!("⚠️  QUIC accept loop exited unexpectedly!");
     });
 
+    // Start API server for dashboard/management
+    let api_handle = if !no_api {
+        let api_addr_parsed: SocketAddr = api_addr.parse()?;
+        let api_localup_manager = localup_manager.clone();
+        let api_db = db.clone();
+        let api_allow_signup = allow_signup;
+
+        info!("Starting API server on {}", api_addr_parsed);
+        info!("OpenAPI spec: http://{}/api/openapi.json", api_addr_parsed);
+        info!("Swagger UI: http://{}/swagger-ui", api_addr_parsed);
+
+        Some(tokio::spawn(async move {
+            use localup_api::{ApiServer, ApiServerConfig};
+
+            let config = ApiServerConfig {
+                bind_addr: api_addr_parsed,
+                enable_cors: true,
+                cors_origins: Some(vec![
+                    "http://localhost:5173".to_string(),
+                    "http://127.0.0.1:5173".to_string(),
+                    "http://localhost:3000".to_string(),
+                    "http://127.0.0.1:3000".to_string(),
+                    "http://localhost:3001".to_string(),
+                    "http://127.0.0.1:3001".to_string(),
+                    "http://localhost:3002".to_string(),
+                    "http://127.0.0.1:3002".to_string(),
+                ]),
+            };
+
+            let server = ApiServer::new(config, api_localup_manager, api_db, api_allow_signup);
+            if let Err(e) = server.start().await {
+                error!("API server error: {}", e);
+            }
+        }))
+    } else {
+        info!("API server disabled (--no-api flag)");
+        None
+    };
+
     info!("✅ Tunnel exit node is running");
     info!("Ready to accept incoming connections");
     if !http_addr.is_empty() {
@@ -1962,6 +2052,9 @@ async fn handle_relay_command(
         handle.abort();
     }
     if let Some(handle) = https_handle {
+        handle.abort();
+    }
+    if let Some(handle) = api_handle {
         handle.abort();
     }
     localup_handle.abort();
@@ -2154,6 +2247,39 @@ async fn handle_generate_token_command(
     Ok(())
 }
 
+async fn handle_config_command(command: &ConfigCommands) -> Result<()> {
+    match command {
+        ConfigCommands::SetToken { token } => {
+            config::ConfigManager::set_token(token.clone())?;
+            println!("✅ Auth token saved successfully!");
+            println!("   Token stored in: ~/.localup/config.json");
+            println!();
+            println!("You can now use 'localup' without specifying --token every time:");
+            println!("   localup --port 3000 --protocol http");
+            Ok(())
+        }
+        ConfigCommands::GetToken => match config::ConfigManager::get_token()? {
+            Some(token) => {
+                println!("📌 Current auth token:");
+                println!("{}", token);
+                Ok(())
+            }
+            None => {
+                println!("❌ No auth token configured");
+                println!();
+                println!("Set a token with:");
+                println!("   localup config set-token <TOKEN>");
+                Ok(())
+            }
+        },
+        ConfigCommands::ClearToken => {
+            config::ConfigManager::clear_token()?;
+            println!("✅ Auth token cleared successfully!");
+            Ok(())
+        }
+    }
+}
+
 fn init_logging(log_level: &str) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .or_else(|_| tracing_subscriber::EnvFilter::try_new(log_level))
@@ -2251,14 +2377,39 @@ impl PortAllocator {
             })
             .collect();
 
+        if !expired.is_empty() {
+            info!(
+                "🧹 Cleanup check: found {} expired port reservations",
+                expired.len()
+            );
+        }
+
         for localup_id in expired {
             if let Some(allocation) = allocated.remove(&localup_id) {
                 available.insert(allocation.port);
                 info!(
-                    "Cleaned up expired port reservation for tunnel {} (port {})",
+                    "✅ Cleaned up expired port reservation for tunnel {} (port {})",
                     localup_id, allocation.port
                 );
             }
+        }
+
+        // Log current allocation status
+        let active_count = allocated
+            .values()
+            .filter(|a| matches!(a.state, AllocationState::Active))
+            .count();
+        let reserved_count = allocated
+            .values()
+            .filter(|a| matches!(a.state, AllocationState::Reserved { .. }))
+            .count();
+        if active_count > 0 || reserved_count > 0 {
+            debug!(
+                "Port allocator status: {} active, {} reserved, {} available",
+                active_count,
+                reserved_count,
+                available.len()
+            );
         }
     }
 }
@@ -2309,14 +2460,14 @@ impl localup_control::PortAllocator for PortAllocator {
                 // Port in our pool but in use by another process
                 available.remove(&req_port);
                 return Err(format!(
-                    "Requested port {} is in use by another process",
+                    "Requested port {} is already allocated to another tunnel",
                     req_port
                 ));
             } else {
                 // Port not in our allocation range
                 return Err(format!(
-                    "Requested port {} is not available (already allocated or out of range)",
-                    req_port
+                    "Requested port {} is outside the configured port range ({}-{})",
+                    req_port, self.range_start, self.range_end
                 ));
             }
         }
@@ -2418,13 +2569,27 @@ impl localup_control::PortAllocator for PortAllocator {
                 let until = Utc::now() + chrono::Duration::seconds(self.reservation_ttl_seconds);
                 allocation.state = AllocationState::Reserved { until };
                 info!(
-                    "Port {} for tunnel {} marked as reserved until {} (TTL: {}s)",
+                    "⏱️  Port {} for tunnel {} marked as reserved until {} (TTL: {}s, will be cleaned after this timeout)",
                     allocation.port,
                     localup_id,
                     until.format("%Y-%m-%d %H:%M:%S"),
                     self.reservation_ttl_seconds
                 );
+            } else {
+                debug!(
+                    "Tunnel {} port already in {} state, skipping deallocate",
+                    localup_id,
+                    match &allocation.state {
+                        AllocationState::Active => "Active",
+                        AllocationState::Reserved { .. } => "Reserved",
+                    }
+                );
             }
+        } else {
+            warn!(
+                "Tried to deallocate port for tunnel {} but allocation not found!",
+                localup_id
+            );
         }
     }
 

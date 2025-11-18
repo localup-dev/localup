@@ -11,3 +11,6 @@ custom-relays.yaml
 private_key.pem
 
 localup-saas-example
+*.pem
+*.log
+*.txt

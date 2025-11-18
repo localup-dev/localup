@@ -11,7 +11,7 @@ use crate::validator::{AuthError, AuthResult, AuthValidator};
 /// JWT claims for tunnel authentication
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JwtClaims {
-    /// Subject (tunnel ID)
+    /// Subject (tunnel ID or user ID depending on token_type)
     pub sub: String,
     /// Issued at (timestamp)
     pub iat: i64,
@@ -42,6 +42,21 @@ pub struct JwtClaims {
     /// If Some([...]), only specified addresses are allowed
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_addresses: Option<Vec<String>>,
+    /// User ID who owns this token (for session and auth tokens)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// Team ID this token belongs to (optional, for team auth tokens)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+    /// User role in the system (admin, user)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_role: Option<String>,
+    /// User role in the team (owner, admin, member)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_role: Option<String>,
+    /// Token type: "session" (web UI) or "auth" (API key for tunnels)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_type: Option<String>,
 }
 
 impl JwtClaims {
@@ -60,6 +75,11 @@ impl JwtClaims {
             reverse_tunnel: None,
             allowed_agents: None,
             allowed_addresses: None,
+            user_id: None,
+            team_id: None,
+            user_role: None,
+            team_role: None,
+            token_type: None,
         }
     }
 
@@ -100,6 +120,36 @@ impl JwtClaims {
         } else {
             Some(addresses)
         };
+        self
+    }
+
+    /// Set user ID who owns this token
+    pub fn with_user_id(mut self, user_id: String) -> Self {
+        self.user_id = Some(user_id);
+        self
+    }
+
+    /// Set team ID this token belongs to
+    pub fn with_team_id(mut self, team_id: String) -> Self {
+        self.team_id = Some(team_id);
+        self
+    }
+
+    /// Set user role (admin, user)
+    pub fn with_user_role(mut self, role: String) -> Self {
+        self.user_role = Some(role);
+        self
+    }
+
+    /// Set team role (owner, admin, member)
+    pub fn with_team_role(mut self, role: String) -> Self {
+        self.team_role = Some(role);
+        self
+    }
+
+    /// Set token type (session, auth)
+    pub fn with_token_type(mut self, token_type: String) -> Self {
+        self.token_type = Some(token_type);
         self
     }
 

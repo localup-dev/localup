@@ -5,8 +5,11 @@ use tracing::{debug, error, info, warn};
 
 use localup_auth::JwtValidator;
 use localup_proto::{Endpoint, Protocol, TunnelMessage};
+use localup_relay_db::entities::{auth_token, prelude::AuthToken as AuthTokenEntity};
 use localup_router::{RouteKey, RouteRegistry, RouteTarget};
 use localup_transport::{TransportConnection, TransportStream};
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
+use sha2::{Digest, Sha256};
 
 use crate::agent_registry::{AgentRegistry, RegisteredAgent};
 use crate::connection::TunnelConnectionManager;
@@ -39,6 +42,7 @@ pub struct TunnelHandler {
     connection_manager: Arc<TunnelConnectionManager>,
     route_registry: Arc<RouteRegistry>,
     jwt_validator: Option<Arc<JwtValidator>>,
+    db: Option<DatabaseConnection>,
     domain: String,
     domain_provider: Option<Arc<dyn DomainProvider>>,
     #[allow(dead_code)] // Used for HTTP request/response handling (future work)
@@ -67,6 +71,7 @@ impl TunnelHandler {
             connection_manager,
             route_registry,
             jwt_validator,
+            db: None,
             domain,
             domain_provider: None,
             pending_requests,
@@ -78,6 +83,12 @@ impl TunnelHandler {
             http_port: None,
             https_port: None,
         }
+    }
+
+    /// Set the database connection for auth token validation
+    pub fn with_database(mut self, db: DatabaseConnection) -> Self {
+        self.db = Some(db);
+        self
     }
 
     pub fn with_port_allocator(mut self, port_allocator: Arc<dyn PortAllocator>) -> Self {
@@ -245,18 +256,21 @@ impl TunnelHandler {
     {
         debug!("Received Connect from localup_id: {}", localup_id);
 
-        // Validate authentication
-        if let Some(ref validator) = self.jwt_validator {
-            if let Err(e) = validator.validate(&auth_token) {
+        // Validate authentication with enhanced auth token validation
+        let user_id = match self.validate_auth_token(&auth_token).await {
+            Ok(user_id) => user_id,
+            Err(e) => {
                 error!("Authentication failed for tunnel {}: {}", localup_id, e);
                 let _ = control_stream
                     .send_message(&TunnelMessage::Disconnect {
                         reason: format!("Authentication failed: {}", e),
                     })
                     .await;
-                return Err(format!("Authentication failed: {}", e));
+                return Err(e);
             }
-        }
+        };
+
+        debug!("Tunnel {} authenticated for user {}", localup_id, user_id);
 
         // Build endpoints based on requested protocols
         let mut endpoints = self
@@ -1214,6 +1228,98 @@ impl TunnelHandler {
         registry.unregister(&agent_id);
         self.agent_connection_manager.unregister(&agent_id).await;
         info!("Agent {} disconnected", agent_id);
+    }
+
+    /// Validate an auth token and return the user_id
+    ///
+    /// This method performs enhanced authentication by:
+    /// 1. Validating JWT signature and expiration
+    /// 2. Verifying token type is "auth" (not "session")
+    /// 3. Hashing the token and looking it up in the database
+    /// 4. Verifying the token is active (not revoked)
+    /// 5. Updating the last_used_at timestamp
+    ///
+    /// Returns the user_id if authentication succeeds, otherwise returns an error
+    async fn validate_auth_token(&self, token: &str) -> Result<String, String> {
+        // Step 1: Validate JWT signature and expiration
+        let claims = if let Some(ref validator) = self.jwt_validator {
+            validator
+                .validate(token)
+                .map_err(|e| format!("Invalid JWT token: {}", e))?
+        } else {
+            // No JWT validator configured - skip database validation too
+            return Ok("anonymous".to_string());
+        };
+
+        // Step 2: Verify token type is "auth" (not "session")
+        match &claims.token_type {
+            Some(token_type) if token_type == "auth" => {
+                // Valid auth token, continue
+            }
+            Some(token_type) => {
+                return Err(format!(
+                    "Invalid token type '{}'. Expected 'auth' token for tunnel authentication",
+                    token_type
+                ));
+            }
+            None => {
+                // Legacy token without token_type - allow for backward compatibility
+                debug!("Token missing 'token_type' claim, treating as legacy auth token");
+            }
+        }
+
+        // Extract user_id from claims (will be verified against database)
+        let claimed_user_id = claims.user_id.ok_or_else(|| {
+            "Token missing 'user_id' claim. Auth tokens must include user_id".to_string()
+        })?;
+
+        // Step 3-5: Database validation (if database is available)
+        if let Some(ref db) = self.db {
+            // Hash the token using SHA-256 (same as when storing)
+            let mut hasher = Sha256::new();
+            hasher.update(token.as_bytes());
+            let token_hash = format!("{:x}", hasher.finalize());
+
+            // Look up token in database by hash
+            let token_record = AuthTokenEntity::find()
+                .filter(auth_token::Column::TokenHash.eq(&token_hash))
+                .one(db)
+                .await
+                .map_err(|e| format!("Database error during authentication: {}", e))?
+                .ok_or_else(|| "Auth token not found or has been revoked".to_string())?;
+
+            // Verify token is active
+            if !token_record.is_active {
+                return Err("Auth token has been deactivated".to_string());
+            }
+
+            // Check if token is expired
+            if let Some(expires_at) = token_record.expires_at {
+                let now = chrono::Utc::now();
+                if expires_at < now {
+                    return Err("Auth token has expired".to_string());
+                }
+            }
+
+            // Verify user_id matches (ensure JWT wasn't tampered with)
+            if token_record.user_id.to_string() != claimed_user_id {
+                return Err("Token user_id mismatch - possible JWT tampering".to_string());
+            }
+
+            // Update last_used_at timestamp
+            let mut active_model: auth_token::ActiveModel = token_record.clone().into();
+            active_model.last_used_at = Set(Some(chrono::Utc::now()));
+            if let Err(e) = ActiveModelTrait::update(active_model, db).await {
+                // Log error but don't fail authentication
+                warn!("Failed to update last_used_at for token: {}", e);
+            }
+
+            Ok(claimed_user_id)
+        } else {
+            // No database configured - rely only on JWT validation
+            debug!("Database not configured, skipping token database validation");
+            Ok(claimed_user_id)
+        }
     }
 
     /// Generate a deterministic subdomain from localup_id and peer IP hash

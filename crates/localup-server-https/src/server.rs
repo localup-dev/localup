@@ -1,8 +1,11 @@
 //! HTTPS server implementation with TLS termination
 use localup_control::{PendingRequests, TunnelConnectionManager};
 use localup_proto::TunnelMessage;
+use localup_relay_db::entities::custom_domain;
 use localup_router::{RouteKey, RouteRegistry};
 use localup_transport::TransportConnection;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::net::SocketAddr;
@@ -11,10 +14,12 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::RwLock;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use tokio_rustls::rustls::ServerConfig;
+use tokio_rustls::rustls::server::{ClientHello, ResolvesServerCert};
+use tokio_rustls::rustls::{sign::CertifiedKey, ServerConfig};
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, error, info, warn}; // For open_stream() method
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Error)]
 pub enum HttpsServerError {
@@ -57,6 +62,52 @@ pub struct HttpsServer {
     route_registry: Arc<RouteRegistry>,
     localup_manager: Option<Arc<TunnelConnectionManager>>,
     pending_requests: Option<Arc<PendingRequests>>,
+    db: Option<DatabaseConnection>,
+}
+
+/// SNI-based certificate resolver that supports custom domain certificates
+#[derive(Debug)]
+struct CustomCertResolver {
+    default_cert: Arc<CertifiedKey>,
+    custom_certs: Arc<RwLock<HashMap<String, Arc<CertifiedKey>>>>,
+}
+
+impl CustomCertResolver {
+    fn new(default_cert: Arc<CertifiedKey>) -> Self {
+        Self {
+            default_cert,
+            custom_certs: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    async fn add_custom_cert(&self, domain: String, cert: Arc<CertifiedKey>) {
+        let mut certs = self.custom_certs.write().await;
+        info!("Adding custom certificate for domain: {}", domain);
+        certs.insert(domain, cert);
+    }
+}
+
+impl ResolvesServerCert for CustomCertResolver {
+    fn resolve(&self, client_hello: ClientHello) -> Option<Arc<CertifiedKey>> {
+        // Get SNI hostname from client hello
+        let sni_hostname = client_hello.server_name()?;
+        let domain = sni_hostname;
+
+        debug!("SNI hostname: {}", domain);
+
+        // Try to find custom cert for this domain
+        // Note: We can't use async here, so we use try_read() which is non-blocking
+        if let Ok(certs) = self.custom_certs.try_read() {
+            if let Some(cert) = certs.get(domain) {
+                info!("Using custom certificate for domain: {}", domain);
+                return Some(cert.clone());
+            }
+        }
+
+        // Fall back to default certificate
+        debug!("Using default certificate for domain: {}", domain);
+        Some(self.default_cert.clone())
+    }
 }
 
 impl HttpsServer {
@@ -66,6 +117,7 @@ impl HttpsServer {
             route_registry,
             localup_manager: None,
             pending_requests: None,
+            db: None,
         }
     }
 
@@ -76,6 +128,11 @@ impl HttpsServer {
 
     pub fn with_pending_requests(mut self, pending: Arc<PendingRequests>) -> Self {
         self.pending_requests = Some(pending);
+        self
+    }
+
+    pub fn with_database(mut self, db: DatabaseConnection) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -101,22 +158,111 @@ impl HttpsServer {
             .ok_or_else(|| HttpsServerError::TlsError("No private key found".to_string()))
     }
 
+    /// Load custom domain certificates from database
+    async fn load_custom_domain_certs(
+        db: &DatabaseConnection,
+        resolver: &Arc<CustomCertResolver>,
+    ) -> Result<usize, HttpsServerError> {
+        use localup_relay_db::entities::custom_domain::DomainStatus;
+
+        // Query all active custom domains
+        let domains = custom_domain::Entity::find()
+            .filter(custom_domain::Column::Status.eq(DomainStatus::Active))
+            .all(db)
+            .await
+            .map_err(|e| {
+                HttpsServerError::TlsError(format!("Database error loading custom domains: {}", e))
+            })?;
+
+        let mut loaded_count = 0;
+
+        for domain in domains {
+            // Skip if cert or key path is missing
+            let cert_path = match &domain.cert_path {
+                Some(path) => path,
+                None => {
+                    warn!("Domain {} has no cert_path, skipping", domain.domain);
+                    continue;
+                }
+            };
+            let key_path = match &domain.key_path {
+                Some(path) => path,
+                None => {
+                    warn!("Domain {} has no key_path, skipping", domain.domain);
+                    continue;
+                }
+            };
+
+            // Load certificate and key
+            match Self::load_domain_cert(cert_path, key_path) {
+                Ok(cert_key) => {
+                    resolver
+                        .add_custom_cert(domain.domain.clone(), Arc::new(cert_key))
+                        .await;
+                    loaded_count += 1;
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to load certificate for domain {}: {}",
+                        domain.domain, e
+                    );
+                }
+            }
+        }
+
+        Ok(loaded_count)
+    }
+
+    /// Load a single domain's certificate and key into a CertifiedKey
+    fn load_domain_cert(cert_path: &str, key_path: &str) -> Result<CertifiedKey, HttpsServerError> {
+        let certs = Self::load_certs(Path::new(cert_path))?;
+        let key = Self::load_private_key(Path::new(key_path))?;
+
+        let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
+            .map_err(|e| HttpsServerError::TlsError(format!("Invalid key: {}", e)))?;
+
+        Ok(CertifiedKey::new(certs, signing_key))
+    }
+
     /// Start the HTTPS server
     pub async fn start(self) -> Result<(), HttpsServerError> {
         let local_addr = self.config.bind_addr;
 
-        // Load TLS certificates
-        info!("Loading TLS certificate from: {}", self.config.cert_path);
+        // Load default TLS certificate
+        info!(
+            "Loading default TLS certificate from: {}",
+            self.config.cert_path
+        );
         let certs = Self::load_certs(Path::new(&self.config.cert_path))?;
 
-        info!("Loading TLS private key from: {}", self.config.key_path);
+        info!(
+            "Loading default TLS private key from: {}",
+            self.config.key_path
+        );
         let key = Self::load_private_key(Path::new(&self.config.key_path))?;
 
-        // Build TLS config
+        // Create CertifiedKey for default certificate
+        let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
+            .map_err(|e| HttpsServerError::TlsError(format!("Invalid key: {}", e)))?;
+
+        let default_cert = Arc::new(CertifiedKey::new(certs, signing_key));
+
+        // Create custom cert resolver with default certificate
+        let cert_resolver = Arc::new(CustomCertResolver::new(default_cert));
+
+        // Load custom domain certificates from database if available
+        if let Some(ref db) = self.db {
+            info!("Loading custom domain certificates from database");
+            match Self::load_custom_domain_certs(db, &cert_resolver).await {
+                Ok(count) => info!("Loaded {} custom domain certificate(s)", count),
+                Err(e) => warn!("Failed to load custom domain certificates: {}", e),
+            }
+        }
+
+        // Build TLS config with custom resolver
         let tls_config = ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|e| HttpsServerError::TlsError(format!("Invalid cert/key: {}", e)))?;
+            .with_cert_resolver(cert_resolver);
 
         let acceptor = TlsAcceptor::from(Arc::new(tls_config));
 

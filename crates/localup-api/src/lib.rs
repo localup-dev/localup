@@ -1,9 +1,11 @@
 pub mod handlers;
+pub mod middleware;
 pub mod models;
 
 use axum::{
     body::Body,
     http::{header, HeaderValue, Method, Response, StatusCode},
+    middleware as axum_middleware,
     response::IntoResponse,
     routing::{get, post},
     Router,
@@ -29,6 +31,7 @@ struct PortalAssets;
 pub struct AppState {
     pub localup_manager: Arc<TunnelConnectionManager>,
     pub db: DatabaseConnection,
+    pub allow_signup: bool,
 }
 
 /// OpenAPI documentation
@@ -53,6 +56,22 @@ pub struct AppState {
         handlers::get_request,
         handlers::replay_request,
         handlers::list_tcp_connections,
+        handlers::upload_custom_domain,
+        handlers::list_custom_domains,
+        handlers::get_custom_domain,
+        handlers::delete_custom_domain,
+        handlers::initiate_challenge,
+        handlers::complete_challenge,
+        handlers::auth_config,
+        handlers::register,
+        handlers::login,
+        handlers::get_current_user,
+        handlers::list_user_teams,
+        handlers::create_auth_token,
+        handlers::list_auth_tokens,
+        handlers::get_auth_token,
+        handlers::update_auth_token,
+        handlers::delete_auth_token,
     ),
     components(
         schemas(
@@ -72,11 +91,40 @@ pub struct AppState {
             models::TunnelMetrics,
             models::HealthResponse,
             models::ErrorResponse,
+            models::CustomDomainStatus,
+            models::CustomDomain,
+            models::UploadCustomDomainRequest,
+            models::UploadCustomDomainResponse,
+            models::CustomDomainList,
+            models::InitiateChallengeRequest,
+            models::ChallengeInfo,
+            models::InitiateChallengeResponse,
+            models::CompleteChallengeRequest,
+            models::RegisterRequest,
+            models::RegisterResponse,
+            models::LoginRequest,
+            models::LoginResponse,
+            models::UserRole,
+            models::User,
+            models::UserList,
+            models::TeamRole,
+            models::Team,
+            models::TeamMember,
+            models::TeamList,
+            models::CreateAuthTokenRequest,
+            models::CreateAuthTokenResponse,
+            models::AuthToken,
+            models::AuthTokenList,
+            models::UpdateAuthTokenRequest,
+            models::AuthConfig,
         )
     ),
     tags(
         (name = "tunnels", description = "Tunnel management endpoints"),
         (name = "traffic", description = "Traffic inspection endpoints"),
+        (name = "domains", description = "Custom domain management endpoints"),
+        (name = "auth", description = "Authentication and user management endpoints"),
+        (name = "auth-tokens", description = "Auth token (API key) management endpoints"),
         (name = "system", description = "System health and info endpoints")
     )
 )]
@@ -114,24 +162,41 @@ impl ApiServer {
         config: ApiServerConfig,
         localup_manager: Arc<TunnelConnectionManager>,
         db: DatabaseConnection,
+        allow_signup: bool,
     ) -> Self {
         let state = Arc::new(AppState {
             localup_manager,
             db,
+            allow_signup,
         });
 
         Self { config, state }
     }
 
     /// Build the router with all routes
-    fn build_router(&self) -> Router {
+    pub fn build_router(&self) -> Router {
         // Get the OpenAPI spec
         let api_doc = ApiDoc::openapi();
 
-        // Build API routes
-        // NOTE: Axum 0.8+ uses {param} syntax, not :param
-        // NOTE: SwaggerUi automatically serves /api/openapi.json, don't add it manually
-        let api_router = Router::new()
+        // Create JWT state for authentication middleware
+        // TODO: Make JWT secret configurable via environment variable or config
+        let jwt_secret = b"temporary-secret-change-me-in-production";
+        let jwt_state = Arc::new(middleware::JwtState::new(jwt_secret));
+
+        // Build PUBLIC routes (no authentication required)
+        let public_router = Router::new()
+            .route("/api/health", get(handlers::health_check))
+            .route("/api/auth/config", get(handlers::auth_config))
+            .route("/api/auth/register", post(handlers::register))
+            .route("/api/auth/login", post(handlers::login))
+            .route("/api/auth/logout", post(handlers::logout))
+            .with_state(self.state.clone());
+
+        // Build PROTECTED routes (require session token authentication)
+        let protected_router = Router::new()
+            // Auth endpoints (require session token authentication)
+            .route("/api/auth/me", get(handlers::get_current_user))
+            .route("/api/teams", get(handlers::list_user_teams))
             .route("/api/tunnels", get(handlers::list_tunnels))
             .route(
                 "/api/tunnels/{id}",
@@ -141,12 +206,45 @@ impl ApiServer {
                 "/api/tunnels/{id}/metrics",
                 get(handlers::get_localup_metrics),
             )
-            .route("/api/health", get(handlers::health_check))
             .route("/api/requests", get(handlers::list_requests))
             .route("/api/requests/{id}", get(handlers::get_request))
             .route("/api/requests/{id}/replay", post(handlers::replay_request))
             .route("/api/tcp-connections", get(handlers::list_tcp_connections))
-            .with_state(self.state.clone());
+            .route(
+                "/api/domains",
+                get(handlers::list_custom_domains).post(handlers::upload_custom_domain),
+            )
+            .route(
+                "/api/domains/{domain}",
+                get(handlers::get_custom_domain).delete(handlers::delete_custom_domain),
+            )
+            .route(
+                "/api/domains/challenge/initiate",
+                post(handlers::initiate_challenge),
+            )
+            .route(
+                "/api/domains/challenge/complete",
+                post(handlers::complete_challenge),
+            )
+            // Auth token management routes (require session token authentication)
+            .route(
+                "/api/auth-tokens",
+                get(handlers::list_auth_tokens).post(handlers::create_auth_token),
+            )
+            .route(
+                "/api/auth-tokens/{id}",
+                get(handlers::get_auth_token)
+                    .patch(handlers::update_auth_token)
+                    .delete(handlers::delete_auth_token),
+            )
+            .with_state(self.state.clone())
+            .layer(axum_middleware::from_fn_with_state(
+                jwt_state.clone(),
+                middleware::require_auth,
+            ));
+
+        // Merge public and protected routers
+        let api_router = public_router.merge(protected_router);
 
         // Merge with Swagger UI
         // SwaggerUi automatically creates a route for /api/openapi.json
@@ -157,10 +255,29 @@ impl ApiServer {
 
         // Configure CORS
         let cors = if self.config.enable_cors {
+            use tower_http::cors::AllowOrigin;
+
+            // For cookie-based auth, we MUST allow credentials
+            // When allow_credentials is true, we CANNOT use allow_origin(Any)
+            // We must specify exact origins
             let cors_layer = CorsLayer::new()
-                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
-                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
-                .allow_origin(Any); // TODO: Use config.cors_origins if specified
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
+                    Method::PATCH,
+                ])
+                .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::COOKIE])
+                .allow_credentials(true) // Required for cookies
+                .allow_origin(AllowOrigin::predicate(|origin: &HeaderValue, _| {
+                    // Allow common development origins
+                    let origin_str = origin.to_str().unwrap_or("");
+                    origin_str.starts_with("http://localhost:")
+                        || origin_str.starts_with("http://127.0.0.1:")
+                        || origin_str.starts_with("https://localhost:")
+                        || origin_str.starts_with("https://127.0.0.1:")
+                }));
 
             Some(cors_layer)
         } else {
@@ -203,6 +320,7 @@ pub async fn run_api_server(
     bind_addr: SocketAddr,
     localup_manager: Arc<TunnelConnectionManager>,
     db: DatabaseConnection,
+    allow_signup: bool,
 ) -> Result<(), anyhow::Error> {
     let config = ApiServerConfig {
         bind_addr,
@@ -210,7 +328,7 @@ pub async fn run_api_server(
         cors_origins: Some(vec!["http://localhost:3000".to_string()]),
     };
 
-    let server = ApiServer::new(config, localup_manager, db);
+    let server = ApiServer::new(config, localup_manager, db, allow_signup);
     server.start().await
 }
 

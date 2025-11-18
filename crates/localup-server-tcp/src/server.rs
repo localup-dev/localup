@@ -161,7 +161,7 @@ impl TcpServer {
 
         if target.is_err() {
             warn!("No route found for host: {}", host);
-            let response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 14\r\n\r\nRoute not found\n";
+            let response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 16\r\n\r\nRoute not found\n";
             client_socket.write_all(response).await?;
             return Ok(());
         }
@@ -420,7 +420,7 @@ impl TcpServer {
             Ok(Err(e)) => {
                 warn!("Error reading from tunnel: {}", e);
                 let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 14\r\n\r\nTunnel error\n";
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 13\r\n\r\nTunnel error\n";
                 client_socket.write_all(response).await?;
             }
             Err(_) => {

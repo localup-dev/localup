@@ -166,7 +166,6 @@ Tunnel::tcp_to(addr: &str) -> TunnelBuilder
 .relay(addr: &str)          // Required: Relay server address
 .token(token: &str)         // Required: Auth token
 .subdomain(name: &str)      // Optional: For HTTP/HTTPS/TLS
-.custom_domain(domain: &str)// Optional: For HTTPS
 .remote_port(port: u16)     // Optional: For TCP/TLS
 .local_host(host: &str)     // Optional: Default "localhost"
 .connect()                  // Connect and return Tunnel

@@ -13,7 +13,7 @@ localup-server-tls = { path = "../localup-server-tls" }
 localup-server-https = { path = "../localup-server-https" }
 localup-router = { path = "../localup-router" }
 localup-auth = { path = "../localup-auth" }
-# localup-api = { path = "../localup-api" }  # TODO: Re-enable after testing
+localup-api = { path = "../localup-api" }
 localup-relay-db = { path = "../localup-relay-db" }
 localup-transport = { path = "../localup-transport" }
 localup-transport-quic = { path = "../localup-transport-quic" }

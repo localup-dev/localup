@@ -1,15 +1,13 @@
-//! ACME client for automatic certificate provisioning
+//! ACME client for automatic certificate provisioning via Let's Encrypt
 //!
-//! NOTE: This module is a placeholder for future ACME/Let's Encrypt integration.
-//! The imports and types are intentionally unused until implementation is complete.
+//! NOTE: Full ACME implementation is in progress. For now, use manual certificate upload.
 
-#[allow(unused_imports)]
-use instant_acme::{
-    Account, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
-    OrderStatus,
-};
+use std::sync::Arc;
 use thiserror::Error;
-use tracing::{debug, info};
+use tokio::fs;
+use tracing::info;
+
+use crate::Certificate;
 
 /// ACME errors
 #[derive(Debug, Error)]
@@ -34,20 +32,71 @@ pub enum AcmeError {
 
     #[error("Timeout waiting for order")]
     Timeout,
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Certificate generation error: {0}")]
+    CertGen(String),
+
+    #[error("HTTP-01 challenge not supported")]
+    Http01NotSupported,
+
+    #[error("Authorization not found for domain: {0}")]
+    AuthorizationNotFound(String),
+
+    #[error("Not implemented - use manual certificate upload for now")]
+    NotImplemented,
 }
 
+/// HTTP-01 challenge data
+#[derive(Debug, Clone)]
+pub struct Http01Challenge {
+    pub token: String,
+    pub key_authorization: String,
+}
+
+/// Callback for HTTP-01 challenge validation
+pub type Http01ChallengeCallback = Arc<dyn Fn(Http01Challenge) -> bool + Send + Sync>;
+
 /// ACME configuration
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct AcmeConfig {
     /// Contact email for Let's Encrypt
     pub contact_email: String,
     /// Use Let's Encrypt staging environment (for testing)
     pub use_staging: bool,
+    /// Directory to store certificates
+    pub cert_dir: String,
+    /// HTTP-01 challenge callback
+    pub http01_callback: Option<Http01ChallengeCallback>,
+}
+
+impl std::fmt::Debug for AcmeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcmeConfig")
+            .field("contact_email", &self.contact_email)
+            .field("use_staging", &self.use_staging)
+            .field("cert_dir", &self.cert_dir)
+            .field("http01_callback", &self.http01_callback.is_some())
+            .finish()
+    }
+}
+
+impl Default for AcmeConfig {
+    fn default() -> Self {
+        Self {
+            contact_email: String::new(),
+            use_staging: false,
+            cert_dir: "./.certs".to_string(),
+            http01_callback: None,
+        }
+    }
 }
 
 /// ACME client for certificate provisioning
 pub struct AcmeClient {
-    #[allow(dead_code)] // Used when ACME implementation is complete
+    #[allow(dead_code)]
     config: AcmeConfig,
 }
 
@@ -56,41 +105,46 @@ impl AcmeClient {
         Self { config }
     }
 
-    /// Request a certificate for a domain
+    /// Request a certificate for a domain using HTTP-01 challenge
     ///
-    /// This is a simplified implementation that demonstrates the flow.
-    /// A real implementation would need to:
-    /// 1. Handle DNS-01 or HTTP-01 challenges
-    /// 2. Verify domain ownership
-    /// 3. Complete the ACME flow
-    pub async fn request_certificate(&self, domain: &str) -> Result<(String, String), AcmeError> {
-        info!("Requesting certificate for domain: {}", domain);
+    /// NOTE: This is not yet implemented. Use load_certificate_from_files() instead.
+    pub async fn request_certificate(&self, _domain: &str) -> Result<Certificate, AcmeError> {
+        Err(AcmeError::NotImplemented)
+    }
 
-        // This is a placeholder implementation
-        // In a real system, you would:
-        // 1. Create an ACME account
-        // 2. Create a new order for the domain
-        // 3. Complete the challenge (DNS-01 or HTTP-01)
-        // 4. Finalize the order
-        // 5. Download the certificate
+    /// Load certificate from PEM files
+    pub async fn load_certificate_from_files(
+        cert_path: &str,
+        key_path: &str,
+    ) -> Result<Certificate, AcmeError> {
+        let cert_pem = fs::read(cert_path).await?;
+        let key_pem = fs::read(key_path).await?;
 
-        // For now, return an error indicating this needs implementation
-        Err(AcmeError::AcmeError(
-            "ACME certificate provisioning not yet implemented. Use manual certificates."
-                .to_string(),
-        ))
+        // Parse certificate chain
+        let cert_chain = rustls_pemfile::certs(&mut cert_pem.as_slice())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AcmeError::CertGen(format!("Failed to parse certificate: {}", e)))?;
+
+        // Parse private key
+        let private_key = rustls_pemfile::private_key(&mut key_pem.as_slice())
+            .map_err(|e| AcmeError::CertGen(format!("Failed to parse private key: {}", e)))?
+            .ok_or_else(|| AcmeError::CertGen("No private key found in file".to_string()))?;
+
+        info!("Certificate loaded from {} and {}", cert_path, key_path);
+
+        Ok(Certificate {
+            cert_chain,
+            private_key,
+        })
     }
 
     /// Renew a certificate
-    pub async fn renew_certificate(&self, domain: &str) -> Result<(String, String), AcmeError> {
-        debug!("Renewing certificate for domain: {}", domain);
-
-        // Renewal is the same as requesting a new certificate
-        self.request_certificate(domain).await
+    pub async fn renew_certificate(&self, _domain: &str) -> Result<Certificate, AcmeError> {
+        Err(AcmeError::NotImplemented)
     }
 
     /// Validate domain name
-    #[allow(dead_code)] // Used when ACME implementation is complete
+    #[allow(dead_code)]
     fn validate_domain(domain: &str) -> Result<(), AcmeError> {
         if domain.is_empty() {
             return Err(AcmeError::InvalidDomain(
@@ -101,6 +155,12 @@ impl AcmeClient {
         if domain.contains(' ') {
             return Err(AcmeError::InvalidDomain(
                 "Domain cannot contain spaces".to_string(),
+            ));
+        }
+
+        if domain.starts_with('.') || domain.ends_with('.') {
+            return Err(AcmeError::InvalidDomain(
+                "Domain cannot start or end with a dot".to_string(),
             ));
         }
 
@@ -117,6 +177,8 @@ mod tests {
         let config = AcmeConfig {
             contact_email: "admin@example.com".to_string(),
             use_staging: true,
+            cert_dir: "/tmp/certs".to_string(),
+            http01_callback: None,
         };
 
         assert_eq!(config.contact_email, "admin@example.com");
@@ -129,15 +191,17 @@ mod tests {
         assert!(AcmeClient::validate_domain("sub.example.com").is_ok());
         assert!(AcmeClient::validate_domain("").is_err());
         assert!(AcmeClient::validate_domain("invalid domain.com").is_err());
+        assert!(AcmeClient::validate_domain(".example.com").is_err());
+        assert!(AcmeClient::validate_domain("example.com.").is_err());
     }
 
     #[tokio::test]
-    async fn test_request_certificate_placeholder() {
+    async fn test_request_certificate_not_implemented() {
         let config = AcmeConfig::default();
         let client = AcmeClient::new(config);
 
-        // Currently returns error as it's not implemented
         let result = client.request_certificate("example.com").await;
         assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AcmeError::NotImplemented));
     }
 }

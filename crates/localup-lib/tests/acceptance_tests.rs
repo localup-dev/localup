@@ -442,7 +442,6 @@ async fn acceptance_subdomain_management() {
         protocols: vec![ProtocolConfig::Https {
             local_port: 3000,
             subdomain: Some("myapp".to_string()),
-            custom_domain: None,
         }],
         auth_token: "test-token-subdomain".to_string(),
         exit_node: ExitNodeConfig::Auto,
@@ -464,30 +463,6 @@ async fn acceptance_subdomain_management() {
         }
         Err(e) => {
             info!("ℹ Subdomain request failed (expected in test env): {}", e);
-        }
-    }
-
-    // Test 2: Custom domain
-    let config_custom = TunnelConfig {
-        local_host: "127.0.0.1".to_string(),
-        protocols: vec![ProtocolConfig::Https {
-            local_port: 3000,
-            subdomain: None,
-            custom_domain: Some("mycompany.com".to_string()),
-        }],
-        auth_token: "test-token-custom-domain".to_string(),
-        exit_node: ExitNodeConfig::Auto,
-        failover: true,
-        connection_timeout: Duration::from_secs(30),
-    };
-
-    info!("Requesting custom domain 'mycompany.com'...");
-    match TunnelClient::connect(config_custom).await {
-        Ok(_) => {
-            info!("✓ Custom domain configuration accepted");
-        }
-        Err(e) => {
-            info!("ℹ Custom domain failed (expected in test env): {}", e);
         }
     }
 

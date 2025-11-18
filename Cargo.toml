@@ -87,7 +87,7 @@ rustls-pemfile = "2.0"
 webpki-roots = "0.26"
 
 # ACME/Let's Encrypt
-instant-acme = "0.4"
+instant-acme = "0.8"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -106,6 +106,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Authentication
 jsonwebtoken = "9.2"
 base64 = "0.21"
+argon2 = { version = "0.5", features = ["std"] }
 
 # CLI
 clap = { version = "4.4", features = ["derive", "env"] }
