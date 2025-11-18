@@ -309,6 +309,9 @@ async fn main() -> Result<()> {
     info!("✅ Route registry initialized");
     info!("Routes will be registered automatically when tunnels connect");
 
+    // Clone JWT secret before moving it (needed for both JWT validator and API server config)
+    let jwt_secret_for_api = args.jwt_secret.clone();
+
     // Create JWT validator for tunnel authentication
     // Note: Only validates signature and expiration (no issuer/audience validation)
     let jwt_validator = if let Some(jwt_secret) = args.jwt_secret {
@@ -476,6 +479,7 @@ async fn main() -> Result<()> {
         let api_addr: SocketAddr = args.api_addr.parse()?;
         let api_localup_manager = localup_manager.clone();
         let api_db = db.clone();
+        let api_jwt_secret = jwt_secret_for_api;
 
         info!("Starting API server on {}", api_addr);
         info!("OpenAPI spec: http://{}/api/openapi.json", api_addr);
@@ -493,9 +497,10 @@ async fn main() -> Result<()> {
                     "http://localhost:3000".to_string(),
                     "http://127.0.0.1:3000".to_string(),
                 ]),
+                jwt_secret: api_jwt_secret,
             };
 
-            let server = ApiServer::new(config, api_localup_manager, api_db);
+            let server = ApiServer::new(config, api_localup_manager, api_db, true); // allow_signup = true
             if let Err(e) = server.start().await {
                 error!("API server error: {}", e);
             }

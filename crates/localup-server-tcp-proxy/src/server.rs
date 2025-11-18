@@ -7,6 +7,7 @@ use localup_control::TunnelConnectionManager;
 use localup_proto::TunnelMessage;
 use localup_transport::{TransportConnection, TransportStream};
 use sea_orm::DatabaseConnection;
+use socket2::{Domain, Protocol, Socket, Type};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -92,46 +93,44 @@ impl TcpProxyServer {
     }
 
     async fn bind_with_retry(&self) -> Result<TcpListener, TcpProxyServerError> {
-        // Retry bind logic to handle TIME_WAIT state gracefully (up to 3 attempts with 1 second delays)
-        for attempt in 1..=3 {
-            match TcpListener::bind(&self.config.bind_addr).await {
-                Ok(listener) => {
-                    if attempt > 1 {
-                        info!(
-                            "Successfully bound to {} on attempt {}/3",
-                            self.config.bind_addr, attempt
-                        );
-                    }
-                    return Ok(listener);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && attempt < 3 => {
-                    warn!(
-                        "Port {} is in use (attempt {}/3, may be in TIME_WAIT state), retrying in 1 second...",
-                        self.config.bind_addr.port(), attempt
-                    );
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                }
-                Err(e) => {
-                    let port = self.config.bind_addr.port();
-                    let address = self.config.bind_addr.ip().to_string();
-                    let reason = e.to_string();
-                    return Err(TcpProxyServerError::BindError {
-                        address,
-                        port,
-                        reason,
-                    });
-                }
-            }
-        }
+        // Create a socket with SO_REUSEADDR to handle TIME_WAIT state gracefully
+        // SO_REUSEADDR allows binding to a port in TIME_WAIT state immediately
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+            .map_err(TcpProxyServerError::IoError)?;
 
-        // If all retries failed, return error
-        let port = self.config.bind_addr.port();
-        let address = self.config.bind_addr.ip().to_string();
-        Err(TcpProxyServerError::BindError {
-            address,
-            port,
-            reason: "Address in use after 3 retry attempts".to_string(),
-        })
+        // Set SO_REUSEADDR to allow port reuse
+        socket
+            .set_reuse_address(true)
+            .map_err(TcpProxyServerError::IoError)?;
+
+        // Bind the socket
+        socket.bind(&self.config.bind_addr.into()).map_err(|e| {
+            let port = self.config.bind_addr.port();
+            let address = self.config.bind_addr.ip().to_string();
+            TcpProxyServerError::BindError {
+                address,
+                port,
+                reason: e.to_string(),
+            }
+        })?;
+
+        // Listen on the socket
+        socket.listen(128).map_err(TcpProxyServerError::IoError)?;
+
+        // Set non-blocking mode (required for tokio)
+        socket
+            .set_nonblocking(true)
+            .map_err(TcpProxyServerError::IoError)?;
+
+        // Convert socket2::Socket to tokio::net::TcpListener
+        let std_listener: std::net::TcpListener = socket.into();
+        let listener = TcpListener::from_std(std_listener).map_err(TcpProxyServerError::IoError)?;
+
+        info!(
+            "✅ TCP proxy server successfully bound to {}",
+            self.config.bind_addr
+        );
+        Ok(listener)
     }
 
     pub async fn start(self) -> Result<(), TcpProxyServerError> {
@@ -254,6 +253,38 @@ impl TcpProxyServer {
 
         debug!("✅ TcpConnect sent on stream {}", quic_stream.stream_id());
 
+        // Save active connection to database (with disconnected_at = NULL)
+        if let Some(ref db_conn) = db {
+            let active_connection =
+                localup_relay_db::entities::captured_tcp_connection::ActiveModel {
+                    id: sea_orm::Set(connection_id.clone()),
+                    localup_id: sea_orm::Set(localup_id.clone()),
+                    client_addr: sea_orm::Set(peer_addr.to_string()),
+                    target_port: sea_orm::Set(target_port as i32),
+                    bytes_received: sea_orm::Set(0),
+                    bytes_sent: sea_orm::Set(0),
+                    connected_at: sea_orm::Set(metrics.connected_at.into()),
+                    disconnected_at: sea_orm::NotSet, // NULL for active connections
+                    duration_ms: sea_orm::NotSet,     // NULL for active connections
+                    disconnect_reason: sea_orm::NotSet, // NULL for active connections
+                };
+
+            use sea_orm::EntityTrait;
+            if let Err(e) = localup_relay_db::entities::prelude::CapturedTcpConnection::insert(
+                active_connection,
+            )
+            .exec(db_conn)
+            .await
+            {
+                warn!(
+                    "Failed to save active TCP connection {}: {}",
+                    connection_id, e
+                );
+            } else {
+                debug!("Saved active TCP connection {} to database", connection_id);
+            }
+        }
+
         // Split BOTH streams for true bidirectional communication WITHOUT MUTEXES!
         let (mut client_read, mut client_write) = client_stream.into_split();
         let (mut quic_send, mut quic_recv) = quic_stream.split();
@@ -359,46 +390,98 @@ impl TcpProxyServer {
             }
         });
 
-        // Wait for both tasks to complete
+        // Periodic metrics update task - updates database every 5 seconds with current byte counts
+        let metrics_update_task = if let Some(ref db_conn) = db {
+            let db_conn_clone = db_conn.clone();
+            let connection_id = metrics.connection_id.clone();
+            let bytes_received = metrics.bytes_received.clone();
+            let bytes_sent = metrics.bytes_sent.clone();
+
+            Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+                interval.tick().await; // Skip first immediate tick
+
+                loop {
+                    interval.tick().await;
+
+                    let current_bytes_received = bytes_received.load(Ordering::Relaxed) as i64;
+                    let current_bytes_sent = bytes_sent.load(Ordering::Relaxed) as i64;
+
+                    // Update database with current metrics
+                    let update_model =
+                        localup_relay_db::entities::captured_tcp_connection::ActiveModel {
+                            id: sea_orm::Set(connection_id.clone()),
+                            bytes_received: sea_orm::Set(current_bytes_received),
+                            bytes_sent: sea_orm::Set(current_bytes_sent),
+                            // Don't update other fields
+                            localup_id: sea_orm::NotSet,
+                            client_addr: sea_orm::NotSet,
+                            target_port: sea_orm::NotSet,
+                            connected_at: sea_orm::NotSet,
+                            disconnected_at: sea_orm::NotSet,
+                            duration_ms: sea_orm::NotSet,
+                            disconnect_reason: sea_orm::NotSet,
+                        };
+
+                    use sea_orm::ActiveModelTrait;
+                    if let Err(e) = update_model.update(&db_conn_clone).await {
+                        warn!(
+                            "Failed to update metrics for connection {}: {}",
+                            connection_id, e
+                        );
+                    } else {
+                        debug!(
+                            "Updated metrics for connection {}: {} bytes received, {} bytes sent",
+                            connection_id, current_bytes_received, current_bytes_sent
+                        );
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Wait for both data transfer tasks to complete
         let _ = tokio::join!(client_to_tunnel, localup_to_client);
+
+        // Stop the metrics update task
+        if let Some(task) = metrics_update_task {
+            task.abort();
+        }
 
         debug!("TCP connection closed (stream {})", stream_id);
 
-        // Save connection metrics to database
+        // Update connection with disconnect information
         if let Some(ref db_conn) = db {
             let disconnected_at = chrono::Utc::now();
             let duration_ms = (disconnected_at - metrics.connected_at).num_milliseconds() as i32;
             let bytes_received = metrics.bytes_received.load(Ordering::Relaxed) as i64;
             let bytes_sent = metrics.bytes_sent.load(Ordering::Relaxed) as i64;
 
-            let captured_connection =
+            // UPDATE the existing connection record
+            let update_connection =
                 localup_relay_db::entities::captured_tcp_connection::ActiveModel {
                     id: sea_orm::Set(metrics.connection_id.clone()),
-                    localup_id: sea_orm::Set(localup_id.clone()),
-                    client_addr: sea_orm::Set(peer_addr.to_string()),
-                    target_port: sea_orm::Set(target_port as i32),
+                    localup_id: sea_orm::NotSet, // Don't update these fields
+                    client_addr: sea_orm::NotSet,
+                    target_port: sea_orm::NotSet,
                     bytes_received: sea_orm::Set(bytes_received),
                     bytes_sent: sea_orm::Set(bytes_sent),
-                    connected_at: sea_orm::Set(metrics.connected_at.into()),
+                    connected_at: sea_orm::NotSet, // Don't update
                     disconnected_at: sea_orm::Set(Some(disconnected_at.into())),
                     duration_ms: sea_orm::Set(Some(duration_ms)),
                     disconnect_reason: sea_orm::Set(Some("client_closed".to_string())),
                 };
 
-            use sea_orm::EntityTrait;
-            if let Err(e) = localup_relay_db::entities::prelude::CapturedTcpConnection::insert(
-                captured_connection,
-            )
-            .exec(db_conn)
-            .await
-            {
+            use sea_orm::ActiveModelTrait;
+            if let Err(e) = update_connection.update(db_conn).await {
                 warn!(
-                    "Failed to save TCP connection {}: {}",
+                    "Failed to update TCP connection {}: {}",
                     metrics.connection_id, e
                 );
             } else {
                 debug!(
-                    "Captured TCP connection {} to database",
+                    "Updated TCP connection {} with disconnect info",
                     metrics.connection_id
                 );
             }

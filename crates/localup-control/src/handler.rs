@@ -15,6 +15,7 @@ use crate::agent_registry::{AgentRegistry, RegisteredAgent};
 use crate::connection::TunnelConnectionManager;
 use crate::domain_provider::{DomainContext, DomainProvider};
 use crate::pending_requests::PendingRequests;
+use crate::task_tracker::TaskTracker;
 
 /// Trait for port allocation (TCP tunnels)
 pub trait PortAllocator: Send + Sync {
@@ -57,6 +58,8 @@ pub struct TunnelHandler {
     http_port: Option<u16>,
     /// Actual HTTPS port the relay is listening on
     https_port: Option<u16>,
+    /// Tracks TCP proxy server tasks to allow cleanup on disconnect
+    task_tracker: Arc<TaskTracker>,
 }
 
 impl TunnelHandler {
@@ -82,6 +85,7 @@ impl TunnelHandler {
             tls_port: None,
             http_port: None,
             https_port: None,
+            task_tracker: Arc::new(TaskTracker::new()),
         }
     }
 
@@ -466,7 +470,7 @@ impl TunnelHandler {
 
         // Unregister routes
         for endpoint in &endpoints {
-            self.unregister_route(&localup_id, endpoint);
+            self.unregister_route(&localup_id, endpoint).await;
         }
 
         info!("Tunnel {} disconnected", localup_id);
@@ -1574,14 +1578,17 @@ impl TunnelHandler {
                     // Spawn TCP proxy server if spawner is configured
                     if let Some(ref spawner) = self.tcp_proxy_spawner {
                         let localup_id_clone = localup_id.to_string();
-                        let spawner_future = spawner(localup_id_clone, allocated_port);
+                        let spawner_future = spawner(localup_id_clone.clone(), allocated_port);
 
-                        // Spawn the proxy server in a background task
-                        tokio::spawn(async move {
+                        // Spawn the proxy server in a background task and track the handle
+                        let handle = tokio::spawn(async move {
                             if let Err(e) = spawner_future.await {
                                 error!("Failed to spawn TCP proxy server: {}", e);
                             }
                         });
+
+                        // Register the task handle so it can be aborted on disconnect
+                        self.task_tracker.register(localup_id_clone, handle);
 
                         info!(
                             "Spawned TCP proxy server on port {} for tunnel {}",
@@ -1621,7 +1628,7 @@ impl TunnelHandler {
         }
     }
 
-    fn unregister_route(&self, localup_id: &str, endpoint: &Endpoint) {
+    async fn unregister_route(&self, localup_id: &str, endpoint: &Endpoint) {
         match &endpoint.protocol {
             Protocol::Http { subdomain } | Protocol::Https { subdomain } => {
                 if let Some(subdomain_str) = subdomain {
@@ -1633,6 +1640,14 @@ impl TunnelHandler {
                 }
             }
             Protocol::Tcp { .. } => {
+                // 1. First abort the TCP proxy server task
+                self.task_tracker.unregister(localup_id);
+                info!("Terminated TCP proxy server task for tunnel {}", localup_id);
+
+                // 2. Give the task time to drop the socket (brief delay)
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                // 3. NOW deallocate the port - socket should be released by now
                 if let Some(ref allocator) = self.port_allocator {
                     allocator.deallocate(localup_id);
                     info!("Deallocated TCP port for tunnel {}", localup_id);
@@ -2087,8 +2102,8 @@ mod tests {
         assert_eq!(result.unwrap(), Some(9000));
     }
 
-    #[test]
-    fn test_unregister_route_http() {
+    #[tokio::test]
+    async fn test_unregister_route_http() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -2115,14 +2130,14 @@ mod tests {
         assert_eq!(route_registry.count(), 1);
 
         // Unregister
-        handler.unregister_route(localup_id, &endpoint);
+        handler.unregister_route(localup_id, &endpoint).await;
         assert_eq!(route_registry.count(), 0);
     }
 
-    #[test]
-    fn test_unregister_route_tcp() {
+    #[tokio::test]
+    async fn test_unregister_route_tcp() {
         struct MockPortAllocator {
-            deallocated: Arc<tokio::sync::Mutex<bool>>,
+            deallocated: Arc<std::sync::Mutex<bool>>,
         }
         impl PortAllocator for MockPortAllocator {
             fn allocate(
@@ -2133,14 +2148,14 @@ mod tests {
                 Ok(9000)
             }
             fn deallocate(&self, _localup_id: &str) {
-                *self.deallocated.blocking_lock() = true;
+                *self.deallocated.lock().unwrap() = true;
             }
             fn get_allocated_port(&self, _localup_id: &str) -> Option<u16> {
                 Some(9000)
             }
         }
 
-        let deallocated = Arc::new(tokio::sync::Mutex::new(false));
+        let deallocated = Arc::new(std::sync::Mutex::new(false));
         let allocator = Arc::new(MockPortAllocator {
             deallocated: deallocated.clone(),
         });
@@ -2165,9 +2180,9 @@ mod tests {
             port: Some(9000),
         };
 
-        handler.unregister_route(localup_id, &endpoint);
+        handler.unregister_route(localup_id, &endpoint).await;
 
         // Verify deallocate was called
-        assert!(*deallocated.blocking_lock());
+        assert!(*deallocated.lock().unwrap());
     }
 }

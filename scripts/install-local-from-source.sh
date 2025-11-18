@@ -71,12 +71,6 @@ fi
 echo -e "${GREEN}✓ Running from correct directory${NC}"
 echo ""
 
-# Always clean build artifacts to prevent caching issues
-echo -e "${YELLOW}→ Cleaning previous build artifacts...${NC}"
-cargo clean
-echo -e "${GREEN}✓ Build artifacts cleaned${NC}"
-echo ""
-
 # Build localup binary in release mode
 echo -e "${YELLOW}→ Building localup in release mode...${NC}"
 echo "(Full clean rebuild from scratch - no caching)"
@@ -86,7 +80,7 @@ echo ""
 export CARGO_INCREMENTAL=0
 
 # Build with proper error handling - capture exit code
-cargo build -p localup-cli --release
+cargo build -p localup-cli --bin localup --release
 BUILD_EXIT_CODE=$?
 
 echo ""

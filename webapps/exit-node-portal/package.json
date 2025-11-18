@@ -8,11 +8,13 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "generate:api": "openapi-ts",
+    "generate:api": "openapi-ts && ./scripts/fix-api-client.sh",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "@hey-api/client-fetch": "^0.13.1",
+    "@tanstack/react-query": "^5.90.10",
+    "lucide-react": "^0.554.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-router-dom": "^7.9.6"

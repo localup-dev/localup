@@ -330,6 +330,18 @@ enum RelayCommands {
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
 
+        /// Admin email for auto-creating admin user on startup
+        #[arg(long, env = "ADMIN_EMAIL")]
+        admin_email: Option<String>,
+
+        /// Admin password for auto-creating admin user on startup
+        #[arg(long, env = "ADMIN_PASSWORD")]
+        admin_password: Option<String>,
+
+        /// Admin username for auto-creating admin user on startup
+        #[arg(long, env = "ADMIN_USERNAME")]
+        admin_username: Option<String>,
+
         /// Allow public user registration (disabled by default for security)
         #[arg(long, env = "ALLOW_SIGNUP")]
         allow_signup: bool,
@@ -368,6 +380,18 @@ enum RelayCommands {
         /// Database URL for storing traffic logs
         #[arg(long, env = "DATABASE_URL")]
         database_url: Option<String>,
+
+        /// Admin email for auto-creating admin user on startup
+        #[arg(long, env = "ADMIN_EMAIL")]
+        admin_email: Option<String>,
+
+        /// Admin password for auto-creating admin user on startup
+        #[arg(long, env = "ADMIN_PASSWORD")]
+        admin_password: Option<String>,
+
+        /// Admin username for auto-creating admin user on startup
+        #[arg(long, env = "ADMIN_USERNAME")]
+        admin_username: Option<String>,
 
         /// Allow public user registration (disabled by default for security)
         #[arg(long, env = "ALLOW_SIGNUP")]
@@ -1483,6 +1507,9 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             api_addr,
             no_api,
             database_url,
+            admin_email,
+            admin_password,
+            admin_username,
             allow_signup,
         } => {
             handle_relay_command(
@@ -1499,9 +1526,9 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 api_addr,
                 no_api,
                 database_url,
-                None, // admin_email
-                None, // admin_password
-                None, // admin_username
+                admin_email,
+                admin_password,
+                admin_username,
                 allow_signup,
             )
             .await
@@ -1515,6 +1542,9 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             api_addr,
             no_api,
             database_url,
+            admin_email,
+            admin_password,
+            admin_username,
             allow_signup,
         } => {
             handle_relay_command(
@@ -1531,9 +1561,9 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 api_addr,
                 no_api,
                 database_url,
-                None, // admin_email
-                None, // admin_password
-                None, // admin_username
+                admin_email,
+                admin_password,
+                admin_username,
                 allow_signup,
             )
             .await
@@ -1752,7 +1782,7 @@ async fn handle_relay_command(
 
     // Create JWT validator for tunnel authentication
     // Note: Only validates signature and expiration (no issuer/audience validation)
-    let jwt_validator = if let Some(jwt_secret) = jwt_secret {
+    let jwt_validator = if let Some(ref jwt_secret) = jwt_secret {
         let validator = Arc::new(JwtValidator::new(jwt_secret.as_bytes()));
         info!("✅ JWT authentication enabled (signature only)");
         Some(validator)
@@ -2014,6 +2044,7 @@ async fn handle_relay_command(
                     "http://localhost:3002".to_string(),
                     "http://127.0.0.1:3002".to_string(),
                 ]),
+                jwt_secret: jwt_secret.clone(),
             };
 
             let server = ApiServer::new(config, api_localup_manager, api_db, api_allow_signup);

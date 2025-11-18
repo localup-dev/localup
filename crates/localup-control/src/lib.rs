@@ -5,6 +5,7 @@ pub mod domain_provider;
 pub mod handler;
 pub mod pending_requests;
 pub mod registry;
+pub mod task_tracker;
 
 pub use agent_registry::{AgentRegistry, RegisteredAgent};
 pub use connection::{
@@ -18,3 +19,4 @@ pub use domain_provider::{
 pub use handler::{PortAllocator, TcpProxySpawner, TunnelHandler};
 pub use pending_requests::PendingRequests;
 pub use registry::ControlPlane;
+pub use task_tracker::TaskTracker;

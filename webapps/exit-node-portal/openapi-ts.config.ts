@@ -1,17 +1,6 @@
-import { defineConfig } from '@hey-api/openapi-ts';
-
-export default defineConfig({
+export default {
   client: '@hey-api/client-fetch',
-  input: 'http://localhost:18080/api/openapi.json',
-  output: {
-    path: './src/api/generated',
-    format: 'prettier',
-    lint: 'eslint',
-  },
-  types: {
-    enums: 'javascript',
-  },
-  services: {
-    asClass: true,
-  },
-});
+  input: 'http://localhost:13080/api/openapi.json',
+  output: 'src/api/client',
+  plugins: ['@tanstack/react-query'],
+};

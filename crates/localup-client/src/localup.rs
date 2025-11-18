@@ -407,7 +407,7 @@ impl TunnelConnection {
 
         // Keep control stream for ping/pong heartbeat only
         let control_stream_arc = self.control_stream.clone();
-        let control_stream_task = tokio::spawn(async move {
+        let _control_stream_task = tokio::spawn(async move {
             let mut control_stream = control_stream_arc.lock().await;
             loop {
                 tokio::select! {
@@ -483,7 +483,17 @@ impl TunnelConnection {
 
         // Main loop: accept new QUIC streams from exit node
         loop {
-            match connection.accept_stream().await {
+            tokio::select! {
+                // Check if connection was closed
+                _ = connection.inner().closed() => {
+                    error!("❌ Relay connection closed unexpectedly");
+                    return Err(TunnelError::ConnectionError(
+                        "Relay server closed connection".to_string(),
+                    ));
+                }
+                // Accept new streams
+                stream_result = connection.accept_stream() => {
+                    match stream_result {
                 Ok(Some(mut stream)) => {
                     debug!("Accepted new QUIC stream: {}", stream.stream_id());
 
@@ -595,22 +605,27 @@ impl TunnelConnection {
                         }
                     });
                 }
-                Ok(None) => {
-                    info!("Connection closed, no more streams");
-                    break;
-                }
-                Err(e) => {
-                    error!("Error accepting stream: {}", e);
-                    break;
+                        Ok(None) => {
+                            error!("❌ Relay connection closed unexpectedly");
+                            return Err(TunnelError::ConnectionError(
+                                "Relay server closed connection".to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            error!("❌ Error accepting stream: {}", e);
+                            return Err(TunnelError::ConnectionError(format!(
+                                "Stream error: {}",
+                                e
+                            )));
+                        }
+                    }
                 }
             }
         }
 
-        // Wait for control stream task to finish
-        let _ = control_stream_task.await;
-
-        info!("Tunnel connection closed");
-        Ok(())
+        // Note: control_stream_task is intentionally not awaited here because
+        // we return early with errors from the loop above
+        // The task will be cleaned up automatically when the connection drops
     }
 
     /// Handle an HTTP request on a dedicated QUIC stream

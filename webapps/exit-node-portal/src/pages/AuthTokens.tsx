@@ -24,6 +24,7 @@ export default function AuthTokens() {
   const [createdTokenExpiresAt, setCreatedTokenExpiresAt] = useState<string | null>(null);
   const [tokenName, setTokenName] = useState('');
   const [tokenDescription, setTokenDescription] = useState('');
+  const [expiresInDays, setExpiresInDays] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
@@ -50,13 +51,14 @@ export default function AuthTokens() {
       const response = await createAuthToken({
         name: tokenName,
         description: tokenDescription || null,
-        expires_in_days: null,
+        expires_in_days: expiresInDays,
         team_id: selectedTeam?.id || null,
       });
       setCreatedToken(response.token);
       setCreatedTokenExpiresAt(response.expires_at || null);
       setTokenName('');
       setTokenDescription('');
+      setExpiresInDays(null);
       await fetchTokens();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create token');
@@ -275,6 +277,24 @@ export default function AuthTokens() {
                     className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     placeholder="Token for production tunnels"
                   />
+                </div>
+
+                <div>
+                  <label htmlFor="expiresInDays" className="block text-sm font-medium text-gray-300 mb-2">
+                    Expires In (Days)
+                  </label>
+                  <input
+                    id="expiresInDays"
+                    type="number"
+                    min="1"
+                    value={expiresInDays || ''}
+                    onChange={(e) => setExpiresInDays(e.target.value ? parseInt(e.target.value, 10) : null)}
+                    className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="Leave empty for no expiration"
+                  />
+                  <p className="mt-1 text-xs text-gray-400">
+                    Leave empty for a token that never expires
+                  </p>
                 </div>
 
                 <div className="flex justify-end gap-3">

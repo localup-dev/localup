@@ -11,10 +11,13 @@ use crate::middleware::AuthUser;
 use crate::models::*;
 use crate::AppState;
 
-/// List all active tunnels
+/// List all tunnels (active and optionally inactive)
 #[utoipa::path(
     get,
     path = "/api/tunnels",
+    params(
+        ("include_inactive" = Option<bool>, Query, description = "Include inactive/disconnected tunnels from history (default: false)")
+    ),
     responses(
         (status = 200, description = "List of tunnels", body = TunnelList),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -23,16 +26,22 @@ use crate::AppState;
 )]
 pub async fn list_tunnels(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<TunnelList>, (StatusCode, Json<ErrorResponse>)> {
-    debug!("Listing tunnels");
+    let include_inactive = query
+        .get("include_inactive")
+        .and_then(|v| v.parse::<bool>().ok())
+        .unwrap_or(false);
+
+    debug!("Listing tunnels (include_inactive={})", include_inactive);
 
     // Get active tunnel IDs
-    let localup_ids = state.localup_manager.list_tunnels().await;
-
+    let active_localup_ids = state.localup_manager.list_tunnels().await;
     let mut tunnels = Vec::new();
 
-    for localup_id in localup_ids {
-        if let Some(endpoints) = state.localup_manager.get_endpoints(&localup_id).await {
+    // Add active tunnels
+    for localup_id in &active_localup_ids {
+        if let Some(endpoints) = state.localup_manager.get_endpoints(localup_id).await {
             let tunnel = Tunnel {
                 id: localup_id.clone(),
                 endpoints: endpoints
@@ -72,6 +81,69 @@ pub async fn list_tunnels(
         }
     }
 
+    // If include_inactive, query database for historical tunnel IDs
+    if include_inactive {
+        use localup_relay_db::entities::prelude::*;
+        use sea_orm::{EntityTrait, QuerySelect};
+
+        // Get unique tunnel IDs from TCP connections
+        let tcp_tunnel_ids: Vec<String> = CapturedTcpConnection::find()
+            .select_only()
+            .column(localup_relay_db::entities::captured_tcp_connection::Column::LocalupId)
+            .distinct()
+            .into_tuple::<String>()
+            .all(&state.db)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Database error: {}", e),
+                        code: None,
+                    }),
+                )
+            })?;
+
+        // Get unique tunnel IDs from HTTP requests
+        let http_tunnel_ids: Vec<String> = CapturedRequest::find()
+            .select_only()
+            .column(localup_relay_db::entities::captured_request::Column::LocalupId)
+            .distinct()
+            .into_tuple::<String>()
+            .all(&state.db)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Database error: {}", e),
+                        code: None,
+                    }),
+                )
+            })?;
+
+        // Combine and deduplicate
+        let mut all_tunnel_ids: Vec<String> = tcp_tunnel_ids
+            .into_iter()
+            .chain(http_tunnel_ids.into_iter())
+            .filter(|id| !active_localup_ids.contains(id)) // Exclude already active tunnels
+            .collect();
+        all_tunnel_ids.sort();
+        all_tunnel_ids.dedup();
+
+        // Add inactive tunnels (minimal info since they're not connected)
+        for inactive_id in all_tunnel_ids {
+            tunnels.push(Tunnel {
+                id: inactive_id.clone(),
+                endpoints: vec![], // No endpoints for inactive tunnels
+                status: TunnelStatus::Disconnected,
+                region: "unknown".to_string(),
+                connected_at: chrono::Utc::now(), // Use current time as placeholder
+                local_addr: None,
+            });
+        }
+    }
+
     let total = tunnels.len();
 
     Ok(Json(TunnelList { tunnels, total }))
@@ -97,6 +169,7 @@ pub async fn get_tunnel(
 ) -> Result<Json<Tunnel>, (StatusCode, Json<ErrorResponse>)> {
     debug!("Getting tunnel: {}", id);
 
+    // First, check if tunnel is active in memory
     if let Some(endpoints) = state.localup_manager.get_endpoints(&id).await {
         let tunnel = Tunnel {
             id: id.clone(),
@@ -130,16 +203,67 @@ pub async fn get_tunnel(
             local_addr: None,
         };
 
-        Ok(Json(tunnel))
-    } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Tunnel '{}' not found", id),
-                code: Some("TUNNEL_NOT_FOUND".to_string()),
-            }),
-        ))
+        return Ok(Json(tunnel));
     }
+
+    // If not active, check if it exists in database history (disconnected tunnel)
+    use localup_relay_db::entities::prelude::*;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    // Check TCP connections table
+    let tcp_exists = CapturedTcpConnection::find()
+        .filter(localup_relay_db::entities::captured_tcp_connection::Column::LocalupId.eq(&id))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error checking TCP connections: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                    code: Some("DATABASE_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    // Check HTTP requests table
+    let http_exists = CapturedRequest::find()
+        .filter(localup_relay_db::entities::captured_request::Column::LocalupId.eq(&id))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error checking HTTP requests: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                    code: Some("DATABASE_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    // If found in database history, return as disconnected tunnel
+    if tcp_exists.is_some() || http_exists.is_some() {
+        let tunnel = Tunnel {
+            id: id.clone(),
+            endpoints: vec![], // No endpoints for disconnected tunnels
+            status: TunnelStatus::Disconnected,
+            region: "unknown".to_string(),
+            connected_at: chrono::Utc::now(), // TODO: Get actual connected_at from DB
+            local_addr: None,
+        };
+
+        return Ok(Json(tunnel));
+    }
+
+    // Tunnel not found anywhere (neither active nor in history)
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("Tunnel '{}' not found", id),
+            code: Some("TUNNEL_NOT_FOUND".to_string()),
+        }),
+    ))
 }
 
 /// Delete a tunnel
@@ -1495,8 +1619,8 @@ pub async fn list_user_teams(
     Extension(auth_user): Extension<crate::middleware::AuthUser>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
-    use localup_relay_db::entities::{prelude::*, team, team_member};
-    use sea_orm::{ColumnTrait, EntityTrait, JoinType, QueryFilter};
+    use localup_relay_db::entities::{prelude::*, team_member};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
     let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
         (
@@ -1607,7 +1731,13 @@ pub async fn create_auth_token(
     let expires_at = req.expires_in_days.map(|days| now + Duration::days(days));
 
     // Generate JWT auth token
-    let jwt_secret = b"temporary-secret-change-me-in-production";
+    // Use the JWT secret from config, or fallback to default if not configured
+    let jwt_secret_str = state
+        .jwt_secret
+        .as_deref()
+        .unwrap_or("temporary-secret-change-me-in-production");
+    let jwt_secret_bytes = jwt_secret_str.as_bytes();
+
     let mut claims = JwtClaims::new(
         token_id.to_string(),
         "localup-relay".to_string(),
@@ -1625,7 +1755,7 @@ pub async fn create_auth_token(
         claims = claims.with_team_id(team_id_str.clone());
     }
 
-    let token = JwtValidator::encode(jwt_secret, &claims).map_err(|e| {
+    let token = JwtValidator::encode(jwt_secret_bytes, &claims).map_err(|e| {
         tracing::error!("JWT encoding error: {}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,

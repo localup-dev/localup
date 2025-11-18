@@ -12,10 +12,7 @@ use axum::{
 };
 use rust_embed::RustEmbed;
 use std::{net::SocketAddr, sync::Arc};
-use tower_http::{
-    cors::{Any, CorsLayer},
-    trace::TraceLayer,
-};
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::info;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -32,6 +29,7 @@ pub struct AppState {
     pub localup_manager: Arc<TunnelConnectionManager>,
     pub db: DatabaseConnection,
     pub allow_signup: bool,
+    pub jwt_secret: Option<String>,
 }
 
 /// OpenAPI documentation
@@ -138,6 +136,8 @@ pub struct ApiServerConfig {
     pub enable_cors: bool,
     /// Allowed CORS origins (if None, allows all)
     pub cors_origins: Option<Vec<String>>,
+    /// JWT secret for signing auth tokens
+    pub jwt_secret: Option<String>,
 }
 
 impl Default for ApiServerConfig {
@@ -146,6 +146,7 @@ impl Default for ApiServerConfig {
             bind_addr: "127.0.0.1:8080".parse().unwrap(),
             enable_cors: true,
             cors_origins: None,
+            jwt_secret: None,
         }
     }
 }
@@ -168,6 +169,7 @@ impl ApiServer {
             localup_manager,
             db,
             allow_signup,
+            jwt_secret: config.jwt_secret.clone(),
         });
 
         Self { config, state }
@@ -326,6 +328,7 @@ pub async fn run_api_server(
         bind_addr,
         enable_cors: true,
         cors_origins: Some(vec!["http://localhost:3000".to_string()]),
+        jwt_secret: None,
     };
 
     let server = ApiServer::new(config, localup_manager, db, allow_signup);
