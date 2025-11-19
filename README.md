@@ -135,6 +135,52 @@ openssl s_client -connect localhost:18443 -servername api.example.com
 openssl s_client -connect localhost:3443 -servername api.example.com
 ```
 
+### Example 4: Reverse Tunnel (Private Service Access)
+
+Access a private service behind NAT/firewall without exposing it to the public internet.
+
+```bash
+# Terminal 1: Start relay server
+localup relay tcp \
+  --localup-addr "0.0.0.0:14443" \
+  --tcp-port-range "10000-20000" \
+  --jwt-secret "my-jwt-secret"
+
+# Terminal 2: Start private service (e.g., database on private network)
+# This could be on a different machine behind NAT
+python3 -m http.server 8080
+
+# Terminal 3: Run agent to connect private service to relay
+export AGENT_TOKEN=$(localup generate-token --secret "my-jwt-secret" --sub "private-db" --token-only)
+localup agent \
+  --relay 127.0.0.1:14443 \
+  --agent-id "private-db" \
+  --insecure \
+  --target-address "localhost:5432" \
+  --token "$AGENT_TOKEN"
+
+# Terminal 4: Connect to the private service through relay (from anywhere)
+export CLIENT_TOKEN=$(localup generate-token --secret "my-jwt-secret" --sub "client" --token-only)
+localup connect \
+  --relay localhost:14443 \
+  --agent-id "private-db" \
+  --local-address "localhost:19432" \
+  --remote-address="localhost:5432" \
+  --token "$CLIENT_TOKEN" \
+  --agent-token="$CLIENT_TOKEN"
+
+# Terminal 5: Access the private service via local port
+psql -h localhost -U postgres -p 19432
+```
+
+**Flow:** `Client → Relay (public) → Agent → Private Service (behind NAT)`
+
+**Use Cases:**
+- Access private databases without opening firewall ports
+- Reach services on home network from anywhere
+- Connect to IoT devices behind NAT
+- Remote administration of internal services
+
 ---
 
 ## 📦 Installation
