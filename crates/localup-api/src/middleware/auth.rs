@@ -277,7 +277,9 @@ mod tests {
             .unwrap();
         let error: ErrorResponse = serde_json::from_slice(&body).unwrap();
 
-        assert!(error.error.contains("Missing Authorization header"));
+        assert!(error
+            .error
+            .contains("Missing authentication token (cookie or Authorization header)"));
     }
 
     #[tokio::test]
