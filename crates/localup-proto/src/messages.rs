@@ -132,6 +132,14 @@ pub enum TunnelMessage {
         reason: String,
     },
 
+    /// Client initiates a new stream for a reverse tunnel connection
+    /// (sent on a NEW stream, not the control stream)
+    ReverseConnect {
+        localup_id: String,
+        stream_id: u32,
+        remote_address: String,
+    },
+
     /// Relay validates agent token before accepting tunnel
     /// (used for early validation, not per-stream)
     ValidateAgentToken {

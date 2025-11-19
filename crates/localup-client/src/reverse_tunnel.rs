@@ -223,11 +223,20 @@ impl ReverseTunnelClient {
 
                 // Spawn local server task - pass control_stream to keep it alive
                 let localup_id_clone = localup_id.clone();
+                let connection_clone = connection.clone();
+                let remote_address_clone = config.remote_address.clone();
                 let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
 
                 tokio::spawn(async move {
-                    Self::run_local_server(listener, control_stream, localup_id_clone, shutdown_rx)
-                        .await;
+                    Self::run_local_server(
+                        listener,
+                        control_stream,
+                        connection_clone,
+                        localup_id_clone,
+                        remote_address_clone,
+                        shutdown_rx,
+                    )
+                    .await;
                 });
 
                 Ok(Self {
@@ -375,79 +384,34 @@ impl ReverseTunnelClient {
     /// Run local TCP server and handle incoming connections
     async fn run_local_server(
         listener: TcpListener,
-        control_stream: localup_transport_quic::QuicStream,
+        mut control_stream: localup_transport_quic::QuicStream,
+        connection: Arc<localup_transport_quic::QuicConnection>,
         localup_id: String,
+        remote_address: String,
         mut shutdown_rx: tokio::sync::mpsc::Receiver<()>,
     ) {
         info!("Starting local TCP server for reverse tunnel");
 
-        // Split control stream for bidirectional communication
-        let (control_send, mut control_recv) = control_stream.split();
-        let control_send = Arc::new(tokio::sync::Mutex::new(control_send));
-
-        // Map of stream_id -> channel for routing incoming messages to TCP connections
-        let stream_map: Arc<
-            tokio::sync::RwLock<
-                std::collections::HashMap<u32, tokio::sync::mpsc::Sender<TunnelMessage>>,
-            >,
-        > = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
-
-        let stream_map_clone = stream_map.clone();
-
         // Create a channel to signal when control stream closes
         let (control_closed_tx, mut control_closed_rx) = tokio::sync::mpsc::channel::<String>(1);
 
-        // Spawn task to read from control stream and route to TCP connections
-        let localup_id_clone = localup_id.clone();
+        // Spawn task to read from control stream for control messages only (Ping/Pong, Disconnect)
         let control_closed_tx_clone = control_closed_tx.clone();
         tokio::spawn(async move {
             loop {
-                match control_recv.recv_message().await {
-                    Ok(Some(TunnelMessage::ReverseData {
-                        stream_id, data, ..
-                    })) => {
-                        debug!(
-                            "Received {} bytes from relay for stream {}",
-                            data.len(),
-                            stream_id
-                        );
-                        let map = stream_map_clone.read().await;
-                        if let Some(tx) = map.get(&stream_id) {
-                            let _ = tx
-                                .send(TunnelMessage::ReverseData {
-                                    localup_id: localup_id_clone.clone(),
-                                    stream_id,
-                                    data,
-                                })
-                                .await;
-                        } else {
-                            warn!("No handler for stream_id {}", stream_id);
-                        }
-                    }
-                    Ok(Some(TunnelMessage::ReverseClose {
-                        stream_id, reason, ..
-                    })) => {
-                        if let Some(ref err_reason) = reason {
-                            warn!(
-                                "Received ReverseClose from relay for stream {} with error: {}",
-                                stream_id, err_reason
-                            );
-                        } else {
-                            debug!("Received ReverseClose from relay for stream {}", stream_id);
-                        }
-                        let map = stream_map_clone.read().await;
-                        if let Some(tx) = map.get(&stream_id) {
-                            let _ = tx
-                                .send(TunnelMessage::ReverseClose {
-                                    localup_id: localup_id_clone.clone(),
-                                    stream_id,
-                                    reason: None,
-                                })
-                                .await;
+                match control_stream.recv_message().await {
+                    Ok(Some(TunnelMessage::Ping { timestamp })) => {
+                        debug!("Received ping on control stream");
+                        if let Err(e) = control_stream
+                            .send_message(&TunnelMessage::Pong { timestamp })
+                            .await
+                        {
+                            error!("Failed to send pong: {}", e);
+                            break;
                         }
                     }
                     Ok(Some(TunnelMessage::Disconnect { reason })) => {
-                        warn!("Agent disconnected from relay - closing tunnel: {}", reason);
+                        warn!("Relay disconnected - closing tunnel: {}", reason);
                         let _ = control_closed_tx_clone.send(reason).await;
                         break;
                     }
@@ -504,16 +468,16 @@ impl ReverseTunnelClient {
                             let stream_id = stream_id_counter;
                             stream_id_counter += 1;
 
-                            let control_send_clone = control_send.clone();
-                            let stream_map_clone = stream_map.clone();
+                            let connection_clone = connection.clone();
                             let localup_id_clone = localup_id.clone();
+                            let remote_address_clone = remote_address.clone();
 
                             tokio::spawn(async move {
                                 if let Err(e) = Self::handle_reverse_connection(
                                     tcp_stream,
-                                    control_send_clone,
-                                    stream_map_clone,
+                                    connection_clone,
                                     localup_id_clone,
+                                    remote_address_clone,
                                     stream_id,
                                 )
                                 .await
@@ -534,15 +498,12 @@ impl ReverseTunnelClient {
     }
 
     /// Handle a single reverse connection
+    /// Opens a NEW QUIC stream for each TCP connection (not the control stream!)
     async fn handle_reverse_connection(
         tcp_stream: TcpStream,
-        control_send: Arc<tokio::sync::Mutex<localup_transport_quic::QuicSendHalf>>,
-        stream_map: Arc<
-            tokio::sync::RwLock<
-                std::collections::HashMap<u32, tokio::sync::mpsc::Sender<TunnelMessage>>,
-            >,
-        >,
+        connection: Arc<localup_transport_quic::QuicConnection>,
         localup_id: String,
+        remote_address: String,
         stream_id: u32,
     ) -> Result<(), ReverseTunnelError> {
         debug!(
@@ -550,32 +511,36 @@ impl ReverseTunnelClient {
             stream_id, localup_id
         );
 
-        // Create channel for receiving messages from relay
-        let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel::<TunnelMessage>(100);
+        // Open a NEW QUIC stream for this TCP connection
+        let mut quic_stream = connection.open_stream().await.map_err(|e| {
+            ReverseTunnelError::TransportError(format!("Failed to open QUIC stream: {}", e))
+        })?;
 
-        // Register this stream_id in the map
-        {
-            let mut map = stream_map.write().await;
-            map.insert(stream_id, msg_tx);
-        }
+        debug!(
+            "Opened QUIC stream {} for reverse connection",
+            quic_stream.stream_id()
+        );
 
-        // Ensure cleanup on exit
-        let stream_map_cleanup = stream_map.clone();
-        let _cleanup_guard = scopeguard::guard(stream_id, move |stream_id| {
-            let map = stream_map_cleanup.clone();
-            tokio::spawn(async move {
-                let mut map = map.write().await;
-                map.remove(&stream_id);
-            });
-        });
+        // Send ReverseConnect as the first message on this stream
+        let connect_msg = TunnelMessage::ReverseConnect {
+            localup_id: localup_id.clone(),
+            stream_id,
+            remote_address: remote_address.clone(),
+        };
 
-        // Split TCP stream for bidirectional communication
+        quic_stream.send_message(&connect_msg).await.map_err(|e| {
+            ReverseTunnelError::TransportError(format!("Failed to send ReverseConnect: {}", e))
+        })?;
+
+        debug!("Sent ReverseConnect for stream {}", stream_id);
+
+        // Split both streams for bidirectional communication
         let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+        let (mut quic_send, mut quic_recv) = quic_stream.split();
 
-        // Task: TCP → Control Stream (read from local TCP, send to relay via ReverseData)
-        let control_send_clone = control_send.clone();
+        // Task: TCP → QUIC (read from local TCP, send to relay via ReverseData)
         let localup_id_clone = localup_id.clone();
-        let tcp_to_relay = tokio::spawn(async move {
+        let tcp_to_quic = tokio::spawn(async move {
             let mut buffer = vec![0u8; 8192];
             loop {
                 match tcp_read.read(&mut buffer).await {
@@ -586,8 +551,14 @@ impl ReverseTunnelClient {
                             stream_id,
                             reason: None,
                         };
-                        let mut send = control_send_clone.lock().await;
-                        let _ = send.send_message(&close_msg).await;
+                        if let Err(e) = quic_send.send_message(&close_msg).await {
+                            error!(
+                                "Failed to send ReverseClose for stream {}: {}",
+                                stream_id, e
+                            );
+                        } else {
+                            debug!("Successfully sent ReverseClose for stream {}", stream_id);
+                        }
                         break;
                     }
                     Ok(n) => {
@@ -597,8 +568,7 @@ impl ReverseTunnelClient {
                             stream_id,
                             data: buffer[..n].to_vec(),
                         };
-                        let mut send = control_send_clone.lock().await;
-                        if let Err(e) = send.send_message(&data_msg).await {
+                        if let Err(e) = quic_send.send_message(&data_msg).await {
                             error!("Failed to send ReverseData to relay: {}", e);
                             break;
                         }
@@ -611,11 +581,11 @@ impl ReverseTunnelClient {
             }
         });
 
-        // Task: Control Stream → TCP (receive from relay via channel, write to local TCP)
-        let relay_to_tcp = tokio::spawn(async move {
+        // Task: QUIC → TCP (receive from relay, write to local TCP)
+        let quic_to_tcp = tokio::spawn(async move {
             loop {
-                match msg_rx.recv().await {
-                    Some(TunnelMessage::ReverseData { data, .. }) => {
+                match quic_recv.recv_message().await {
+                    Ok(Some(TunnelMessage::ReverseData { data, .. })) => {
                         debug!(
                             "Received {} bytes from relay (stream {})",
                             data.len(),
@@ -626,15 +596,19 @@ impl ReverseTunnelClient {
                             break;
                         }
                     }
-                    Some(TunnelMessage::ReverseClose { .. }) => {
+                    Ok(Some(TunnelMessage::ReverseClose { .. })) => {
                         debug!("Received ReverseClose from relay (stream {})", stream_id);
                         break;
                     }
-                    None => {
-                        debug!("Message channel closed (stream {})", stream_id);
+                    Ok(None) => {
+                        debug!("QUIC stream closed (stream {})", stream_id);
                         break;
                     }
-                    Some(msg) => {
+                    Err(e) => {
+                        error!("Error reading from QUIC stream {}: {}", stream_id, e);
+                        break;
+                    }
+                    Ok(Some(msg)) => {
                         warn!("Unexpected message for stream {}: {:?}", stream_id, msg);
                     }
                 }
@@ -642,7 +616,7 @@ impl ReverseTunnelClient {
         });
 
         // Wait for both tasks to complete
-        let _ = tokio::join!(tcp_to_relay, relay_to_tcp);
+        let _ = tokio::join!(tcp_to_quic, quic_to_tcp);
         debug!("Reverse connection handler finished (stream {})", stream_id);
 
         Ok(())

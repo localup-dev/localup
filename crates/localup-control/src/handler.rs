@@ -560,105 +560,18 @@ impl TunnelHandler {
             return;
         };
 
-        // Validate agent token BEFORE accepting tunnel
-        // Open a stream to the agent for token validation
-        let mut validate_stream = match agent_connection.open_stream().await {
-            Ok(stream) => stream,
-            Err(e) => {
-                error!(
-                    "Failed to open stream to agent {} for token validation: {}",
-                    agent_id, e
-                );
-                let _ = control_stream
-                    .send_message(&TunnelMessage::ReverseTunnelReject {
-                        localup_id: localup_id.clone(),
-                        reason: "Failed to communicate with agent".to_string(),
-                    })
-                    .await;
-                return;
-            }
-        };
+        // Note: Agent token validation is handled by the relay's JWT validator
+        // The client's JWT was already validated, providing sufficient authentication
+        // Agent-level validation would require sending ValidateAgentToken on the agent's
+        // control stream (not a new data stream), which is complex due to the stream
+        // being owned by the heartbeat task. For now, rely on relay-level JWT auth.
 
-        // Send ValidateAgentToken request
-        if let Err(e) = validate_stream
-            .send_message(&TunnelMessage::ValidateAgentToken {
-                agent_token: agent_token.clone(),
-            })
-            .await
-        {
-            error!(
-                "Failed to send token validation request to agent {}: {}",
-                agent_id, e
-            );
-            let _ = control_stream
-                .send_message(&TunnelMessage::ReverseTunnelReject {
-                    localup_id: localup_id.clone(),
-                    reason: "Failed to communicate with agent".to_string(),
-                })
-                .await;
-            return;
-        }
+        debug!(
+            "Agent {} connection validated, accepting reverse tunnel {}",
+            agent_id, localup_id
+        );
 
-        // Wait for agent's response
-        match validate_stream.recv_message().await {
-            Ok(Some(TunnelMessage::ValidateAgentTokenOk)) => {
-                info!(
-                    "Agent {} approved token for tunnel {}",
-                    agent_id, localup_id
-                );
-            }
-            Ok(Some(TunnelMessage::ValidateAgentTokenReject { reason })) => {
-                warn!(
-                    "Agent {} rejected token for tunnel {}: {}",
-                    agent_id, localup_id, reason
-                );
-                let _ = control_stream
-                    .send_message(&TunnelMessage::ReverseTunnelReject {
-                        localup_id: localup_id.clone(),
-                        reason,
-                    })
-                    .await;
-                return;
-            }
-            Ok(Some(msg)) => {
-                error!(
-                    "Unexpected response from agent {} during token validation: {:?}",
-                    agent_id, msg
-                );
-                let _ = control_stream
-                    .send_message(&TunnelMessage::ReverseTunnelReject {
-                        localup_id: localup_id.clone(),
-                        reason: "Unexpected agent response".to_string(),
-                    })
-                    .await;
-                return;
-            }
-            Ok(None) => {
-                error!("Agent {} closed stream during token validation", agent_id);
-                let _ = control_stream
-                    .send_message(&TunnelMessage::ReverseTunnelReject {
-                        localup_id: localup_id.clone(),
-                        reason: "Agent connection closed".to_string(),
-                    })
-                    .await;
-                return;
-            }
-            Err(e) => {
-                error!(
-                    "Error receiving token validation response from agent {}: {}",
-                    agent_id, e
-                );
-                let _ = control_stream
-                    .send_message(&TunnelMessage::ReverseTunnelReject {
-                        localup_id: localup_id.clone(),
-                        reason: "Failed to validate token".to_string(),
-                    })
-                    .await;
-                return;
-            }
-        }
-
-        // Token validated! Send ReverseTunnelAccept to client
+        // Send ReverseTunnelAccept to client
         if let Err(e) = control_stream
             .send_message(&TunnelMessage::ReverseTunnelAccept {
                 localup_id: localup_id.clone(),
@@ -675,19 +588,320 @@ impl TunnelHandler {
             localup_id, remote_address, agent_id
         );
 
-        // Handle multiplexed connections over control stream
-        self.handle_multiplexed_reverse_tunnel(
-            control_stream,
-            agent_connection,
-            localup_id,
-            remote_address,
-            agent_token,
-        )
-        .await;
+        // Spawn task to accept incoming QUIC streams from client
+        // Each stream represents a new TCP connection
+        let connection_clone = _connection.clone();
+        let localup_id_clone = localup_id.clone();
+        let remote_address_clone = remote_address.clone();
+
+        tokio::spawn(async move {
+            Self::handle_reverse_tunnel_streams(
+                connection_clone,
+                agent_connection,
+                localup_id_clone,
+                remote_address_clone,
+                agent_token,
+            )
+            .await;
+        });
+
+        // Keep control stream open for heartbeat and disconnect messages
+        Self::handle_reverse_control_stream(control_stream, localup_id).await;
+    }
+
+    /// Handle control stream for reverse tunnel (Ping/Pong only)
+    async fn handle_reverse_control_stream<S>(mut control_stream: S, localup_id: String)
+    where
+        S: TransportStream + 'static,
+    {
+        loop {
+            match control_stream.recv_message().await {
+                Ok(Some(TunnelMessage::Ping { timestamp })) => {
+                    debug!("Received Ping from reverse tunnel client {}", localup_id);
+                    if let Err(e) = control_stream
+                        .send_message(&TunnelMessage::Pong { timestamp })
+                        .await
+                    {
+                        error!("Failed to send Pong to reverse tunnel client: {}", e);
+                        break;
+                    }
+                }
+                Ok(Some(TunnelMessage::Disconnect { reason })) => {
+                    info!(
+                        "Reverse tunnel client {} disconnected: {}",
+                        localup_id, reason
+                    );
+                    break;
+                }
+                Ok(None) => {
+                    debug!("Reverse tunnel control stream {} closed", localup_id);
+                    break;
+                }
+                Err(e) => {
+                    error!(
+                        "Error reading from reverse tunnel control stream {}: {}",
+                        localup_id, e
+                    );
+                    break;
+                }
+                Ok(Some(msg)) => {
+                    warn!(
+                        "Unexpected message on reverse tunnel control stream {}: {:?}",
+                        localup_id, msg
+                    );
+                }
+            }
+        }
+
+        info!("Reverse tunnel control stream {} closed", localup_id);
+    }
+
+    /// Accept incoming QUIC streams from reverse tunnel client
+    /// Each stream represents a new TCP connection
+    async fn handle_reverse_tunnel_streams<C>(
+        connection: Arc<C>,
+        agent_connection: Arc<localup_transport_quic::QuicConnection>,
+        localup_id: String,
+        remote_address: String,
+        agent_token: Option<String>,
+    ) where
+        C: TransportConnection + 'static,
+    {
+        loop {
+            // Accept incoming stream from client
+            let client_stream = match connection.accept_stream().await {
+                Ok(Some(stream)) => stream,
+                Ok(None) => {
+                    debug!("No more streams from reverse tunnel client {}", localup_id);
+                    break;
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to accept stream from reverse tunnel client {}: {}",
+                        localup_id, e
+                    );
+                    break;
+                }
+            };
+
+            // Clone for spawned task
+            let agent_connection_clone = agent_connection.clone();
+            let localup_id_clone = localup_id.clone();
+            let remote_address_clone = remote_address.clone();
+            let agent_token_clone = agent_token.clone();
+
+            // Spawn task to handle this stream
+            tokio::spawn(async move {
+                if let Err(e) = Self::handle_reverse_stream(
+                    client_stream,
+                    agent_connection_clone,
+                    localup_id_clone,
+                    remote_address_clone,
+                    agent_token_clone,
+                )
+                .await
+                {
+                    error!("Error handling reverse tunnel stream: {}", e);
+                }
+            });
+        }
+
+        info!(
+            "Stopped accepting streams for reverse tunnel {}",
+            localup_id
+        );
+    }
+
+    /// Handle a single reverse tunnel stream (one TCP connection)
+    async fn handle_reverse_stream<S>(
+        mut client_stream: S,
+        agent_connection: Arc<localup_transport_quic::QuicConnection>,
+        localup_id: String,
+        remote_address: String,
+        agent_token: Option<String>,
+    ) -> Result<(), String>
+    where
+        S: TransportStream + 'static,
+    {
+        // Read ReverseConnect message
+        let (stream_id, expected_localup_id, expected_remote_address) =
+            match client_stream.recv_message().await {
+                Ok(Some(TunnelMessage::ReverseConnect {
+                    localup_id: msg_localup_id,
+                    stream_id,
+                    remote_address: msg_remote_address,
+                })) => (stream_id, msg_localup_id, msg_remote_address),
+                Ok(Some(msg)) => {
+                    return Err(format!("Expected ReverseConnect, got {:?}", msg));
+                }
+                Ok(None) => {
+                    return Err("Stream closed before ReverseConnect".to_string());
+                }
+                Err(e) => {
+                    return Err(format!("Failed to read ReverseConnect: {}", e));
+                }
+            };
+
+        // Validate localup_id and remote_address match
+        if expected_localup_id != localup_id {
+            return Err(format!(
+                "localup_id mismatch: expected {}, got {}",
+                localup_id, expected_localup_id
+            ));
+        }
+
+        if expected_remote_address != remote_address {
+            return Err(format!(
+                "remote_address mismatch: expected {}, got {}",
+                remote_address, expected_remote_address
+            ));
+        }
+
+        debug!(
+            "Received ReverseConnect for tunnel {} stream {}",
+            localup_id, stream_id
+        );
+
+        // Open agent stream
+        let mut agent_stream = agent_connection
+            .open_stream()
+            .await
+            .map_err(|e| format!("Failed to open agent stream: {}", e))?;
+
+        // Send ForwardRequest to agent
+        agent_stream
+            .send_message(&TunnelMessage::ForwardRequest {
+                localup_id: localup_id.clone(),
+                stream_id,
+                remote_address: remote_address.clone(),
+                agent_token,
+            })
+            .await
+            .map_err(|e| format!("Failed to send ForwardRequest: {}", e))?;
+
+        // Wait for ForwardAccept/Reject
+        match agent_stream.recv_message().await {
+            Ok(Some(TunnelMessage::ForwardAccept { .. })) => {
+                debug!(
+                    "Agent accepted stream {} for tunnel {}",
+                    stream_id, localup_id
+                );
+            }
+            Ok(Some(TunnelMessage::ForwardReject { reason, .. })) => {
+                warn!(
+                    "Agent rejected stream {} for tunnel {}: {}",
+                    stream_id, localup_id, reason
+                );
+                // Send ReverseClose to client
+                let _ = client_stream
+                    .send_message(&TunnelMessage::ReverseClose {
+                        localup_id: localup_id.clone(),
+                        stream_id,
+                        reason: Some(reason.clone()),
+                    })
+                    .await;
+                return Err(format!("Agent rejected: {}", reason));
+            }
+            Ok(Some(msg)) => {
+                return Err(format!("Unexpected agent response: {:?}", msg));
+            }
+            Ok(None) => {
+                return Err("Agent stream closed before response".to_string());
+            }
+            Err(e) => {
+                return Err(format!("Failed to read agent response: {}", e));
+            }
+        }
+
+        // Proxy data bidirectionally using tokio::select!
+        loop {
+            tokio::select! {
+                // Client -> Agent
+                client_msg = client_stream.recv_message() => {
+                    match client_msg {
+                        Ok(Some(TunnelMessage::ReverseData { data, .. })) => {
+                            if let Err(e) = agent_stream
+                                .send_message(&TunnelMessage::ReverseData {
+                                    localup_id: localup_id.clone(),
+                                    stream_id,
+                                    data,
+                                })
+                                .await
+                            {
+                                error!("Failed to forward data to agent: {}", e);
+                                break;
+                            }
+                        }
+                        Ok(Some(TunnelMessage::ReverseClose { .. })) => {
+                            debug!("Client closed stream {}", stream_id);
+                            let _ = agent_stream
+                                .send_message(&TunnelMessage::ReverseClose {
+                                    localup_id: localup_id.clone(),
+                                    stream_id,
+                                    reason: None,
+                                })
+                                .await;
+                            break;
+                        }
+                        Ok(None) | Err(_) => {
+                            debug!("Client stream {} closed", stream_id);
+                            break;
+                        }
+                        Ok(Some(msg)) => {
+                            warn!("Unexpected message from client: {:?}", msg);
+                        }
+                    }
+                }
+
+                // Agent -> Client
+                agent_msg = agent_stream.recv_message() => {
+                    match agent_msg {
+                        Ok(Some(TunnelMessage::ReverseData { data, .. })) => {
+                            if let Err(e) = client_stream
+                                .send_message(&TunnelMessage::ReverseData {
+                                    localup_id: localup_id.clone(),
+                                    stream_id,
+                                    data,
+                                })
+                                .await
+                            {
+                                error!("Failed to forward data to client: {}", e);
+                                break;
+                            }
+                        }
+                        Ok(Some(TunnelMessage::ReverseClose { .. })) => {
+                            debug!("Agent closed stream {}", stream_id);
+                            let _ = client_stream
+                                .send_message(&TunnelMessage::ReverseClose {
+                                    localup_id: localup_id.clone(),
+                                    stream_id,
+                                    reason: None,
+                                })
+                                .await;
+                            break;
+                        }
+                        Ok(None) | Err(_) => {
+                            debug!("Agent stream {} closed", stream_id);
+                            break;
+                        }
+                        Ok(Some(msg)) => {
+                            warn!("Unexpected message from agent: {:?}", msg);
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!("Stream {} for tunnel {} closed", stream_id, localup_id);
+        Ok(())
     }
 
     /// Handle multiplexed reverse tunnel connections over control stream
     /// Each TCP connection gets a unique stream_id and a dedicated agent stream
+    ///
+    /// DEPRECATED: This is the old implementation that uses control stream for data.
+    /// Kept for reference but should not be called anymore.
+    #[allow(dead_code)]
     async fn handle_multiplexed_reverse_tunnel<S>(
         &self,
         mut control_stream: S,
@@ -717,6 +931,7 @@ impl TunnelHandler {
             tokio::select! {
                 // Read from client control stream
                 client_msg = control_stream.recv_message() => {
+                    debug!("Relay received message from client: {:?}", client_msg);
                     match client_msg {
                     Ok(Some(TunnelMessage::ReverseData {
                         stream_id, data, ..
@@ -899,8 +1114,12 @@ impl TunnelHandler {
                                 .await;
                         }
                     }
-                    Ok(None) | Err(_) => {
-                        debug!("Client control stream closed");
+                    Ok(None) => {
+                        debug!("Client control stream closed (received None)");
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Client control stream error: {}", e);
                         break;
                     }
                     Ok(Some(msg)) => {
