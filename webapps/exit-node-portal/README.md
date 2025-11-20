@@ -36,7 +36,7 @@ bun install
 Generate TypeScript types from the OpenAPI spec:
 
 ```bash
-bun run generate:api
+bunx @hey-api/openapi-ts
 ```
 
 ### Development Server

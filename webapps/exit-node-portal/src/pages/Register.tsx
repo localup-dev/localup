@@ -1,37 +1,30 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { register } from '../utils/api';
+import { useMutation } from '@tanstack/react-query';
+import { registerMutation } from '../api/client/@tanstack/react-query.gen';
 import { useAuthConfig } from '../contexts/AuthConfigContext';
 
 export default function Register() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [username, setUsername] = useState('');
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const { authConfig } = useAuthConfig();
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError('');
-    setLoading(true);
-
-    try {
-      await register(email, password, username);
+  const mutation = useMutation({
+    ...registerMutation(),
+    onSuccess: () => {
       // Session cookie is automatically set by the backend
       // No need to store anything in frontend
       navigate('/dashboard');
-    } catch (err: any) {
-      // Check if signup is disabled
-      if (err.code === 'SIGNUP_DISABLED') {
-        setError('Public registration is disabled on this server. Please contact your administrator for an account.');
-      } else {
-        setError(err instanceof Error ? err.message : 'Registration failed');
-      }
-    } finally {
-      setLoading(false);
-    }
+    },
+  });
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    mutation.mutate({
+      body: { email, password, username },
+    });
   };
 
   // Show invite-only message if signup is disabled
@@ -75,9 +68,9 @@ export default function Register() {
 
         <div className="bg-gray-800 rounded-lg shadow-lg p-8">
           <form onSubmit={handleSubmit} className="space-y-6">
-            {error && (
+            {mutation.error && (
               <div className="bg-red-900/50 border border-red-500 text-red-200 px-4 py-3 rounded">
-                {error}
+                {mutation.error.message || 'Registration failed'}
               </div>
             )}
 
@@ -130,10 +123,10 @@ export default function Register() {
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={mutation.isPending}
               className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white font-medium py-2 px-4 rounded-md transition"
             >
-              {loading ? 'Creating account...' : 'Sign up'}
+              {mutation.isPending ? 'Creating account...' : 'Sign up'}
             </button>
           </form>
 

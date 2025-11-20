@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { AuthConfigData, AuthConfigResponses, CompleteChallengeData, CompleteChallengeErrors, CompleteChallengeResponses, CreateAuthTokenData, CreateAuthTokenErrors, CreateAuthTokenResponses, DeleteAuthTokenData, DeleteAuthTokenErrors, DeleteAuthTokenResponses, DeleteCustomDomainData, DeleteCustomDomainErrors, DeleteCustomDomainResponses, DeleteTunnelData, DeleteTunnelErrors, DeleteTunnelResponses, GetAuthTokenData, GetAuthTokenErrors, GetAuthTokenResponses, GetCurrentUserData, GetCurrentUserErrors, GetCurrentUserResponses, GetCustomDomainData, GetCustomDomainErrors, GetCustomDomainResponses, GetLocalupMetricsData, GetLocalupMetricsErrors, GetLocalupMetricsResponses, GetRequestData, GetRequestErrors, GetRequestResponses, GetTunnelData, GetTunnelErrors, GetTunnelResponses, HealthCheckData, HealthCheckResponses, InitiateChallengeData, InitiateChallengeErrors, InitiateChallengeResponses, ListAuthTokensData, ListAuthTokensErrors, ListAuthTokensResponses, ListCustomDomainsData, ListCustomDomainsErrors, ListCustomDomainsResponses, ListRequestsData, ListRequestsErrors, ListRequestsResponses, ListTcpConnectionsData, ListTcpConnectionsErrors, ListTcpConnectionsResponses, ListTunnelsData, ListTunnelsErrors, ListTunnelsResponses, ListUserTeamsData, ListUserTeamsErrors, ListUserTeamsResponses, LoginData, LoginErrors, LoginResponses, RegisterData, RegisterErrors, RegisterResponses, ReplayRequestData, ReplayRequestErrors, ReplayRequestResponses, UpdateAuthTokenData, UpdateAuthTokenErrors, UpdateAuthTokenResponses, UploadCustomDomainData, UploadCustomDomainErrors, UploadCustomDomainResponses } from './types.gen';
+import type { AuthConfigData, AuthConfigResponses, CompleteChallengeData, CompleteChallengeErrors, CompleteChallengeResponses, CreateAuthTokenData, CreateAuthTokenErrors, CreateAuthTokenResponses, DeleteAuthTokenData, DeleteAuthTokenErrors, DeleteAuthTokenResponses, DeleteCustomDomainData, DeleteCustomDomainErrors, DeleteCustomDomainResponses, DeleteTunnelData, DeleteTunnelErrors, DeleteTunnelResponses, GetAuthTokenData, GetAuthTokenErrors, GetAuthTokenResponses, GetCurrentUserData, GetCurrentUserErrors, GetCurrentUserResponses, GetCustomDomainData, GetCustomDomainErrors, GetCustomDomainResponses, GetLocalupMetricsData, GetLocalupMetricsErrors, GetLocalupMetricsResponses, GetRequestData, GetRequestErrors, GetRequestResponses, GetTunnelData, GetTunnelErrors, GetTunnelResponses, HealthCheckData, HealthCheckResponses, InitiateChallengeData, InitiateChallengeErrors, InitiateChallengeResponses, ListAuthTokensData, ListAuthTokensErrors, ListAuthTokensResponses, ListCustomDomainsData, ListCustomDomainsErrors, ListCustomDomainsResponses, ListRequestsData, ListRequestsErrors, ListRequestsResponses, ListTcpConnectionsData, ListTcpConnectionsErrors, ListTcpConnectionsResponses, ListTunnelsData, ListTunnelsErrors, ListTunnelsResponses, ListUserTeamsData, ListUserTeamsErrors, ListUserTeamsResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, RegisterData, RegisterErrors, RegisterResponses, ReplayRequestData, ReplayRequestErrors, ReplayRequestResponses, UpdateAuthTokenData, UpdateAuthTokenErrors, UpdateAuthTokenResponses, UploadCustomDomainData, UploadCustomDomainErrors, UploadCustomDomainResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -97,6 +97,16 @@ export const login = <ThrowOnError extends boolean = false>(options: Options<Log
             'Content-Type': 'application/json',
             ...options.headers
         }
+    });
+};
+
+/**
+ * Logout (clear session cookie)
+ */
+export const logout = <ThrowOnError extends boolean = false>(options?: Options<LogoutData, ThrowOnError>) => {
+    return (options?.client ?? client).post<LogoutResponses, LogoutErrors, ThrowOnError>({
+        url: '/api/auth/logout',
+        ...options
     });
 };
 

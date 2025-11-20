@@ -63,6 +63,7 @@ pub struct AppState {
         handlers::auth_config,
         handlers::register,
         handlers::login,
+        handlers::logout,
         handlers::get_current_user,
         handlers::list_user_teams,
         handlers::create_auth_token,

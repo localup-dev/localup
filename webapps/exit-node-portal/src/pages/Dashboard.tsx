@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
-import { getCurrentUser, type User } from '../utils/auth';
-import { getAuthTokens } from '../utils/api';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+import { getCurrentUserOptions, listAuthTokensOptions } from '../api/client/@tanstack/react-query.gen';
 import { Button } from '../components/ui/button';
 
 const platforms = [
@@ -13,26 +13,11 @@ const platforms = [
 export default function Dashboard() {
   const [selectedPlatform, setSelectedPlatform] = useState('macos');
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
-  const [hasDefaultToken, setHasDefaultToken] = useState(false);
-  const [user, setUser] = useState<User | null>(null);
 
-  useEffect(() => {
-    async function init() {
-      // Get current user
-      const currentUser = await getCurrentUser();
-      setUser(currentUser);
+  const { data: user } = useQuery(getCurrentUserOptions());
+  const { data: tokensData } = useQuery(listAuthTokensOptions());
 
-      // Fetch auth tokens
-      try {
-        const response = await getAuthTokens();
-        const defaultToken = response.tokens.find((t: any) => t.name === 'Default');
-        setHasDefaultToken(!!defaultToken);
-      } catch (error) {
-        console.error('Failed to fetch auth tokens:', error);
-      }
-    }
-    init();
-  }, []);
+  const hasDefaultToken = tokensData?.tokens?.some((t) => t.name === 'Default') || false;
 
   const copyToClipboard = (text: string, index: number) => {
     navigator.clipboard.writeText(text);

@@ -5,10 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "generate:api": "openapi-ts && ./scripts/fix-api-client.sh",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {

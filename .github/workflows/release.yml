@@ -32,12 +32,14 @@ jobs:
       - name: Build dashboard webapp
         run: |
           cd webapps/dashboard
+          export VITE_API_BASE_URL=""
           bun install
           bun run build
 
       - name: Build exit-node-portal webapp
         run: |
           cd webapps/exit-node-portal
+          export VITE_API_BASE_URL=""
           bun install
           bun run build
 

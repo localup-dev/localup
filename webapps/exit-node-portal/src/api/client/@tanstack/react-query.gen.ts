@@ -3,8 +3,8 @@
 import { type InfiniteData, infiniteQueryOptions, queryOptions, type UseMutationOptions } from '@tanstack/react-query';
 
 import { client } from '../client.gen';
-import { authConfig, completeChallenge, createAuthToken, deleteAuthToken, deleteCustomDomain, deleteTunnel, getAuthToken, getCurrentUser, getCustomDomain, getLocalupMetrics, getRequest, getTunnel, healthCheck, initiateChallenge, listAuthTokens, listCustomDomains, listRequests, listTcpConnections, listTunnels, listUserTeams, login, type Options, register, replayRequest, updateAuthToken, uploadCustomDomain } from '../sdk.gen';
-import type { AuthConfigData, CompleteChallengeData, CompleteChallengeError, CompleteChallengeResponse, CreateAuthTokenData, CreateAuthTokenError, CreateAuthTokenResponse2, DeleteAuthTokenData, DeleteAuthTokenError, DeleteAuthTokenResponse, DeleteCustomDomainData, DeleteCustomDomainError, DeleteCustomDomainResponse, DeleteTunnelData, DeleteTunnelError, DeleteTunnelResponse, GetAuthTokenData, GetCurrentUserData, GetCustomDomainData, GetLocalupMetricsData, GetRequestData, GetTunnelData, HealthCheckData, InitiateChallengeData, InitiateChallengeError, InitiateChallengeResponse2, ListAuthTokensData, ListCustomDomainsData, ListRequestsData, ListRequestsError, ListRequestsResponse, ListTcpConnectionsData, ListTcpConnectionsError, ListTcpConnectionsResponse, ListTunnelsData, ListUserTeamsData, LoginData, LoginError, LoginResponse2, RegisterData, RegisterError, RegisterResponse2, ReplayRequestData, ReplayRequestError, ReplayRequestResponse, UpdateAuthTokenData, UpdateAuthTokenError, UpdateAuthTokenResponse, UploadCustomDomainData, UploadCustomDomainError, UploadCustomDomainResponse2 } from '../types.gen';
+import { authConfig, completeChallenge, createAuthToken, deleteAuthToken, deleteCustomDomain, deleteTunnel, getAuthToken, getCurrentUser, getCustomDomain, getLocalupMetrics, getRequest, getTunnel, healthCheck, initiateChallenge, listAuthTokens, listCustomDomains, listRequests, listTcpConnections, listTunnels, listUserTeams, login, logout, type Options, register, replayRequest, updateAuthToken, uploadCustomDomain } from '../sdk.gen';
+import type { AuthConfigData, CompleteChallengeData, CompleteChallengeError, CompleteChallengeResponse, CreateAuthTokenData, CreateAuthTokenError, CreateAuthTokenResponse2, DeleteAuthTokenData, DeleteAuthTokenError, DeleteAuthTokenResponse, DeleteCustomDomainData, DeleteCustomDomainError, DeleteCustomDomainResponse, DeleteTunnelData, DeleteTunnelError, DeleteTunnelResponse, GetAuthTokenData, GetCurrentUserData, GetCustomDomainData, GetLocalupMetricsData, GetRequestData, GetTunnelData, HealthCheckData, InitiateChallengeData, InitiateChallengeError, InitiateChallengeResponse2, ListAuthTokensData, ListCustomDomainsData, ListRequestsData, ListRequestsError, ListRequestsResponse, ListTcpConnectionsData, ListTcpConnectionsError, ListTcpConnectionsResponse, ListTunnelsData, ListUserTeamsData, LoginData, LoginError, LoginResponse2, LogoutData, LogoutError, RegisterData, RegisterError, RegisterResponse2, ReplayRequestData, ReplayRequestError, ReplayRequestResponse, UpdateAuthTokenData, UpdateAuthTokenError, UpdateAuthTokenResponse, UploadCustomDomainData, UploadCustomDomainError, UploadCustomDomainResponse2 } from '../types.gen';
 
 export type QueryKey<TOptions extends Options> = [
     Pick<TOptions, 'baseUrl' | 'body' | 'headers' | 'path' | 'query'> & {
@@ -159,6 +159,23 @@ export const loginMutation = (options?: Partial<Options<LoginData>>): UseMutatio
     const mutationOptions: UseMutationOptions<LoginResponse2, LoginError, Options<LoginData>> = {
         mutationFn: async (fnOptions) => {
             const { data } = await login({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Logout (clear session cookie)
+ */
+export const logoutMutation = (options?: Partial<Options<LogoutData>>): UseMutationOptions<unknown, LogoutError, Options<LogoutData>> => {
+    const mutationOptions: UseMutationOptions<unknown, LogoutError, Options<LogoutData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await logout({
                 ...options,
                 ...fnOptions,
                 throwOnError: true

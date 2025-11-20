@@ -18,7 +18,7 @@ export default defineConfig({
     proxy: {
       // Proxy API requests to exit node backend during development
       '/api': {
-        target: 'http://localhost:13080',
+        target: 'http://localhost:3080',
         changeOrigin: true,
       },
     },

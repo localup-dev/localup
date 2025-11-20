@@ -1,83 +1,61 @@
-import { useState, useEffect } from 'react';
-import { listAuthTokens, createAuthToken, deleteAuthToken } from '../utils/api';
+import { useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { listAuthTokensOptions, createAuthTokenMutation, deleteAuthTokenMutation } from '../api/client/@tanstack/react-query.gen';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
 import { useTeam } from '../contexts/TeamContext';
 
-interface AuthToken {
-  id: string;
-  name: string;
-  description: string;
-  created_at: string;
-  last_used_at?: string;
-  expires_at?: string;
-  is_active: boolean;
-}
-
 export default function AuthTokens() {
   const { selectedTeam } = useTeam();
-  const [tokens, setTokens] = useState<AuthToken[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const queryClient = useQueryClient();
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [createdTokenExpiresAt, setCreatedTokenExpiresAt] = useState<string | null>(null);
   const [tokenName, setTokenName] = useState('');
   const [tokenDescription, setTokenDescription] = useState('');
   const [expiresInDays, setExpiresInDays] = useState<number | null>(null);
-  const [creating, setCreating] = useState(false);
 
-  useEffect(() => {
-    fetchTokens();
-  }, []);
+  const { data, isLoading, error } = useQuery(listAuthTokensOptions());
+  const tokens = data?.tokens || [];
 
-  const fetchTokens = async () => {
-    try {
-      const data = await listAuthTokens();
-      setTokens(data.tokens || []);
-      setError('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load tokens');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleCreateToken = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setCreating(true);
-
-    try {
-      const response = await createAuthToken({
-        name: tokenName,
-        description: tokenDescription || null,
-        expires_in_days: expiresInDays,
-        team_id: selectedTeam?.id || null,
-      });
+  const createMutation = useMutation({
+    ...createAuthTokenMutation(),
+    onSuccess: (response) => {
       setCreatedToken(response.token);
       setCreatedTokenExpiresAt(response.expires_at || null);
       setTokenName('');
       setTokenDescription('');
       setExpiresInDays(null);
-      await fetchTokens();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create token');
-    } finally {
-      setCreating(false);
-    }
+      // Invalidate and refetch tokens list
+      queryClient.invalidateQueries({ queryKey: listAuthTokensOptions().queryKey });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    ...deleteAuthTokenMutation(),
+    onSuccess: () => {
+      // Invalidate and refetch tokens list
+      queryClient.invalidateQueries({ queryKey: listAuthTokensOptions().queryKey });
+    },
+  });
+
+  const handleCreateToken = async (e: React.FormEvent) => {
+    e.preventDefault();
+    createMutation.mutate({
+      body: {
+        name: tokenName,
+        description: tokenDescription || null,
+        expires_in_days: expiresInDays,
+        team_id: selectedTeam?.id || null,
+      },
+    });
   };
 
   const handleDeleteToken = async (id: string) => {
     if (!confirm('Are you sure you want to delete this token? This action cannot be undone.')) {
       return;
     }
-
-    try {
-      await deleteAuthToken(id);
-      await fetchTokens();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete token');
-    }
+    deleteMutation.mutate({ path: { id } });
   };
 
   const copyToken = () => {
@@ -109,13 +87,13 @@ export default function AuthTokens() {
 
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-6 py-8">
-        {error && (
+        {(error || createMutation.error || deleteMutation.error) && (
           <div className="mb-6 bg-red-900/50 border border-red-500 text-red-200 px-4 py-3 rounded">
-            {error}
+            {error?.message || createMutation.error?.message || deleteMutation.error?.message || 'An error occurred'}
           </div>
         )}
 
-        {loading ? (
+        {isLoading ? (
           <div className="text-center py-12 text-gray-400">Loading tokens...</div>
         ) : tokens.length === 0 ? (
           <div className="bg-gray-800 rounded-lg p-12 text-center">
@@ -307,9 +285,9 @@ export default function AuthTokens() {
                   </Button>
                   <Button
                     type="submit"
-                    disabled={creating}
+                    disabled={createMutation.isPending}
                   >
-                    {creating ? 'Creating...' : 'Create Token'}
+                    {createMutation.isPending ? 'Creating...' : 'Create Token'}
                   </Button>
                 </div>
               </form>

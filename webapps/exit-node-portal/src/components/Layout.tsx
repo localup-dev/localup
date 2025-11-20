@@ -1,6 +1,7 @@
-import { type ReactNode, useState, useEffect } from 'react';
+import { type ReactNode, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
-import { getCurrentUser, logout, type User } from '../utils/auth';
+import { useQuery, useMutation } from '@tanstack/react-query';
+import { getCurrentUserOptions, logoutMutation } from '../api/client/@tanstack/react-query.gen';
 import { useTeam } from '../contexts/TeamContext';
 
 interface LayoutProps {
@@ -9,25 +10,29 @@ interface LayoutProps {
 
 export default function Layout({ children }: LayoutProps) {
   const navigate = useNavigate();
-  const [user, setUser] = useState<User | null>(null);
   const { teams, selectedTeam, selectTeam } = useTeam();
 
-  useEffect(() => {
-    async function checkAuth() {
-      const currentUser = await getCurrentUser();
-      if (!currentUser) {
-        // Not authenticated, redirect to login
-        navigate('/login');
-      } else {
-        setUser(currentUser);
-      }
-    }
-    checkAuth();
-  }, [navigate]);
+  const { data: user, isError } = useQuery({
+    ...getCurrentUserOptions(),
+    retry: false,
+  });
 
-  const handleLogout = async () => {
-    await logout();
-    navigate('/login');
+  // Redirect to login if not authenticated (React Query v5 pattern)
+  useEffect(() => {
+    if (isError) {
+      navigate('/login');
+    }
+  }, [isError, navigate]);
+
+  const logout = useMutation({
+    ...logoutMutation(),
+    onSuccess: () => {
+      navigate('/login');
+    },
+  });
+
+  const handleLogout = () => {
+    logout.mutate({});
   };
 
   return (

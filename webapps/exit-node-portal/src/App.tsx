@@ -11,8 +11,19 @@ import Tunnels from './pages/Tunnels';
 import TunnelDetail from './pages/TunnelDetail';
 import { client } from './api/client/client.gen';
 
+// Configure OpenAPI client with credentials and base URL
+// VITE_API_BASE_URL can be:
+// - undefined/not set: defaults to 'http://localhost:13080'
+// - empty string "": uses relative paths (same origin)
+// - full URL: uses specified backend URL
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL !== undefined
+  ? import.meta.env.VITE_API_BASE_URL
+  : 'http://localhost:13080';
+
 client.setConfig({
-  baseUrl: '',
+  baseUrl: apiBaseUrl,
+  // Include credentials to send HTTP-only session cookies automatically
+  credentials: 'include',
 });
 
 // Note: Auth checking is now handled by individual pages via getCurrentUser() API call

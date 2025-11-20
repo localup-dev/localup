@@ -1134,6 +1134,29 @@ export type LoginResponses = {
 
 export type LoginResponse2 = LoginResponses[keyof LoginResponses];
 
+export type LogoutData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/api/auth/logout';
+};
+
+export type LogoutErrors = {
+    /**
+     * Internal server error
+     */
+    500: ErrorResponse;
+};
+
+export type LogoutError = LogoutErrors[keyof LogoutErrors];
+
+export type LogoutResponses = {
+    /**
+     * Logout successful
+     */
+    200: unknown;
+};
+
 export type GetCurrentUserData = {
     body?: never;
     path?: never;

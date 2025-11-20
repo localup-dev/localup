@@ -1,12 +1,7 @@
 import { createContext, useContext, useState, useEffect, type ReactNode } from 'react';
-
-interface Team {
-  id: string;
-  name: string;
-  slug: string;
-  role: string;
-  created_at: string;
-}
+import { useQuery } from '@tanstack/react-query';
+import { listUserTeamsOptions } from '../api/client/@tanstack/react-query.gen';
+import type { Team } from '../api/client/types.gen';
 
 interface TeamContextType {
   teams: Team[];
@@ -29,39 +24,18 @@ interface TeamProviderProps {
   children: ReactNode;
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:13080';
-
 export const TeamProvider = ({ children }: TeamProviderProps) => {
-  const [teams, setTeams] = useState<Team[]>([]);
   const [selectedTeam, setSelectedTeam] = useState<Team | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
 
+  const { data, isLoading } = useQuery(listUserTeamsOptions());
+  const teams = data?.teams || [];
+
+  // Auto-select first team when data loads
   useEffect(() => {
-    async function loadTeams() {
-      try {
-        setIsLoading(true);
-        const response = await fetch(`${API_BASE_URL}/api/teams`, {
-          credentials: 'include', // Include HTTP-only session cookie
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          setTeams(data.teams);
-
-          // Auto-select first team if none selected
-          if (data.teams.length > 0 && !selectedTeam) {
-            setSelectedTeam(data.teams[0]);
-          }
-        }
-      } catch (error) {
-        console.error('Failed to load teams:', error);
-      } finally {
-        setIsLoading(false);
-      }
+    if (teams.length > 0 && !selectedTeam) {
+      setSelectedTeam(teams[0]);
     }
-
-    loadTeams();
-  }, []);
+  }, [teams, selectedTeam]);
 
   const selectTeam = (team: Team) => {
     setSelectedTeam(team);
