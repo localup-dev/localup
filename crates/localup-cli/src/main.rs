@@ -338,6 +338,16 @@ enum RelayCommands {
         #[arg(long)]
         no_api: bool,
 
+        /// TLS certificate file path (PEM format, for QUIC control plane)
+        /// If not specified, a self-signed certificate is auto-generated
+        #[arg(long)]
+        tls_cert: Option<String>,
+
+        /// TLS private key file path (PEM format, for QUIC control plane)
+        /// If not specified, a self-signed key is auto-generated
+        #[arg(long)]
+        tls_key: Option<String>,
+
         /// TLS certificate path for HTTPS API server (enables HTTPS if provided)
         #[arg(long, env = "API_TLS_CERT")]
         api_tls_cert: Option<String>,
@@ -396,6 +406,16 @@ enum RelayCommands {
         /// Disable API server
         #[arg(long)]
         no_api: bool,
+
+        /// TLS certificate file path (PEM format, for QUIC control plane)
+        /// If not specified, a self-signed certificate is auto-generated
+        #[arg(long)]
+        tls_cert: Option<String>,
+
+        /// TLS private key file path (PEM format, for QUIC control plane)
+        /// If not specified, a self-signed key is auto-generated
+        #[arg(long)]
+        tls_key: Option<String>,
 
         /// Database URL for storing traffic logs
         #[arg(long, env = "DATABASE_URL")]
@@ -1598,6 +1618,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             log_level,
             api_addr,
             no_api,
+            tls_cert,
+            tls_key,
             api_tls_cert,
             api_tls_key,
             database_url,
@@ -1611,8 +1633,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 localup_addr,
                 None, // https_addr
                 None, // tls_addr
-                None, // tls_cert
-                None, // tls_key
+                tls_cert,
+                tls_key,
                 domain,
                 jwt_secret,
                 log_level,
@@ -1639,6 +1661,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             log_level,
             api_addr,
             no_api,
+            tls_cert,
+            tls_key,
             api_tls_cert,
             api_tls_key,
             database_url,
@@ -1652,8 +1676,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 localup_addr,
                 None, // https_addr
                 Some(tls_addr),
-                None, // tls_cert
-                None, // tls_key
+                tls_cert,
+                tls_key,
                 domain,
                 jwt_secret,
                 log_level,
