@@ -21,6 +21,7 @@ fn create_test_config(name: &str, port: u16) -> StoredTunnel {
             exit_node: ExitNodeConfig::Auto,
             failover: true,
             connection_timeout: Duration::from_secs(30),
+            preferred_transport: None,
         },
     }
 }
@@ -258,6 +259,7 @@ fn test_localup_store_protocol_types() {
             exit_node: ExitNodeConfig::Auto,
             failover: true,
             connection_timeout: Duration::from_secs(30),
+            preferred_transport: None,
         },
     };
     store.save(&http_tunnel).unwrap();
@@ -276,6 +278,7 @@ fn test_localup_store_protocol_types() {
             exit_node: ExitNodeConfig::Auto,
             failover: true,
             connection_timeout: Duration::from_secs(30),
+            preferred_transport: None,
         },
     };
     store.save(&https_tunnel).unwrap();
@@ -294,6 +297,7 @@ fn test_localup_store_protocol_types() {
             exit_node: ExitNodeConfig::Auto,
             failover: true,
             connection_timeout: Duration::from_secs(30),
+            preferred_transport: None,
         },
     };
     store.save(&tcp_tunnel).unwrap();
@@ -312,6 +316,7 @@ fn test_localup_store_protocol_types() {
             exit_node: ExitNodeConfig::Auto,
             failover: true,
             connection_timeout: Duration::from_secs(30),
+            preferred_transport: None,
         },
     };
     store.save(&tls_tunnel).unwrap();
@@ -364,6 +369,7 @@ fn test_localup_store_exit_node_configs() {
             exit_node: ExitNodeConfig::Auto,
             failover: true,
             connection_timeout: Duration::from_secs(30),
+            preferred_transport: None,
         },
     };
     store.save(&auto_tunnel).unwrap();
@@ -382,6 +388,7 @@ fn test_localup_store_exit_node_configs() {
             exit_node: ExitNodeConfig::Custom("relay.example.com:8080".to_string()),
             failover: true,
             connection_timeout: Duration::from_secs(30),
+            preferred_transport: None,
         },
     };
     store.save(&custom_tunnel).unwrap();
@@ -412,6 +419,7 @@ fn test_localup_store_serialization_roundtrip() {
             exit_node: ExitNodeConfig::Custom("custom-relay.example.com:9999".to_string()),
             failover: false,
             connection_timeout: Duration::from_secs(60),
+            preferred_transport: None,
         },
     };
 

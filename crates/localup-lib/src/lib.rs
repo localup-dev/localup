@@ -210,8 +210,16 @@ pub mod relay;
 pub mod relay_config;
 pub use relay::{
     generate_token, HttpsRelayBuilder, SimplePortAllocator, TcpRelayBuilder, TlsRelayBuilder,
+    TransportConfigs,
 };
 pub use relay_config::{
     CertificateData, CertificateProvider, ConfigError, InMemoryTunnelStorage,
     SelfSignedCertificateProvider, TunnelRecord, TunnelStorage,
 };
+
+// Re-export protocol discovery types
+pub use localup_proto::{ProtocolDiscoveryResponse, TransportEndpoint, TransportProtocol};
+
+// Re-export additional transport types
+pub use localup_transport_h2::{H2Config, H2Connector, H2Listener};
+pub use localup_transport_websocket::{WebSocketConfig, WebSocketConnector, WebSocketListener};

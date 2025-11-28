@@ -18,6 +18,8 @@ members = [
     "crates/localup-relay-db",
     "crates/localup-transport",
     "crates/localup-transport-quic",
+    "crates/localup-transport-websocket",
+    "crates/localup-transport-h2",
     "crates/localup-agent",
     "crates/localup-agent-server",
 ]

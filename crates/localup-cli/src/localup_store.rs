@@ -200,6 +200,7 @@ mod tests {
                 exit_node: ExitNodeConfig::Auto,
                 failover: true,
                 connection_timeout: Duration::from_secs(30),
+                preferred_transport: None,
             },
         }
     }

@@ -133,6 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         exit_node: ExitNodeConfig::Custom("127.0.0.1:4443".to_string()),
         failover: false,
         connection_timeout: std::time::Duration::from_secs(5),
+        preferred_transport: None,
     };
 
     match TunnelClient::connect(tunnel_config).await {

@@ -1,6 +1,6 @@
 //! Client configuration
 
-use localup_proto::ExitNodeConfig;
+use localup_proto::{ExitNodeConfig, TransportProtocol};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -41,6 +41,9 @@ pub struct TunnelConfig {
     pub failover: bool,
     #[serde(with = "duration_secs")]
     pub connection_timeout: Duration,
+    /// Preferred transport protocol (None = auto-discover and select best)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_transport: Option<TransportProtocol>,
 }
 
 /// Helper module for serializing Duration as seconds
@@ -73,6 +76,7 @@ impl Default for TunnelConfig {
             exit_node: ExitNodeConfig::Auto,
             failover: true,
             connection_timeout: Duration::from_secs(30),
+            preferred_transport: None, // Auto-discover
         }
     }
 }
@@ -112,6 +116,11 @@ impl TunnelConfigBuilder {
 
     pub fn failover(mut self, enabled: bool) -> Self {
         self.config.failover = enabled;
+        self
+    }
+
+    pub fn preferred_transport(mut self, transport: Option<TransportProtocol>) -> Self {
+        self.config.preferred_transport = transport;
         self
     }
 

@@ -25,5 +25,8 @@ pub use metrics_db::DbMetricsStore;
 pub mod localup;
 pub use localup::{TunnelConnection, TunnelConnector};
 
+pub mod transport_discovery;
+pub use transport_discovery::{DiscoveredTransport, TransportDiscoverer, TransportDiscoveryError};
+
 pub mod reverse_tunnel;
 pub use reverse_tunnel::{ReverseTunnelClient, ReverseTunnelConfig, ReverseTunnelError};

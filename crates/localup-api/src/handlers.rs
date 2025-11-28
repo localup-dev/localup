@@ -2205,3 +2205,33 @@ pub async fn delete_auth_token(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// Get available transport protocols (well-known endpoint)
+///
+/// This endpoint is used by clients to discover which transport protocols
+/// are available on this relay (QUIC, WebSocket, HTTP/2).
+#[utoipa::path(
+    get,
+    path = "/.well-known/localup-protocols",
+    responses(
+        (status = 200, description = "Protocol discovery response", body = ProtocolDiscoveryResponse),
+        (status = 204, description = "Protocol discovery not configured")
+    ),
+    tag = "discovery"
+)]
+pub async fn protocol_discovery(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match &state.protocol_discovery {
+        Some(discovery) => {
+            debug!(
+                "Protocol discovery request, returning {} transports",
+                discovery.transports.len()
+            );
+            Json(discovery.clone()).into_response()
+        }
+        None => {
+            // Return default QUIC-only response if not configured
+            let default_discovery = localup_proto::ProtocolDiscoveryResponse::quic_only(4443);
+            Json(default_discovery).into_response()
+        }
+    }
+}

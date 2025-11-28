@@ -12,7 +12,15 @@ localup-connection = { path = "../localup-connection" }
 localup-auth = { path = "../localup-auth" }
 localup-transport = { path = "../localup-transport" }
 localup-transport-quic = { path = "../localup-transport-quic" }
+localup-transport-websocket = { path = "../localup-transport-websocket" }
+localup-transport-h2 = { path = "../localup-transport-h2" }
 localup-relay-db = { path = "../localup-relay-db", optional = true }
+
+# TLS for transport discovery
+rustls = { workspace = true }
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
+url = "2.5"
 
 # Database (optional)
 sea-orm = { workspace = true, optional = true }
@@ -32,6 +40,7 @@ serde_json = { workspace = true }
 serde_yaml = "0.9"
 bytes = { workspace = true }
 scopeguard = "1.2"
+async-trait = { workspace = true }
 
 # HTTP client for replay
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }

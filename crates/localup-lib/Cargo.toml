@@ -18,6 +18,8 @@ localup-cert = { path = "../localup-cert" }
 localup-control = { path = "../localup-control" }
 localup-transport = { path = "../localup-transport" }
 localup-transport-quic = { path = "../localup-transport-quic" }
+localup-transport-websocket = { path = "../localup-transport-websocket" }
+localup-transport-h2 = { path = "../localup-transport-h2" }
 localup-relay-db = { path = "../localup-relay-db", optional = true }
 
 tokio = { workspace = true }

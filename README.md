@@ -1,11 +1,12 @@
 # Geo-Distributed Tunnel System
 
-A QUIC-based tunnel system for exposing local servers through geographically distributed exit nodes with support for multiple protocols (TCP, TLS/SNI, HTTP, HTTPS).
+A multi-transport tunnel system for exposing local servers through geographically distributed exit nodes with support for multiple protocols (TCP, TLS/SNI, HTTP, HTTPS).
 
 ## ✨ Features
 
 - 🌍 **Multi-Protocol Support**: TCP, TLS/SNI passthrough, HTTP, HTTPS
-- 🚀 **QUIC-Native Transport**: Built-in multiplexing, 0-RTT connections, TLS 1.3
+- 🚀 **Multi-Transport Layer**: QUIC (best performance), WebSocket (firewall-friendly), HTTP/2 (most compatible)
+- 🔍 **Automatic Protocol Discovery**: Clients auto-detect available transports via `/.well-known/localup-protocols`
 - 🔒 **Automatic HTTPS**: Let's Encrypt integration with auto-renewal
 - 🎯 **Flexible Routing**: Port-based (TCP), SNI-based (TLS), Host-based (HTTP/HTTPS)
 - 🔄 **Smart Reconnection**: Automatic reconnection with port/subdomain preservation
@@ -276,6 +277,72 @@ localup relay http [OPTIONS]
 --tls-key <PATH>              TLS private key file (PEM format, required if --https-addr used)
 ```
 
+### Multi-Transport Options
+
+The relay supports different transport protocols for the control plane. Choose ONE based on your network environment:
+
+| Transport | Protocol | Best For |
+|-----------|----------|----------|
+| **quic** (default) | UDP | Best performance, 0-RTT connections |
+| **websocket** | TCP/TLS | Corporate firewalls blocking UDP |
+| **h2** | TCP/TLS | Most restrictive environments |
+
+```bash
+localup relay http [OPTIONS]
+
+--transport <TRANSPORT>       Transport protocol: quic, websocket, h2 [default: quic]
+--localup-addr <ADDR>         Control plane address [default: 0.0.0.0:4443]
+--websocket-path <PATH>       WebSocket endpoint path [default: /localup]
+                              (only used with --transport websocket)
+```
+
+**Example: WebSocket transport on port 443 (bypasses most firewalls)**
+
+```bash
+localup relay http \
+  --localup-addr "0.0.0.0:443" \
+  --http-addr "0.0.0.0:80" \
+  --domain "relay.example.com" \
+  --tls-cert cert.pem --tls-key key.pem \
+  --jwt-secret "my-jwt-secret" \
+  --transport websocket --websocket-path /localup
+```
+
+This exposes:
+- **HTTP** tunnel traffic on port 80
+- **WebSocket** control plane on port 443 at `/localup`
+
+### Protocol Discovery
+
+Clients automatically discover the available transport by fetching:
+
+```
+GET /.well-known/localup-protocols
+```
+
+Response example (WebSocket enabled):
+```json
+{
+  "version": 1,
+  "relay_id": "relay-001",
+  "transports": [
+    {"protocol": "websocket", "port": 443, "path": "/localup", "enabled": true}
+  ],
+  "protocol_version": 1
+}
+```
+
+Response example (QUIC default):
+```json
+{
+  "version": 1,
+  "transports": [
+    {"protocol": "quic", "port": 4443, "enabled": true}
+  ],
+  "protocol_version": 1
+}
+```
+
 ### Client Options
 
 ```bash
@@ -366,6 +433,11 @@ openssl req -x509 -newkey rsa:4096 -nodes \
 **"Connection refused"**
 - Verify relay is running: `lsof -i :14443`
 - Check firewall allows UDP (QUIC uses port 4443/UDP)
+- If behind corporate firewall blocking UDP, use WebSocket transport:
+  ```bash
+  # Use WebSocket on port 443 (standard HTTPS)
+  localup relay http --transport websocket --localup-addr 0.0.0.0:443 ...
+  ```
 
 **"Authentication failed"**
 - Verify JWT token matches relay secret

@@ -1,0 +1,39 @@
+[package]
+name = "localup-transport-h2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Internal dependencies
+localup-proto = { path = "../localup-proto" }
+localup-transport = { path = "../localup-transport" }
+localup-cert = { path = "../localup-cert" }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+
+# HTTP/2
+h2 = "0.4"
+
+# TLS
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# HTTP types
+http = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+uuid = { version = "1.11", features = ["v4"] }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }

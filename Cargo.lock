@@ -124,6 +124,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69f7f8c3906b62b754cd5326047894316021dcfe5a194c8ea52bdd94934a3457"
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -284,6 +290,28 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.106",
+]
+
+[[package]]
+name = "axum-server"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1ab4a3ec9ea8a657c72d99a03a824af695bd0fb5ec639ccbd9cd3543b41a5f9"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "fs-err",
+ "http 1.3.1",
+ "http-body 1.0.1",
+ "hyper 1.7.0",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls 0.23.32",
+ "rustls-pemfile 2.2.0",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tower-service",
 ]
 
 [[package]]
@@ -991,6 +1019,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fs-err"
+version = "3.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62d91fd049c123429b018c47887d3f75a265540dd3c30ba9cb7bae9197edb03a"
+dependencies = [
+ "autocfg",
+ "tokio",
 ]
 
 [[package]]
@@ -1918,6 +1956,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "axum-server",
  "base64 0.22.1",
  "chrono",
  "localup-auth",
@@ -1927,6 +1966,7 @@ dependencies = [
  "localup-relay-db",
  "mime_guess",
  "rust-embed",
+ "rustls 0.23.32",
  "sea-orm",
  "sea-orm-migration",
  "serde",
@@ -2001,7 +2041,9 @@ dependencies = [
  "localup-server-tcp-proxy",
  "localup-server-tls",
  "localup-transport",
+ "localup-transport-h2",
  "localup-transport-quic",
+ "localup-transport-websocket",
  "rustls 0.23.32",
  "sea-orm",
  "serde",
@@ -2017,6 +2059,7 @@ dependencies = [
 name = "localup-client"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "bincode",
  "bytes",
@@ -2031,7 +2074,9 @@ dependencies = [
  "localup-proto",
  "localup-relay-db",
  "localup-transport",
+ "localup-transport-h2",
  "localup-transport-quic",
+ "localup-transport-websocket",
  "mime_guess",
  "problem_details",
  "rcgen 0.12.1",
@@ -2052,9 +2097,11 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "url",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -2149,7 +2196,9 @@ dependencies = [
  "localup-server-tcp-proxy",
  "localup-server-tls",
  "localup-transport",
+ "localup-transport-h2",
  "localup-transport-quic",
+ "localup-transport-websocket",
  "rcgen 0.13.2",
  "rustls 0.23.32",
  "thiserror 1.0.69",
@@ -2172,6 +2221,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 
@@ -2299,6 +2349,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "localup-transport-h2"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "h2 0.4.12",
+ "http 1.3.1",
+ "localup-cert",
+ "localup-proto",
+ "localup-transport",
+ "rustls 0.23.32",
+ "rustls-pemfile 2.2.0",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
 name = "localup-transport-quic"
 version = "0.1.0"
 dependencies = [
@@ -2314,6 +2387,29 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "localup-transport-websocket"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures-util",
+ "localup-cert",
+ "localup-proto",
+ "localup-transport",
+ "rustls 0.23.32",
+ "rustls-pemfile 2.2.0",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
  "uuid",
  "webpki-roots 0.26.11",
 ]
@@ -4319,6 +4415,22 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls 0.23.32",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tungstenite 0.24.0",
+]
+
+[[package]]
+name = "tokio-tungstenite"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
@@ -4510,6 +4622,26 @@ dependencies = [
  "sha1",
  "thiserror 1.0.69",
  "url",
+ "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18e5b8366ee7a95b16d32197d0b2604b43a0be89dc5fac9f8e96ccafbaedda8a"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http 1.3.1",
+ "httparse",
+ "log",
+ "rand 0.8.5",
+ "rustls 0.23.32",
+ "rustls-pki-types",
+ "sha1",
+ "thiserror 1.0.69",
  "utf-8",
 ]
 

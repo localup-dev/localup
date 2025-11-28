@@ -49,6 +49,10 @@ struct Cli {
     #[arg(short, long, env)]
     relay: Option<String>,
 
+    /// Preferred transport protocol (quic, h2, websocket) - auto-discovers if not specified (standalone mode only)
+    #[arg(long)]
+    transport: Option<String>,
+
     /// Remote port for TCP/TLS tunnels (standalone mode only)
     #[arg(long)]
     remote_port: Option<u16>,
@@ -93,6 +97,9 @@ enum Commands {
         /// Relay server address (host:port)
         #[arg(short, long)]
         relay: Option<String>,
+        /// Preferred transport protocol (quic, h2, websocket) - auto-discovers if not specified
+        #[arg(long)]
+        transport: Option<String>,
         /// Remote port for TCP/TLS tunnels
         #[arg(long)]
         remote_port: Option<u16>,
@@ -251,6 +258,10 @@ enum Commands {
         #[arg(long)]
         sub: Option<String>,
 
+        /// User ID who owns this token (required for authenticated tunnels, must be a valid UUID)
+        #[arg(long)]
+        user_id: Option<String>,
+
         /// Token validity in hours (default: 24)
         #[arg(long, default_value = "24")]
         hours: i64,
@@ -282,6 +293,7 @@ enum Commands {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::enum_variant_names)]
 enum ConfigCommands {
     /// Set the default authentication token
     SetToken {
@@ -325,6 +337,14 @@ enum RelayCommands {
         /// Disable API server
         #[arg(long)]
         no_api: bool,
+
+        /// TLS certificate path for HTTPS API server (enables HTTPS if provided)
+        #[arg(long, env = "API_TLS_CERT")]
+        api_tls_cert: Option<String>,
+
+        /// TLS private key path for HTTPS API server (required if api_tls_cert is set)
+        #[arg(long, env = "API_TLS_KEY")]
+        api_tls_key: Option<String>,
 
         /// Database URL for storing traffic logs
         #[arg(long, env = "DATABASE_URL")]
@@ -396,6 +416,14 @@ enum RelayCommands {
         /// Allow public user registration (disabled by default for security)
         #[arg(long, env = "ALLOW_SIGNUP")]
         allow_signup: bool,
+
+        /// TLS certificate path for HTTPS API server (enables HTTPS if provided)
+        #[arg(long, env = "API_TLS_CERT")]
+        api_tls_cert: Option<String>,
+
+        /// TLS private key path for HTTPS API server (required if api_tls_cert is set)
+        #[arg(long, env = "API_TLS_KEY")]
+        api_tls_key: Option<String>,
     },
 
     /// HTTP/HTTPS relay (host-based routing with TLS termination)
@@ -459,7 +487,44 @@ enum RelayCommands {
         /// Allow public user registration (disabled by default for security)
         #[arg(long, env = "ALLOW_SIGNUP")]
         allow_signup: bool,
+
+        /// TLS certificate path for HTTPS API server (enables HTTPS if provided)
+        #[arg(long, env = "API_TLS_CERT")]
+        api_tls_cert: Option<String>,
+
+        /// TLS private key path for HTTPS API server (required if api_tls_cert is set)
+        #[arg(long, env = "API_TLS_KEY")]
+        api_tls_key: Option<String>,
+
+        /// Transport protocol for tunnel control plane: quic (default), websocket, h2
+        #[arg(long, default_value = "quic", value_parser = parse_transport)]
+        transport: TransportType,
+
+        /// WebSocket endpoint path (only used with --transport websocket)
+        #[arg(long, default_value = "/localup")]
+        websocket_path: String,
     },
+}
+
+/// Transport protocol type for the control plane
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransportType {
+    #[default]
+    Quic,
+    WebSocket,
+    H2,
+}
+
+fn parse_transport(s: &str) -> Result<TransportType, String> {
+    match s.to_lowercase().as_str() {
+        "quic" => Ok(TransportType::Quic),
+        "websocket" | "ws" => Ok(TransportType::WebSocket),
+        "h2" | "http2" => Ok(TransportType::H2),
+        _ => Err(format!(
+            "Invalid transport '{}'. Valid options: quic, websocket, h2",
+            s
+        )),
+    }
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -511,8 +576,9 @@ async fn main() -> Result<()> {
             protocol,
             token,
             subdomain,
-            domain,
+            domain: _,
             relay,
+            transport,
             remote_port,
             enabled,
         }) => handle_add_tunnel(
@@ -523,6 +589,7 @@ async fn main() -> Result<()> {
             token,
             subdomain,
             relay,
+            transport,
             remote_port,
             enabled,
         ),
@@ -601,6 +668,7 @@ async fn main() -> Result<()> {
         Some(Commands::GenerateToken {
             secret,
             sub,
+            user_id,
             hours,
             reverse_tunnel,
             allowed_agents,
@@ -610,6 +678,7 @@ async fn main() -> Result<()> {
             handle_generate_token_command(
                 secret,
                 sub,
+                user_id,
                 hours,
                 reverse_tunnel,
                 allowed_agents,
@@ -694,6 +763,7 @@ fn handle_add_tunnel(
     token: Option<String>,
     subdomain: Option<String>,
     relay: Option<String>,
+    transport: Option<String>,
     remote_port: Option<u16>,
     enabled: bool,
 ) -> Result<()> {
@@ -723,6 +793,16 @@ fn handle_add_tunnel(
         ExitNodeConfig::Auto
     };
 
+    // Parse preferred transport
+    let preferred_transport =
+        if let Some(transport_str) = transport {
+            Some(transport_str.parse().map_err(|e: String| {
+                anyhow::anyhow!("Invalid transport '{}': {}", transport_str, e)
+            })?)
+        } else {
+            None
+        };
+
     // Create tunnel config
     let config = TunnelConfig {
         local_host,
@@ -731,6 +811,7 @@ fn handle_add_tunnel(
         exit_node,
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport,
     };
 
     let stored_tunnel = localup_store::StoredTunnel {
@@ -955,6 +1036,16 @@ async fn run_standalone(cli: Cli) -> Result<()> {
         ExitNodeConfig::Auto
     };
 
+    // Parse preferred transport
+    let preferred_transport =
+        if let Some(transport_str) = cli.transport {
+            Some(transport_str.parse().map_err(|e: String| {
+                anyhow::anyhow!("Invalid transport '{}': {}", transport_str, e)
+            })?)
+        } else {
+            None
+        };
+
     // Build tunnel configuration
     let config = TunnelConfig {
         local_host,
@@ -963,6 +1054,7 @@ async fn run_standalone(cli: Cli) -> Result<()> {
         exit_node,
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport,
     };
 
     // Create cancellation token for Ctrl+C
@@ -1506,6 +1598,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             log_level,
             api_addr,
             no_api,
+            api_tls_cert,
+            api_tls_key,
             database_url,
             admin_email,
             admin_password,
@@ -1525,11 +1619,15 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 Some(tcp_port_range),
                 api_addr,
                 no_api,
+                api_tls_cert,
+                api_tls_key,
                 database_url,
                 admin_email,
                 admin_password,
                 admin_username,
                 allow_signup,
+                TransportType::Quic,    // transport (TCP relay always uses QUIC)
+                "/localup".to_string(), // websocket_path (unused)
             )
             .await
         }
@@ -1541,6 +1639,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             log_level,
             api_addr,
             no_api,
+            api_tls_cert,
+            api_tls_key,
             database_url,
             admin_email,
             admin_password,
@@ -1560,11 +1660,15 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 None, // tcp_port_range
                 api_addr,
                 no_api,
+                api_tls_cert,
+                api_tls_key,
                 database_url,
                 admin_email,
                 admin_password,
                 admin_username,
                 allow_signup,
+                TransportType::Quic,    // transport (TLS relay always uses QUIC)
+                "/localup".to_string(), // websocket_path (unused)
             )
             .await
         }
@@ -1579,11 +1683,15 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             log_level,
             api_addr,
             no_api,
+            api_tls_cert,
+            api_tls_key,
             database_url,
             admin_email,
             admin_password,
             admin_username,
             allow_signup,
+            transport,
+            websocket_path,
         } => {
             handle_relay_command(
                 http_addr,
@@ -1598,11 +1706,15 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 None, // tcp_port_range
                 api_addr,
                 no_api,
+                api_tls_cert,
+                api_tls_key,
                 database_url,
                 admin_email,
                 admin_password,
                 admin_username,
                 allow_signup,
+                transport,
+                websocket_path,
             )
             .await
         }
@@ -1623,11 +1735,15 @@ async fn handle_relay_command(
     tcp_port_range: Option<String>,
     api_addr: String,
     no_api: bool,
+    api_tls_cert: Option<String>,
+    api_tls_key: Option<String>,
     database_url: Option<String>,
     admin_email: Option<String>,
     admin_password: Option<String>,
     admin_username: Option<String>,
     allow_signup: bool,
+    transport: TransportType,
+    websocket_path: String,
 ) -> Result<()> {
     use localup_auth::JwtValidator;
     use localup_control::{
@@ -1983,39 +2099,130 @@ async fn handle_relay_command(
     };
 
     let localup_addr_parsed: SocketAddr = localup_addr.parse()?;
-    let quic_listener = QuicListener::new(localup_addr_parsed, quic_config)?;
 
-    info!(
-        "🔌 Tunnel control listening on {} (QUIC with TLS 1.3)",
-        localup_addr
-    );
-    info!("🔐 All tunnel traffic is encrypted end-to-end");
+    // Start the transport listener based on selected transport type
+    let localup_handle = match transport {
+        TransportType::Quic => {
+            let quic_listener = QuicListener::new(localup_addr_parsed, quic_config)?;
+            info!("🔌 Tunnel control listening on {} (QUIC/UDP)", localup_addr);
+            info!("🔐 All tunnel traffic is encrypted end-to-end");
 
-    let localup_handle = tokio::spawn(async move {
-        info!("🎯 QUIC accept loop started, waiting for connections...");
-        loop {
-            match quic_listener.accept().await {
-                Ok((connection, peer_addr)) => {
-                    info!("🔗 New tunnel connection from {}", peer_addr);
-                    let handler = localup_handler.clone();
-                    let conn = Arc::new(connection);
-                    tokio::spawn(async move {
-                        handler.handle_connection(conn, peer_addr).await;
-                    });
-                }
-                Err(e) => {
-                    error!("❌ Failed to accept QUIC connection: {}", e);
-                    if e.to_string().contains("endpoint closed")
-                        || e.to_string().contains("Endpoint closed")
-                    {
-                        error!("🛑 QUIC endpoint closed, stopping accept loop");
-                        break;
+            let handler = localup_handler.clone();
+            tokio::spawn(async move {
+                info!("🎯 QUIC accept loop started, waiting for connections...");
+                loop {
+                    match quic_listener.accept().await {
+                        Ok((connection, peer_addr)) => {
+                            info!("🔗 New QUIC tunnel connection from {}", peer_addr);
+                            let h = handler.clone();
+                            let conn = Arc::new(connection);
+                            tokio::spawn(async move {
+                                h.handle_connection(conn, peer_addr).await;
+                            });
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to accept QUIC connection: {}", e);
+                            if e.to_string().contains("endpoint closed")
+                                || e.to_string().contains("Endpoint closed")
+                            {
+                                error!("🛑 QUIC endpoint closed, stopping accept loop");
+                                break;
+                            }
+                        }
                     }
                 }
-            }
+                error!("⚠️  QUIC accept loop exited unexpectedly!");
+            })
         }
-        error!("⚠️  QUIC accept loop exited unexpectedly!");
-    });
+        TransportType::WebSocket => {
+            use localup_transport_websocket::{WebSocketConfig, WebSocketListener};
+
+            let ws_config = match (&tls_cert, &tls_key) {
+                (Some(cert), Some(key)) => {
+                    info!("🔐 Using custom TLS certificates for WebSocket");
+                    WebSocketConfig::server_default(cert, key)?
+                }
+                _ => {
+                    info!("🔐 Generating ephemeral self-signed certificate for WebSocket...");
+                    WebSocketConfig::server_self_signed()?
+                }
+            };
+
+            let mut ws_config = ws_config;
+            ws_config.path = websocket_path.clone();
+            let ws_config = Arc::new(ws_config);
+
+            let listener = WebSocketListener::new(localup_addr_parsed, ws_config)?;
+            info!(
+                "🔌 Tunnel control listening on wss://{}{} (WebSocket/TCP)",
+                localup_addr, websocket_path
+            );
+            info!("🔐 All tunnel traffic is encrypted end-to-end");
+
+            let handler = localup_handler.clone();
+            tokio::spawn(async move {
+                info!("🎯 WebSocket accept loop started, waiting for connections...");
+                loop {
+                    match listener.accept().await {
+                        Ok((connection, peer_addr)) => {
+                            info!("🔗 New WebSocket tunnel connection from {}", peer_addr);
+                            let h = handler.clone();
+                            let conn = Arc::new(connection);
+                            tokio::spawn(async move {
+                                h.handle_connection(conn, peer_addr).await;
+                            });
+                        }
+                        Err(e) => {
+                            error!("❌ WebSocket accept error: {}", e);
+                        }
+                    }
+                }
+            })
+        }
+        TransportType::H2 => {
+            use localup_transport_h2::{H2Config, H2Listener};
+
+            let h2_config = match (&tls_cert, &tls_key) {
+                (Some(cert), Some(key)) => {
+                    info!("🔐 Using custom TLS certificates for HTTP/2");
+                    H2Config::server_default(cert, key)?
+                }
+                _ => {
+                    info!("🔐 Generating ephemeral self-signed certificate for HTTP/2...");
+                    H2Config::server_self_signed()?
+                }
+            };
+
+            let h2_config = Arc::new(h2_config);
+
+            let listener = H2Listener::new(localup_addr_parsed, h2_config)?;
+            info!(
+                "🔌 Tunnel control listening on {} (HTTP/2/TCP)",
+                localup_addr
+            );
+            info!("🔐 All tunnel traffic is encrypted end-to-end");
+
+            let handler = localup_handler.clone();
+            tokio::spawn(async move {
+                info!("🎯 HTTP/2 accept loop started, waiting for connections...");
+                loop {
+                    match listener.accept().await {
+                        Ok((connection, peer_addr)) => {
+                            info!("🔗 New HTTP/2 tunnel connection from {}", peer_addr);
+                            let h = handler.clone();
+                            let conn = Arc::new(connection);
+                            tokio::spawn(async move {
+                                h.handle_connection(conn, peer_addr).await;
+                            });
+                        }
+                        Err(e) => {
+                            error!("❌ HTTP/2 accept error: {}", e);
+                        }
+                    }
+                }
+            })
+        }
+    };
 
     // Start API server for dashboard/management
     let api_handle = if !no_api {
@@ -2023,10 +2230,59 @@ async fn handle_relay_command(
         let api_localup_manager = localup_manager.clone();
         let api_db = db.clone();
         let api_allow_signup = allow_signup;
+        let api_tls_cert_clone = api_tls_cert.clone();
+        let api_tls_key_clone = api_tls_key.clone();
 
-        info!("Starting API server on {}", api_addr_parsed);
-        info!("OpenAPI spec: http://{}/api/openapi.json", api_addr_parsed);
-        info!("Swagger UI: http://{}/swagger-ui", api_addr_parsed);
+        // Build protocol discovery response based on enabled transports
+        use localup_proto::{ProtocolDiscoveryResponse, TransportEndpoint, TransportProtocol};
+        let localup_addr_parsed: SocketAddr = localup_addr.parse()?;
+        let mut transports = Vec::new();
+
+        match transport {
+            TransportType::Quic => {
+                transports.push(TransportEndpoint {
+                    protocol: TransportProtocol::Quic,
+                    port: localup_addr_parsed.port(),
+                    path: None,
+                    enabled: true,
+                });
+            }
+            TransportType::H2 => {
+                transports.push(TransportEndpoint {
+                    protocol: TransportProtocol::H2,
+                    port: localup_addr_parsed.port(),
+                    path: None,
+                    enabled: true,
+                });
+            }
+            TransportType::WebSocket => {
+                transports.push(TransportEndpoint {
+                    protocol: TransportProtocol::WebSocket,
+                    port: localup_addr_parsed.port(),
+                    path: Some(websocket_path.clone()),
+                    enabled: true,
+                });
+            }
+        }
+
+        let protocol_discovery = ProtocolDiscoveryResponse {
+            version: 1,
+            relay_id: Some(domain.clone()),
+            transports,
+            protocol_version: 1,
+        };
+
+        let protocol = if api_tls_cert.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        info!("Starting API server on {}://{}", protocol, api_addr_parsed);
+        info!(
+            "OpenAPI spec: {}://{}/api/openapi.json",
+            protocol, api_addr_parsed
+        );
+        info!("Swagger UI: {}://{}/swagger-ui", protocol, api_addr_parsed);
 
         Some(tokio::spawn(async move {
             use localup_api::{ApiServer, ApiServerConfig};
@@ -2045,9 +2301,17 @@ async fn handle_relay_command(
                     "http://127.0.0.1:3002".to_string(),
                 ]),
                 jwt_secret: jwt_secret.clone(),
+                tls_cert_path: api_tls_cert_clone,
+                tls_key_path: api_tls_key_clone,
             };
 
-            let server = ApiServer::new(config, api_localup_manager, api_db, api_allow_signup);
+            let server = ApiServer::with_protocol_discovery(
+                config,
+                api_localup_manager,
+                api_db,
+                api_allow_signup,
+                protocol_discovery,
+            );
             if let Err(e) = server.start().await {
                 error!("API server error: {}", e);
             }
@@ -2199,6 +2463,7 @@ async fn handle_agent_server_command(
 async fn handle_generate_token_command(
     secret: String,
     sub: Option<String>,
+    user_id: Option<String>,
     hours: i64,
     reverse_tunnel: bool,
     allowed_agents: Vec<String>,
@@ -2219,6 +2484,11 @@ async fn handle_generate_token_command(
         "localup-client".to_string(),
         Duration::hours(hours),
     );
+
+    // Add user_id if provided
+    if let Some(uid) = user_id {
+        claims = claims.with_user_id(uid);
+    }
 
     // Add reverse tunnel configuration if enabled
     if reverse_tunnel {

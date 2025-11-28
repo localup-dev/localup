@@ -351,9 +351,9 @@ impl TunnelHandler {
             }
         }
 
-        // Register the tunnel connection
-        // Note: We need to downcast to QuicConnection since connection_manager stores Arc<QuicConnection>
-        // This is a temporary limitation until we make connection_manager fully generic
+        // Register the tunnel connection (optional - only for QUIC connections)
+        // Note: Connection manager is primarily used for reverse tunnels and TCP proxies.
+        // For HTTP/HTTPS tunnels, routing is handled by route_registry instead.
         let quic_conn = connection.clone();
         if let Ok(quic_conn) = (quic_conn as Arc<dyn std::any::Any + Send + Sync>)
             .downcast::<localup_transport_quic::QuicConnection>()
@@ -361,9 +361,15 @@ impl TunnelHandler {
             self.connection_manager
                 .register(localup_id.clone(), endpoints.clone(), quic_conn)
                 .await;
+            debug!(
+                "Registered QUIC connection in connection manager for tunnel {}",
+                localup_id
+            );
         } else {
-            error!("Failed to downcast connection to QuicConnection");
-            return Err("Failed to downcast connection".to_string());
+            debug!(
+                "Connection for tunnel {} is not QUIC (likely H2/WebSocket), skipping connection manager registration",
+                localup_id
+            );
         }
 
         info!(
@@ -1364,7 +1370,9 @@ impl TunnelHandler {
                 .await;
             debug!("Agent connection stored for routing: {}", agent_id);
         } else {
-            error!("Failed to downcast agent connection to QuicConnection");
+            // Note: Reverse tunnels currently require QUIC transport for connection manager
+            // H2/WebSocket support for reverse tunnels is not yet implemented
+            error!("Failed to downcast agent connection to QuicConnection - reverse tunnels require QUIC transport");
             registry.unregister(&agent_id);
             return;
         }
@@ -1762,6 +1770,31 @@ impl TunnelHandler {
                 let host = format!("{}.{}", subdomain_str, self.domain);
 
                 let route_key = RouteKey::HttpHost(host.clone());
+
+                // Check if route already exists
+                if self.route_registry.exists(&route_key) {
+                    if let Ok(existing_target) = self.route_registry.lookup(&route_key) {
+                        if existing_target.localup_id == localup_id {
+                            // Same tunnel ID reconnecting - force cleanup of old route
+                            warn!(
+                                "Route {} already exists for the same tunnel {}. Force cleaning up old route (likely a reconnect).",
+                                host, localup_id
+                            );
+                            let _ = self.route_registry.unregister(&route_key);
+                        } else {
+                            // Different tunnel ID - this is a real conflict
+                            error!(
+                                "Route {} already exists for different tunnel {} (current tunnel: {}). Route conflict!",
+                                host, existing_target.localup_id, localup_id
+                            );
+                            return Err(format!(
+                                "Subdomain '{}' is already taken by another tunnel",
+                                subdomain_str
+                            ));
+                        }
+                    }
+                }
+
                 let route_target = RouteTarget {
                     localup_id: localup_id.to_string(),
                     target_addr: format!("tunnel:{}", localup_id), // Special marker for tunnel routing
@@ -1770,9 +1803,12 @@ impl TunnelHandler {
 
                 self.route_registry
                     .register(route_key, route_target)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| {
+                        error!("Failed to register route {}: {}", host, e);
+                        e.to_string()
+                    })?;
 
-                debug!("Registered route: {} -> tunnel:{}", host, localup_id);
+                info!("✅ Registered route: {} -> tunnel:{}", host, localup_id);
                 Ok(None)
             }
             Protocol::Tcp { port } => {
@@ -1854,8 +1890,17 @@ impl TunnelHandler {
                     let host = format!("{}.{}", subdomain_str, self.domain);
 
                     let route_key = RouteKey::HttpHost(host.clone());
-                    let _ = self.route_registry.unregister(&route_key);
-                    debug!("Unregistered route: {}", host);
+                    match self.route_registry.unregister(&route_key) {
+                        Ok(_) => {
+                            info!("🗑️  Unregistered route: {} (tunnel: {})", host, localup_id);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to unregister route {}: {} (may already be removed)",
+                                host, e
+                            );
+                        }
+                    }
                 }
             }
             Protocol::Tcp { .. } => {

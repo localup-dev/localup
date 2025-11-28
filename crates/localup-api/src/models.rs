@@ -640,3 +640,6 @@ pub struct UpdateAuthTokenRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_active: Option<bool>,
 }
+
+// Re-export protocol discovery types with ToSchema
+pub use localup_proto::{ProtocolDiscoveryResponse, TransportEndpoint, TransportProtocol};

@@ -43,7 +43,10 @@ use crate::{
 };
 use chrono::Duration;
 use localup_control::{PortAllocator, TcpProxySpawner};
+use localup_proto::ProtocolDiscoveryResponse;
 use localup_server_tcp_proxy::{TcpProxyServer, TcpProxyServerConfig};
+use localup_transport_h2::{H2Config, H2Listener};
+use localup_transport_websocket::{WebSocketConfig, WebSocketListener};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -184,6 +187,80 @@ struct TlsConfig {
 struct ControlPlaneConfig {
     bind_addr: String,
     domain: String,
+    /// Additional transport configurations
+    transports: TransportConfigs,
+}
+
+/// Transport configurations for multi-protocol support
+#[derive(Clone, Debug, Default)]
+pub struct TransportConfigs {
+    /// QUIC transport (enabled by default)
+    pub quic_enabled: bool,
+    pub quic_port: Option<u16>,
+    /// WebSocket transport configuration
+    pub websocket_enabled: bool,
+    pub websocket_port: Option<u16>,
+    pub websocket_path: String,
+    /// HTTP/2 transport configuration
+    pub h2_enabled: bool,
+    pub h2_port: Option<u16>,
+    /// TLS certificate and key for TCP-based transports (WebSocket, H2)
+    pub tls_cert_path: Option<String>,
+    pub tls_key_path: Option<String>,
+}
+
+impl TransportConfigs {
+    /// Create default transport config (QUIC only)
+    pub fn quic_only() -> Self {
+        Self {
+            quic_enabled: true,
+            quic_port: None,
+            websocket_enabled: false,
+            websocket_port: None,
+            websocket_path: "/localup".to_string(),
+            h2_enabled: false,
+            h2_port: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+        }
+    }
+
+    /// Enable all transports
+    pub fn all() -> Self {
+        Self {
+            quic_enabled: true,
+            quic_port: None,
+            websocket_enabled: true,
+            websocket_port: None,
+            websocket_path: "/localup".to_string(),
+            h2_enabled: true,
+            h2_port: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+        }
+    }
+
+    /// Build protocol discovery response from this config
+    pub fn to_discovery_response(&self, base_port: u16) -> ProtocolDiscoveryResponse {
+        let mut response = ProtocolDiscoveryResponse::default();
+
+        if self.quic_enabled {
+            let port = self.quic_port.unwrap_or(base_port);
+            response = response.with_quic(port);
+        }
+
+        if self.websocket_enabled {
+            let port = self.websocket_port.unwrap_or(base_port);
+            response = response.with_websocket(port, &self.websocket_path);
+        }
+
+        if self.h2_enabled {
+            let port = self.h2_port.unwrap_or(base_port);
+            response = response.with_h2(port);
+        }
+
+        response
+    }
 }
 
 /// Protocol marker types for type-safe builders
@@ -204,6 +281,8 @@ pub struct RelayBuilder<P> {
     domain_provider: Option<Arc<dyn crate::DomainProvider>>,
     certificate_provider: Option<Arc<dyn crate::CertificateProvider>>,
     port_allocator: Option<Arc<dyn localup_control::PortAllocator>>,
+    // Transport configurations
+    transport_configs: TransportConfigs,
     _marker: std::marker::PhantomData<P>,
 }
 
@@ -244,6 +323,7 @@ impl RelayBuilder<Https> {
             domain_provider: None,
             certificate_provider: None,
             port_allocator: None,
+            transport_configs: TransportConfigs::quic_only(),
             _marker: std::marker::PhantomData,
         })
     }
@@ -275,6 +355,7 @@ impl RelayBuilder<Tcp> {
             domain_provider: None,
             certificate_provider: None,
             port_allocator: None,
+            transport_configs: TransportConfigs::quic_only(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -341,6 +422,7 @@ impl RelayBuilder<Tls> {
             domain_provider: None,
             certificate_provider: None,
             port_allocator: None,
+            transport_configs: TransportConfigs::quic_only(),
             _marker: std::marker::PhantomData,
         })
     }
@@ -367,8 +449,71 @@ impl<P> RelayBuilder<P> {
         self.control_plane_config = Some(ControlPlaneConfig {
             bind_addr: bind_addr.to_string(),
             domain: self.domain.clone(),
+            transports: self.transport_configs.clone(),
         });
         Ok(self)
+    }
+
+    /// Configure transport protocols for the control plane
+    ///
+    /// By default, only QUIC is enabled. Use this to enable WebSocket and/or HTTP/2.
+    pub fn transports(mut self, configs: TransportConfigs) -> Self {
+        self.transport_configs = configs;
+        if let Some(ref mut cp) = self.control_plane_config {
+            cp.transports = self.transport_configs.clone();
+        }
+        self
+    }
+
+    /// Enable WebSocket transport on the control plane
+    ///
+    /// # Arguments
+    /// * `port` - Optional port override (defaults to same as QUIC port)
+    /// * `path` - WebSocket path (e.g., "/localup")
+    pub fn with_websocket(mut self, port: Option<u16>, path: &str) -> Self {
+        self.transport_configs.websocket_enabled = true;
+        self.transport_configs.websocket_port = port;
+        self.transport_configs.websocket_path = path.to_string();
+        if let Some(ref mut cp) = self.control_plane_config {
+            cp.transports = self.transport_configs.clone();
+        }
+        self
+    }
+
+    /// Enable HTTP/2 transport on the control plane
+    ///
+    /// # Arguments
+    /// * `port` - Optional port override (defaults to same as QUIC port)
+    pub fn with_h2(mut self, port: Option<u16>) -> Self {
+        self.transport_configs.h2_enabled = true;
+        self.transport_configs.h2_port = port;
+        if let Some(ref mut cp) = self.control_plane_config {
+            cp.transports = self.transport_configs.clone();
+        }
+        self
+    }
+
+    /// Set TLS certificate for TCP-based transports (WebSocket, HTTP/2)
+    ///
+    /// # Arguments
+    /// * `cert_path` - Path to TLS certificate file
+    /// * `key_path` - Path to TLS private key file
+    pub fn transport_tls(mut self, cert_path: &str, key_path: &str) -> Self {
+        self.transport_configs.tls_cert_path = Some(cert_path.to_string());
+        self.transport_configs.tls_key_path = Some(key_path.to_string());
+        if let Some(ref mut cp) = self.control_plane_config {
+            cp.transports = self.transport_configs.clone();
+        }
+        self
+    }
+
+    /// Enable all transport protocols (QUIC, WebSocket, HTTP/2)
+    pub fn with_all_transports(mut self) -> Self {
+        self.transport_configs = TransportConfigs::all();
+        if let Some(ref mut cp) = self.control_plane_config {
+            cp.transports = self.transport_configs.clone();
+        }
+        self
     }
 
     /// Set the public domain for tunnel URLs
@@ -560,10 +705,21 @@ impl<P> RelayBuilder<P> {
             .with_tcp_proxy_spawner(tcp_proxy_spawner)
             .with_domain_provider(domain_provider);
 
-            Some((control_plane_addr, Arc::new(handler)))
+            let transport_configs = cp_cfg.transports.clone();
+            Some((control_plane_addr, Arc::new(handler), transport_configs))
         } else {
             None
         };
+
+        // Build protocol discovery response
+        let protocol_discovery = self.control_plane_config.as_ref().map(|cp| {
+            let base_port = cp
+                .bind_addr
+                .parse::<SocketAddr>()
+                .map(|a| a.port())
+                .unwrap_or(4443);
+            cp.transports.to_discovery_response(base_port)
+        });
 
         Ok(Relay {
             https_server: https_server_handle,
@@ -573,6 +729,7 @@ impl<P> RelayBuilder<P> {
             tunnel_manager,
             pending_requests,
             jwt_validator,
+            protocol_discovery,
         })
     }
 }
@@ -581,11 +738,13 @@ impl<P> RelayBuilder<P> {
 pub struct Relay {
     https_server: Option<HttpsServer>,
     tls_server: Option<TlsServer>,
-    control_plane_config: Option<(SocketAddr, Arc<TunnelHandler>)>,
+    control_plane_config: Option<(SocketAddr, Arc<TunnelHandler>, TransportConfigs)>,
     pub route_registry: Arc<RouteRegistry>,
     pub tunnel_manager: Arc<TunnelConnectionManager>,
     pub pending_requests: Arc<PendingRequests>,
     pub jwt_validator: Arc<JwtValidator>,
+    /// Protocol discovery response for this relay
+    pub protocol_discovery: Option<ProtocolDiscoveryResponse>,
 }
 
 impl Relay {
@@ -630,51 +789,177 @@ impl Relay {
             });
         }
 
-        // Start control plane QUIC listener if configured
-        if let Some((control_addr, handler)) = self.control_plane_config {
-            join_set.spawn(async move {
-                println!("🔌 Starting QUIC control plane on {}", control_addr);
+        // Start control plane listeners if configured
+        if let Some((control_addr, handler, transport_configs)) = self.control_plane_config {
+            let base_port = control_addr.port();
 
-                // Create QUIC config with auto-generated self-signed cert
-                match QuicConfig::server_self_signed() {
-                    Ok(config) => {
-                        let quic_config = Arc::new(config);
-                        match QuicListener::new(control_addr, quic_config) {
-                            Ok(listener) => {
-                                println!(
-                                    "✅ QUIC control plane listening on {} (TLS 1.3 encrypted)",
-                                    control_addr
-                                );
-                                loop {
-                                    match listener.accept().await {
-                                        Ok((connection, peer_addr)) => {
-                                            println!("🔗 New tunnel connection from {}", peer_addr);
-                                            let h = handler.clone();
-                                            let conn = Arc::new(connection);
-                                            tokio::spawn(async move {
-                                                h.handle_connection(conn, peer_addr).await;
-                                            });
-                                        }
-                                        Err(e) => {
-                                            if e.to_string().contains("endpoint closed") {
-                                                eprintln!("❌ QUIC endpoint closed");
-                                                break;
+            // Start QUIC listener if enabled
+            if transport_configs.quic_enabled {
+                let quic_port = transport_configs.quic_port.unwrap_or(base_port);
+                let quic_addr = SocketAddr::new(control_addr.ip(), quic_port);
+                let handler_clone = handler.clone();
+
+                join_set.spawn(async move {
+                    println!("🔌 Starting QUIC control plane on {}", quic_addr);
+
+                    match QuicConfig::server_self_signed() {
+                        Ok(config) => {
+                            let quic_config = Arc::new(config);
+                            match QuicListener::new(quic_addr, quic_config) {
+                                Ok(listener) => {
+                                    println!(
+                                        "✅ QUIC control plane listening on {} (TLS 1.3 encrypted)",
+                                        quic_addr
+                                    );
+                                    loop {
+                                        match listener.accept().await {
+                                            Ok((connection, peer_addr)) => {
+                                                println!(
+                                                    "🔗 New QUIC tunnel connection from {}",
+                                                    peer_addr
+                                                );
+                                                let h = handler_clone.clone();
+                                                let conn = Arc::new(connection);
+                                                tokio::spawn(async move {
+                                                    h.handle_connection(conn, peer_addr).await;
+                                                });
                                             }
-                                            eprintln!("⚠️  QUIC accept error: {}", e);
+                                            Err(e) => {
+                                                if e.to_string().contains("endpoint closed") {
+                                                    eprintln!("❌ QUIC endpoint closed");
+                                                    break;
+                                                }
+                                                eprintln!("⚠️  QUIC accept error: {}", e);
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                eprintln!("❌ Failed to create QUIC listener: {}", e);
+                                Err(e) => {
+                                    eprintln!("❌ Failed to create QUIC listener: {}", e);
+                                }
                             }
                         }
+                        Err(e) => {
+                            eprintln!("❌ Failed to create QUIC config: {}", e);
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("❌ Failed to create QUIC config: {}", e);
+                });
+            }
+
+            // Start WebSocket listener if enabled
+            if transport_configs.websocket_enabled {
+                let ws_port = transport_configs.websocket_port.unwrap_or(base_port);
+                let ws_addr = SocketAddr::new(control_addr.ip(), ws_port);
+                let ws_path = transport_configs.websocket_path.clone();
+                let cert_path = transport_configs.tls_cert_path.clone();
+                let key_path = transport_configs.tls_key_path.clone();
+                let handler_clone = handler.clone();
+
+                join_set.spawn(async move {
+                    println!(
+                        "🔌 Starting WebSocket control plane on {} (path: {})",
+                        ws_addr, ws_path
+                    );
+
+                    // Create config - use provided certs or self-signed
+                    let config_result = match (cert_path, key_path) {
+                        (Some(cert), Some(key)) => WebSocketConfig::server_default(&cert, &key),
+                        _ => WebSocketConfig::server_self_signed(),
+                    };
+
+                    let config = match config_result {
+                        Ok(mut c) => {
+                            c.path = ws_path.clone();
+                            Arc::new(c)
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Failed to create WebSocket config: {}", e);
+                            return;
+                        }
+                    };
+
+                    match WebSocketListener::new(ws_addr, config) {
+                        Ok(listener) => {
+                            println!("✅ WebSocket control plane listening on {}", ws_addr);
+                            loop {
+                                match listener.accept().await {
+                                    Ok((connection, peer_addr)) => {
+                                        println!(
+                                            "🔗 New WebSocket tunnel connection from {}",
+                                            peer_addr
+                                        );
+                                        let h = handler_clone.clone();
+                                        let conn = Arc::new(connection);
+                                        tokio::spawn(async move {
+                                            h.handle_connection(conn, peer_addr).await;
+                                        });
+                                    }
+                                    Err(e) => {
+                                        eprintln!("⚠️  WebSocket accept error: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Failed to create WebSocket listener: {}", e);
+                        }
                     }
-                }
-            });
+                });
+            }
+
+            // Start HTTP/2 listener if enabled
+            if transport_configs.h2_enabled {
+                let h2_port = transport_configs.h2_port.unwrap_or(base_port);
+                let h2_addr = SocketAddr::new(control_addr.ip(), h2_port);
+                let cert_path = transport_configs.tls_cert_path.clone();
+                let key_path = transport_configs.tls_key_path.clone();
+                let handler_clone = handler.clone();
+
+                join_set.spawn(async move {
+                    println!("🔌 Starting HTTP/2 control plane on {}", h2_addr);
+
+                    // Create config - use provided certs or self-signed
+                    let config_result = match (cert_path, key_path) {
+                        (Some(cert), Some(key)) => H2Config::server_default(&cert, &key),
+                        _ => H2Config::server_self_signed(),
+                    };
+
+                    let config = match config_result {
+                        Ok(c) => Arc::new(c),
+                        Err(e) => {
+                            eprintln!("❌ Failed to create HTTP/2 config: {}", e);
+                            return;
+                        }
+                    };
+
+                    match H2Listener::new(h2_addr, config) {
+                        Ok(listener) => {
+                            println!("✅ HTTP/2 control plane listening on {}", h2_addr);
+                            loop {
+                                match listener.accept().await {
+                                    Ok((connection, peer_addr)) => {
+                                        println!(
+                                            "🔗 New HTTP/2 tunnel connection from {}",
+                                            peer_addr
+                                        );
+                                        let h = handler_clone.clone();
+                                        let conn = Arc::new(connection);
+                                        tokio::spawn(async move {
+                                            h.handle_connection(conn, peer_addr).await;
+                                        });
+                                    }
+                                    Err(e) => {
+                                        eprintln!("⚠️  HTTP/2 accept error: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Failed to create HTTP/2 listener: {}", e);
+                        }
+                    }
+                });
+            }
         }
 
         // Wait for shutdown signal (SIGINT from Ctrl+C or SIGTERM from pkill/systemd)

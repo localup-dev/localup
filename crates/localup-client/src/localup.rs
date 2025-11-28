@@ -3,11 +3,13 @@
 use crate::config::{ProtocolConfig, TunnelConfig};
 use crate::metrics::MetricsStore;
 use crate::relay_discovery::RelayDiscovery;
+use crate::transport_discovery::TransportDiscoverer;
 use crate::TunnelError;
-use localup_proto::{Endpoint, Protocol, TunnelMessage};
+use localup_proto::{Endpoint, Protocol, TransportProtocol, TunnelMessage};
 use localup_transport::{
     TransportConnection, TransportConnector as TransportConnectorTrait, TransportStream,
 };
+use localup_transport_h2::{H2Config, H2Connector};
 use localup_transport_quic::{QuicConfig, QuicConnector};
 use std::sync::Arc;
 use std::time::Instant;
@@ -187,30 +189,104 @@ impl TunnelConnector {
             }
         };
 
-        info!("Connecting to tunnel relay at {} (QUIC)", relay_addr_str);
-
         // Parse and resolve address (supports IP:port, hostname:port, or https://hostname:port)
         let (hostname, relay_addr) = Self::parse_relay_address(&relay_addr_str).await?;
 
-        // Create QUIC connector with insecure mode (skip cert verification for localhost/dev)
-        let quic_config = Arc::new(QuicConfig::client_insecure());
-        let quic_connector = QuicConnector::new(quic_config).map_err(|e| {
-            TunnelError::ConnectionError(format!("Failed to create QUIC connector: {}", e))
-        })?;
+        // Discover available transports from relay
+        info!("🔍 Discovering available transports from relay...");
+        let discoverer = TransportDiscoverer::new().with_insecure(true); // Insecure for localhost/dev
 
-        // Connect to tunnel control port using QUIC
-        let connection = quic_connector
-            .connect(relay_addr, &hostname)
+        let discovered = discoverer
+            .discover_and_select(
+                &hostname,
+                relay_addr.port(),
+                relay_addr,
+                self.config.preferred_transport,
+            )
             .await
-            .map_err(|e| {
-                TunnelError::ConnectionError(format!(
-                    "Failed to connect to {}: {}",
-                    relay_addr_str, e
-                ))
-            })?;
+            .unwrap_or_else(|e| {
+                warn!(
+                    "Transport discovery failed ({}), falling back to QUIC on port {}",
+                    e,
+                    relay_addr.port()
+                );
+                crate::transport_discovery::DiscoveredTransport {
+                    protocol: TransportProtocol::Quic,
+                    address: relay_addr,
+                    path: None,
+                    full_response: None,
+                }
+            });
 
-        let connection = Arc::new(connection);
-        info!("✅ Connected to relay via QUIC");
+        info!(
+            "🚀 Selected transport: {:?} on {}",
+            discovered.protocol, discovered.address
+        );
+
+        // Create connector based on discovered transport
+        let (connection, mut control_stream) = match discovered.protocol {
+            TransportProtocol::Quic => {
+                info!("Connecting via QUIC...");
+                let quic_config = Arc::new(QuicConfig::client_insecure());
+                let quic_connector = QuicConnector::new(quic_config).map_err(|e| {
+                    TunnelError::ConnectionError(format!("Failed to create QUIC connector: {}", e))
+                })?;
+
+                let conn = quic_connector
+                    .connect(discovered.address, &hostname)
+                    .await
+                    .map_err(|e| {
+                        TunnelError::ConnectionError(format!(
+                            "Failed to connect via QUIC to {}: {}",
+                            discovered.address, e
+                        ))
+                    })?;
+
+                // Open control stream
+                let stream = conn.open_stream().await.map_err(|e| {
+                    TunnelError::ConnectionError(format!("Failed to open control stream: {}", e))
+                })?;
+
+                (
+                    ConnectionWrapper::Quic(Arc::new(conn)),
+                    StreamWrapper::Quic(stream),
+                )
+            }
+            TransportProtocol::H2 => {
+                info!("Connecting via HTTP/2...");
+                let h2_config = Arc::new(H2Config::client_insecure());
+                let h2_connector = H2Connector::new(h2_config).map_err(|e| {
+                    TunnelError::ConnectionError(format!("Failed to create H2 connector: {}", e))
+                })?;
+
+                let conn = h2_connector
+                    .connect(discovered.address, &hostname)
+                    .await
+                    .map_err(|e| {
+                        TunnelError::ConnectionError(format!(
+                            "Failed to connect via HTTP/2 to {}: {}",
+                            discovered.address, e
+                        ))
+                    })?;
+
+                // Open control stream
+                let stream = conn.open_stream().await.map_err(|e| {
+                    TunnelError::ConnectionError(format!("Failed to open control stream: {}", e))
+                })?;
+
+                (
+                    ConnectionWrapper::H2(Arc::new(conn)),
+                    StreamWrapper::H2(stream),
+                )
+            }
+            TransportProtocol::WebSocket => {
+                return Err(TunnelError::ConnectionError(
+                    "WebSocket transport not yet implemented".to_string(),
+                ));
+            }
+        };
+
+        info!("✅ Connected to relay via {:?}", discovered.protocol);
 
         // Generate deterministic tunnel ID from auth token
         // This ensures the same token always gets the same localup_id (and thus same port/subdomain)
@@ -263,11 +339,7 @@ impl TunnelConnector {
             },
         };
 
-        // Open control stream (first stream for control messages)
-        let mut control_stream = connection.open_stream().await.map_err(|e| {
-            TunnelError::ConnectionError(format!("Failed to open control stream: {}", e))
-        })?;
-
+        // Control stream was already opened in the match statement above
         control_stream
             .send_message(&connect_msg)
             .await
@@ -336,17 +408,107 @@ impl TunnelConnector {
     }
 }
 
+use localup_transport_h2::{H2Connection, H2Stream};
 use localup_transport_quic::{QuicConnection, QuicStream};
 
 /// TCP stream manager to route data to active streams
 type TcpStreamManager =
     Arc<tokio::sync::Mutex<std::collections::HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>>>;
 
+/// Wrapper for different transport connection types
+#[derive(Clone)]
+enum ConnectionWrapper {
+    Quic(Arc<QuicConnection>),
+    H2(Arc<H2Connection>),
+}
+
+impl ConnectionWrapper {
+    async fn accept_stream(
+        &self,
+    ) -> Result<Option<StreamWrapper>, localup_transport::TransportError> {
+        match self {
+            ConnectionWrapper::Quic(conn) => {
+                use localup_transport::TransportConnection;
+                Ok(conn.accept_stream().await?.map(StreamWrapper::Quic))
+            }
+            ConnectionWrapper::H2(conn) => {
+                use localup_transport::TransportConnection;
+                Ok(conn.accept_stream().await?.map(StreamWrapper::H2))
+            }
+        }
+    }
+}
+
+/// Wrapper for different transport stream types
+#[derive(Debug)]
+enum StreamWrapper {
+    Quic(QuicStream),
+    H2(H2Stream),
+}
+
+#[async_trait::async_trait]
+impl localup_transport::TransportStream for StreamWrapper {
+    async fn send_message(
+        &mut self,
+        message: &TunnelMessage,
+    ) -> localup_transport::TransportResult<()> {
+        match self {
+            StreamWrapper::Quic(stream) => stream.send_message(message).await,
+            StreamWrapper::H2(stream) => stream.send_message(message).await,
+        }
+    }
+
+    async fn recv_message(&mut self) -> localup_transport::TransportResult<Option<TunnelMessage>> {
+        match self {
+            StreamWrapper::Quic(stream) => stream.recv_message().await,
+            StreamWrapper::H2(stream) => stream.recv_message().await,
+        }
+    }
+
+    async fn send_bytes(&mut self, data: &[u8]) -> localup_transport::TransportResult<()> {
+        match self {
+            StreamWrapper::Quic(stream) => stream.send_bytes(data).await,
+            StreamWrapper::H2(stream) => stream.send_bytes(data).await,
+        }
+    }
+
+    async fn recv_bytes(
+        &mut self,
+        max_size: usize,
+    ) -> localup_transport::TransportResult<bytes::Bytes> {
+        match self {
+            StreamWrapper::Quic(stream) => stream.recv_bytes(max_size).await,
+            StreamWrapper::H2(stream) => stream.recv_bytes(max_size).await,
+        }
+    }
+
+    async fn finish(&mut self) -> localup_transport::TransportResult<()> {
+        match self {
+            StreamWrapper::Quic(stream) => stream.finish().await,
+            StreamWrapper::H2(stream) => stream.finish().await,
+        }
+    }
+
+    fn stream_id(&self) -> u64 {
+        match self {
+            StreamWrapper::Quic(stream) => stream.stream_id(),
+            StreamWrapper::H2(stream) => stream.stream_id(),
+        }
+    }
+
+    fn is_closed(&self) -> bool {
+        match self {
+            StreamWrapper::Quic(stream) => stream.is_closed(),
+            StreamWrapper::H2(stream) => stream.is_closed(),
+        }
+    }
+}
+
 /// Active tunnel connection
 #[derive(Clone)]
 pub struct TunnelConnection {
-    _connection: Arc<QuicConnection>, // Kept alive to maintain QUIC connection
-    control_stream: Arc<tokio::sync::Mutex<QuicStream>>,
+    _connection: ConnectionWrapper, // Kept alive to maintain connection
+    control_stream: Arc<tokio::sync::Mutex<StreamWrapper>>,
     shutdown_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Sender<()>>>>,
     localup_id: String,
     endpoints: Vec<Endpoint>,
@@ -481,16 +643,9 @@ impl TunnelConnection {
             debug!("Control stream task exiting");
         });
 
-        // Main loop: accept new QUIC streams from exit node
+        // Main loop: accept streams from exit node
         loop {
             tokio::select! {
-                // Check if connection was closed
-                _ = connection.inner().closed() => {
-                    error!("❌ Relay connection closed unexpectedly");
-                    return Err(TunnelError::ConnectionError(
-                        "Relay server closed connection".to_string(),
-                    ));
-                }
                 // Accept new streams
                 stream_result = connection.accept_stream() => {
                     match stream_result {
@@ -664,12 +819,20 @@ impl TunnelConnection {
     /// Handle a TCP connection on a dedicated QUIC stream
     /// Handle transparent HTTP stream (for WebSocket, HTTP/2, SSE, etc.)
     async fn handle_http_transparent_stream(
-        mut stream: localup_transport_quic::QuicStream,
+        stream: StreamWrapper,
         config: &TunnelConfig,
         _metrics: &MetricsStore,
         stream_id: u32,
         initial_data: Vec<u8>,
     ) {
+        // Extract the inner QUIC stream
+        let mut stream = match stream {
+            StreamWrapper::Quic(s) => s,
+            StreamWrapper::H2(_) => {
+                error!("HTTP transparent streaming not supported over H2 transport");
+                return;
+            }
+        };
         // Get local HTTP/HTTPS port from protocols
         let local_port = config.protocols.iter().find_map(|p| match p {
             ProtocolConfig::Http { local_port, .. } => Some(*local_port),
@@ -814,11 +977,19 @@ impl TunnelConnection {
     }
 
     async fn handle_tcp_stream(
-        mut stream: localup_transport_quic::stream::QuicStream,
+        stream: StreamWrapper,
         config: &TunnelConfig,
         _metrics: &MetricsStore,
         stream_id: u32,
     ) {
+        // Extract the inner QUIC stream
+        let mut stream = match stream {
+            StreamWrapper::Quic(s) => s,
+            StreamWrapper::H2(_) => {
+                error!("TCP streaming not supported over H2 transport");
+                return;
+            }
+        };
         // Get local TCP port from first TCP protocol
         let local_port = config.protocols.first().and_then(|p| match p {
             ProtocolConfig::Tcp { local_port, .. } => Some(*local_port),
@@ -946,12 +1117,20 @@ impl TunnelConnection {
 
     /// Handle a TLS connection on a dedicated QUIC stream
     async fn handle_tls_stream(
-        mut stream: localup_transport_quic::stream::QuicStream,
+        stream: StreamWrapper,
         config: &TunnelConfig,
         _metrics: &MetricsStore,
         stream_id: u32,
         client_hello: Vec<u8>,
     ) {
+        // Extract the inner QUIC stream
+        let mut stream = match stream {
+            StreamWrapper::Quic(s) => s,
+            StreamWrapper::H2(_) => {
+                error!("TLS streaming not supported over H2 transport");
+                return;
+            }
+        };
         // Get local TLS port from first TLS protocol
         let local_port = config.protocols.first().and_then(|p| match p {
             ProtocolConfig::Tls { local_port, .. } => Some(*local_port),

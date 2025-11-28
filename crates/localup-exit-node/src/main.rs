@@ -498,6 +498,8 @@ async fn main() -> Result<()> {
                     "http://127.0.0.1:3000".to_string(),
                 ]),
                 jwt_secret: api_jwt_secret,
+                tls_cert_path: None,
+                tls_key_path: None,
             };
 
             let server = ApiServer::new(config, api_localup_manager, api_db, true); // allow_signup = true

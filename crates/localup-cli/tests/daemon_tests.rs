@@ -24,6 +24,7 @@ fn create_test_tunnel(name: &str, port: u16, enabled: bool) -> StoredTunnel {
             exit_node: ExitNodeConfig::Auto,
             failover: true,
             connection_timeout: Duration::from_secs(30),
+            preferred_transport: None,
         },
     }
 }

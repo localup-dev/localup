@@ -20,6 +20,9 @@ use utoipa_swagger_ui::SwaggerUi;
 use localup_control::TunnelConnectionManager;
 use sea_orm::DatabaseConnection;
 
+// TLS imports
+use axum_server::tls_rustls::RustlsConfig;
+
 #[derive(RustEmbed)]
 #[folder = "../../webapps/exit-node-portal/dist"]
 struct PortalAssets;
@@ -30,6 +33,8 @@ pub struct AppState {
     pub db: DatabaseConnection,
     pub allow_signup: bool,
     pub jwt_secret: Option<String>,
+    /// Protocol discovery response for clients
+    pub protocol_discovery: Option<localup_proto::ProtocolDiscoveryResponse>,
 }
 
 /// OpenAPI documentation
@@ -71,6 +76,7 @@ pub struct AppState {
         handlers::get_auth_token,
         handlers::update_auth_token,
         handlers::delete_auth_token,
+        handlers::protocol_discovery,
     ),
     components(
         schemas(
@@ -116,6 +122,9 @@ pub struct AppState {
             models::AuthTokenList,
             models::UpdateAuthTokenRequest,
             models::AuthConfig,
+            models::ProtocolDiscoveryResponse,
+            models::TransportEndpoint,
+            models::TransportProtocol,
         )
     ),
     tags(
@@ -124,7 +133,8 @@ pub struct AppState {
         (name = "domains", description = "Custom domain management endpoints"),
         (name = "auth", description = "Authentication and user management endpoints"),
         (name = "auth-tokens", description = "Auth token (API key) management endpoints"),
-        (name = "system", description = "System health and info endpoints")
+        (name = "system", description = "System health and info endpoints"),
+        (name = "discovery", description = "Protocol discovery endpoints")
     )
 )]
 struct ApiDoc;
@@ -139,6 +149,10 @@ pub struct ApiServerConfig {
     pub cors_origins: Option<Vec<String>>,
     /// JWT secret for signing auth tokens
     pub jwt_secret: Option<String>,
+    /// TLS certificate path for HTTPS (enables HTTPS if provided)
+    pub tls_cert_path: Option<String>,
+    /// TLS private key path for HTTPS (required if tls_cert_path is set)
+    pub tls_key_path: Option<String>,
 }
 
 impl Default for ApiServerConfig {
@@ -148,6 +162,8 @@ impl Default for ApiServerConfig {
             enable_cors: true,
             cors_origins: None,
             jwt_secret: None,
+            tls_cert_path: None,
+            tls_key_path: None,
         }
     }
 }
@@ -171,6 +187,26 @@ impl ApiServer {
             db,
             allow_signup,
             jwt_secret: config.jwt_secret.clone(),
+            protocol_discovery: None,
+        });
+
+        Self { config, state }
+    }
+
+    /// Create a new API server with protocol discovery
+    pub fn with_protocol_discovery(
+        config: ApiServerConfig,
+        localup_manager: Arc<TunnelConnectionManager>,
+        db: DatabaseConnection,
+        allow_signup: bool,
+        protocol_discovery: localup_proto::ProtocolDiscoveryResponse,
+    ) -> Self {
+        let state = Arc::new(AppState {
+            localup_manager,
+            db,
+            allow_signup,
+            jwt_secret: config.jwt_secret.clone(),
+            protocol_discovery: Some(protocol_discovery),
         });
 
         Self { config, state }
@@ -193,6 +229,11 @@ impl ApiServer {
             .route("/api/auth/register", post(handlers::register))
             .route("/api/auth/login", post(handlers::login))
             .route("/api/auth/logout", post(handlers::logout))
+            // Protocol discovery (well-known endpoint)
+            .route(
+                "/.well-known/localup-protocols",
+                get(handlers::protocol_discovery),
+            )
             .with_state(self.state.clone());
 
         // Build PROTECTED routes (require session token authentication)
@@ -301,18 +342,45 @@ impl ApiServer {
     pub async fn start(self) -> Result<(), anyhow::Error> {
         let router = self.build_router();
 
-        info!("Starting API server on {}", self.config.bind_addr);
+        // Check if TLS is configured
+        let use_tls = self.config.tls_cert_path.is_some() && self.config.tls_key_path.is_some();
+        let protocol = if use_tls { "https" } else { "http" };
+
         info!(
-            "OpenAPI spec: http://{}/api/openapi.json",
-            self.config.bind_addr
+            "Starting API server on {}://{}",
+            protocol, self.config.bind_addr
         );
-        info!("Swagger UI: http://{}/swagger-ui", self.config.bind_addr);
+        info!(
+            "OpenAPI spec: {}://{}/api/openapi.json",
+            protocol, self.config.bind_addr
+        );
+        info!(
+            "Swagger UI: {}://{}/swagger-ui",
+            protocol, self.config.bind_addr
+        );
 
-        let listener = tokio::net::TcpListener::bind(self.config.bind_addr).await?;
+        if use_tls {
+            let cert_path = self.config.tls_cert_path.as_ref().unwrap();
+            let key_path = self.config.tls_key_path.as_ref().unwrap();
 
-        axum::serve(listener, router)
-            .await
-            .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+            // Load TLS configuration
+            let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to load TLS certificates: {}", e))?;
+
+            // Serve with TLS using axum-server
+            axum_server::bind_rustls(self.config.bind_addr, tls_config)
+                .serve(router.into_make_service())
+                .await
+                .map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
+        } else {
+            // Plain HTTP
+            let listener = tokio::net::TcpListener::bind(self.config.bind_addr).await?;
+
+            axum::serve(listener, router)
+                .await
+                .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+        }
 
         Ok(())
     }
@@ -330,6 +398,8 @@ pub async fn run_api_server(
         enable_cors: true,
         cors_origins: Some(vec!["http://localhost:3000".to_string()]),
         jwt_secret: None,
+        tls_cert_path: None,
+        tls_key_path: None,
     };
 
     let server = ApiServer::new(config, localup_manager, db, allow_signup);

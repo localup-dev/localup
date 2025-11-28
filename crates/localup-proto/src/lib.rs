@@ -4,10 +4,14 @@
 //! for the geo-distributed tunnel system.
 
 pub mod codec;
+pub mod discovery;
 pub mod messages;
 pub mod mux;
 
 pub use codec::{CodecError, TunnelCodec};
+pub use discovery::{
+    ProtocolDiscoveryResponse, TransportEndpoint, TransportProtocol, WELL_KNOWN_PATH,
+};
 pub use messages::*;
 pub use mux::{Frame, FrameType, Multiplexer, StreamId};
 

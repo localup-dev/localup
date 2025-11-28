@@ -8,16 +8,10 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Global CLI configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LocalupConfig {
     /// Default authentication token for tunnel connections
     pub auth_token: Option<String>,
-}
-
-impl Default for LocalupConfig {
-    fn default() -> Self {
-        Self { auth_token: None }
-    }
 }
 
 /// Configuration manager

@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 # Workspace crates
 localup-control = { path = "../localup-control" }
-localup-proto = { path = "../localup-proto" }
+localup-proto = { path = "../localup-proto", features = ["openapi"] }
 localup-auth = { path = "../localup-auth" }
 localup-relay-db = { path = "../localup-relay-db" }
 localup-cert = { path = "../localup-cert" }
@@ -26,6 +26,10 @@ utoipa-swagger-ui = { workspace = true }
 
 # Async
 tokio = { workspace = true }
+
+# TLS
+rustls = { workspace = true }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 
 # Serialization
 serde = { workspace = true }
