@@ -996,29 +996,33 @@ fn parse_local_address(addr_str: &str) -> Result<(String, u16)> {
 }
 
 async fn run_standalone(cli: Cli) -> Result<()> {
-    // Check if required arguments are present for standalone mode
-    if cli.token.is_none() {
-        eprintln!("Error: Standalone mode requires --token argument");
-        eprintln!();
-        eprintln!("Usage:");
-        eprintln!("  localup --port <PORT> --protocol <PROTOCOL> --token <TOKEN>");
-        eprintln!("  localup --address <HOST:PORT> --protocol <PROTOCOL> --token <TOKEN>");
-        eprintln!();
-        eprintln!("Examples:");
-        eprintln!("  localup --port 3000 --protocol http --token <TOKEN>");
-        eprintln!("  localup --address 127.0.0.1:8080 --protocol http --token <TOKEN>");
-        eprintln!();
-        eprintln!("Or use tunnel management commands:");
-        eprintln!("  localup add <name> --port <PORT> --token <TOKEN>");
-        eprintln!("  localup add <name> --address <HOST:PORT> --token <TOKEN>");
-        eprintln!("  localup daemon start");
-        eprintln!("  localup service install");
-        eprintln!();
-        eprintln!("For more help, run: localup --help");
-        std::process::exit(1);
-    }
-
-    let token = cli.token.unwrap();
+    // Get token from CLI arg, or fall back to saved config
+    let token = match cli.token {
+        Some(t) => t,
+        None => {
+            // Try to load from config
+            match config::ConfigManager::get_token() {
+                Ok(Some(t)) => {
+                    info!("Using saved auth token from ~/.localup/config.json");
+                    t
+                }
+                _ => {
+                    eprintln!("Error: No authentication token provided.");
+                    eprintln!();
+                    eprintln!("Options:");
+                    eprintln!("  1. Use --token to provide a token:");
+                    eprintln!("     localup --port <PORT> --protocol <PROTOCOL> --token <TOKEN>");
+                    eprintln!();
+                    eprintln!("  2. Save a default token (recommended):");
+                    eprintln!("     localup config set-token <TOKEN>");
+                    eprintln!("     localup --port <PORT> --protocol <PROTOCOL>");
+                    eprintln!();
+                    eprintln!("For more help, run: localup --help");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
     let protocol_str = cli.protocol.unwrap_or_else(|| "http".to_string());
 
     // Parse port and address - user must provide one or the other
