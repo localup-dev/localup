@@ -238,8 +238,9 @@ impl TunnelHandler {
                         reason: "Invalid first message".to_string(),
                     })
                     .await;
-                // Gracefully close the stream to ensure the Disconnect message is delivered
+                // Gracefully close the stream and give QUIC time to transmit
                 let _ = control_stream.finish().await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
             }
         }
     }
@@ -272,8 +273,9 @@ impl TunnelHandler {
                         reason: format!("Authentication failed: {}", e),
                     })
                     .await;
-                // Gracefully close the stream to ensure the Disconnect message is delivered
+                // Gracefully close the stream and give QUIC time to transmit
                 let _ = control_stream.finish().await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                 return Err(e);
             }
         };
@@ -347,8 +349,9 @@ impl TunnelHandler {
                         );
                     }
 
-                    // Gracefully close the stream to ensure the Disconnect message is delivered
+                    // Gracefully close the stream and give QUIC time to transmit
                     let _ = control_stream.finish().await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
                     return Err(error_msg);
                 }
