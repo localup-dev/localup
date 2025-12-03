@@ -44,6 +44,36 @@ jobs:
             webapps/exit-node-portal/dist
           retention-days: 1
 
+  build-nodejs-sdk:
+    name: Build & Test Node.js SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/nodejs
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run linting
+        run: bun run lint
+
+      - name: Run tests
+        run: bun test
+
+      - name: Build package
+        run: bun run build:all
+
+      - name: Verify package (dry run)
+        run: npm pack --dry-run
+
   test:
     name: Test Suite
     needs: build-webapps
