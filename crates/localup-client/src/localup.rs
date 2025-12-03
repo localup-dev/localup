@@ -336,6 +336,7 @@ impl TunnelConnector {
                 ip_allowlist: Vec::new(),
                 enable_compression: false,
                 enable_multiplexing: true,
+                http_auth: self.config.http_auth.clone(),
             },
         };
 

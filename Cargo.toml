@@ -4,6 +4,7 @@ members = [
     "crates/localup-client",
     "crates/localup-connection",
     "crates/localup-auth",
+    "crates/localup-http-auth",  # HTTP authentication middleware for tunnels
     "crates/localup-router",
     "crates/localup-server-tcp",
     "crates/localup-server-tcp-proxy",

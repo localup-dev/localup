@@ -28,7 +28,7 @@
 
 use axum::{routing::get, Router};
 use localup_lib::{
-    generate_self_signed_cert, generate_token, ExitNodeConfig, HttpsRelayBuilder,
+    generate_self_signed_cert, generate_token, ExitNodeConfig, HttpAuthConfig, HttpsRelayBuilder,
     InMemoryTunnelStorage, ProtocolConfig, SelfSignedCertificateProvider,
     SimpleCounterDomainProvider, TunnelClient, TunnelConfig,
 };
@@ -119,6 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         failover: false,
         connection_timeout: std::time::Duration::from_secs(5),
         preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     match TunnelClient::connect(tunnel_config).await {

@@ -1,6 +1,6 @@
 //! Client configuration
 
-use localup_proto::{ExitNodeConfig, TransportProtocol};
+use localup_proto::{ExitNodeConfig, HttpAuthConfig, TransportProtocol};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -44,6 +44,9 @@ pub struct TunnelConfig {
     /// Preferred transport protocol (None = auto-discover and select best)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_transport: Option<TransportProtocol>,
+    /// HTTP authentication configuration for incoming requests to this tunnel
+    #[serde(default)]
+    pub http_auth: HttpAuthConfig,
 }
 
 /// Helper module for serializing Duration as seconds
@@ -77,6 +80,7 @@ impl Default for TunnelConfig {
             failover: true,
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None, // Auto-discover
+            http_auth: HttpAuthConfig::None,
         }
     }
 }
@@ -121,6 +125,12 @@ impl TunnelConfigBuilder {
 
     pub fn preferred_transport(mut self, transport: Option<TransportProtocol>) -> Self {
         self.config.preferred_transport = transport;
+        self
+    }
+
+    /// Configure HTTP authentication for incoming requests
+    pub fn http_auth(mut self, auth: HttpAuthConfig) -> Self {
+        self.config.http_auth = auth;
         self
     }
 

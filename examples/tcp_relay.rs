@@ -28,7 +28,7 @@
 //! ```
 
 use localup_lib::{
-    generate_token, ExitNodeConfig, InMemoryTunnelStorage, ProtocolConfig,
+    generate_token, ExitNodeConfig, HttpAuthConfig, InMemoryTunnelStorage, ProtocolConfig,
     SelfSignedCertificateProvider, SimpleCounterDomainProvider, SimplePortAllocator,
     TcpRelayBuilder, TunnelClient, TunnelConfig,
 };
@@ -134,6 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         failover: false,
         connection_timeout: std::time::Duration::from_secs(5),
         preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     match TunnelClient::connect(tunnel_config).await {

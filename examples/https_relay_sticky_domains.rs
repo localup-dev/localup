@@ -24,8 +24,8 @@
 use axum::{routing::get, Router};
 use localup_lib::{
     async_trait, generate_self_signed_cert, generate_token, DomainContext, DomainProvider,
-    DomainProviderError, ExitNodeConfig, HttpsRelayBuilder, InMemoryTunnelStorage, ProtocolConfig,
-    SelfSignedCertificateProvider, TunnelClient, TunnelConfig,
+    DomainProviderError, ExitNodeConfig, HttpAuthConfig, HttpsRelayBuilder, InMemoryTunnelStorage,
+    ProtocolConfig, SelfSignedCertificateProvider, TunnelClient, TunnelConfig,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -287,6 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         failover: false,
         connection_timeout: std::time::Duration::from_secs(5),
         preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     match TunnelClient::connect(tunnel_config_1).await {

@@ -150,7 +150,15 @@
 //! All types from these crates are re-exported here for convenience.
 
 // Re-export protocol types
-pub use localup_proto::{Endpoint, Protocol, TunnelConfig as ProtoTunnelConfig, TunnelMessage};
+pub use localup_proto::{
+    Endpoint, HttpAuthConfig, Protocol, TunnelConfig as ProtoTunnelConfig, TunnelMessage,
+};
+
+// Re-export HTTP authentication types (for incoming request authentication)
+pub use localup_http_auth::{
+    AuthResult as HttpAuthResult, BasicAuthProvider, BearerTokenProvider, HeaderAuthProvider,
+    HttpAuthProvider, HttpAuthenticator,
+};
 
 // Re-export transport layer
 pub use localup_transport::{

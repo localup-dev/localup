@@ -409,6 +409,30 @@ impl HttpsServer {
     ) -> Result<(), HttpsServerError> {
         debug!("Transparent HTTPS streaming for tunnel: {}", localup_id);
 
+        // Check HTTP authentication if configured for this tunnel
+        if let Some(authenticator) = localup_manager.get_http_authenticator(localup_id).await {
+            if authenticator.requires_auth() {
+                // Parse headers from request
+                let headers = localup_http_auth::parse_headers_from_request(request_bytes);
+
+                // Authenticate
+                match authenticator.authenticate(&headers) {
+                    localup_http_auth::AuthResult::Authenticated => {
+                        debug!("HTTP auth successful for tunnel: {}", localup_id);
+                    }
+                    localup_http_auth::AuthResult::Unauthorized(response) => {
+                        debug!(
+                            "HTTP auth failed for tunnel: {} (type: {})",
+                            localup_id,
+                            authenticator.auth_type()
+                        );
+                        tls_stream.write_all(&response).await?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
         // Get tunnel connection
         let connection = match localup_manager.get(localup_id).await {
             Some(c) => c,

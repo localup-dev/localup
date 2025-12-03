@@ -248,6 +248,38 @@ pub struct Endpoint {
     pub port: Option<u16>,
 }
 
+/// HTTP authentication configuration for incoming requests
+///
+/// This is extensible to support different authentication methods:
+/// - Basic: HTTP Basic Auth (username:password)
+/// - BearerToken: Validate specific header token
+/// - OAuth/OIDC: (future) OpenID Connect
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum HttpAuthConfig {
+    /// No authentication required
+    None,
+    /// HTTP Basic Authentication
+    /// Credentials are "username:password" pairs
+    Basic { credentials: Vec<String> },
+    /// Bearer token in Authorization header
+    /// Validates that the header matches one of the provided tokens
+    BearerToken { tokens: Vec<String> },
+    /// Custom header authentication
+    /// Validates a specific header against provided values
+    HeaderAuth {
+        header_name: String,
+        values: Vec<String>,
+    },
+    // Future: OAuth/OIDC configuration would go here
+    // Oidc { provider_url: String, client_id: String, ... }
+}
+
+impl Default for HttpAuthConfig {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 /// Tunnel configuration
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TunnelConfig {
@@ -259,6 +291,9 @@ pub struct TunnelConfig {
     pub ip_allowlist: Vec<String>,
     pub enable_compression: bool,
     pub enable_multiplexing: bool,
+    /// HTTP authentication configuration for incoming requests
+    #[serde(default)]
+    pub http_auth: HttpAuthConfig,
 }
 
 impl Default for TunnelConfig {
@@ -272,6 +307,7 @@ impl Default for TunnelConfig {
             ip_allowlist: Vec::new(),
             enable_compression: false,
             enable_multiplexing: true,
+            http_auth: HttpAuthConfig::None,
         }
     }
 }

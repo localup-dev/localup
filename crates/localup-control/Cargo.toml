@@ -8,6 +8,7 @@ authors.workspace = true
 [dependencies]
 localup-proto = { path = "../localup-proto" }
 localup-auth = { path = "../localup-auth" }
+localup-http-auth = { path = "../localup-http-auth" }
 localup-router = { path = "../localup-router" }
 localup-transport = { path = "../localup-transport" }
 localup-transport-quic = { path = "../localup-transport-quic" }

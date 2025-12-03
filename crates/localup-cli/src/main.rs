@@ -13,6 +13,7 @@ use localup_client::{
     ExitNodeConfig, MetricsServer, ProtocolConfig, ReverseTunnelClient, ReverseTunnelConfig,
     TunnelClient, TunnelConfig,
 };
+use localup_proto::HttpAuthConfig;
 
 /// Tunnel CLI - Expose local servers to the internet
 #[derive(Parser, Debug)]
@@ -68,6 +69,18 @@ struct Cli {
     /// Disable metrics collection and web dashboard (standalone mode only)
     #[arg(long)]
     no_metrics: bool,
+
+    /// HTTP Basic Authentication credentials in "user:password" format (standalone mode only)
+    /// Can be specified multiple times for multiple users.
+    /// Example: --basic-auth "admin:secret" --basic-auth "user:pass"
+    #[arg(long = "basic-auth", value_name = "USER:PASS")]
+    basic_auth: Vec<String>,
+
+    /// HTTP Bearer Token authentication (standalone mode only)
+    /// Can be specified multiple times for multiple tokens.
+    /// Example: --auth-token "secret-token-123"
+    #[arg(long = "auth-token", value_name = "TOKEN")]
+    auth_tokens: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1070,6 +1083,27 @@ async fn run_standalone(cli: Cli) -> Result<()> {
             None
         };
 
+    // Build HTTP authentication configuration from CLI arguments
+    let http_auth = if !cli.basic_auth.is_empty() {
+        info!(
+            "🔐 HTTP Basic Authentication enabled ({} credential(s))",
+            cli.basic_auth.len()
+        );
+        HttpAuthConfig::Basic {
+            credentials: cli.basic_auth.clone(),
+        }
+    } else if !cli.auth_tokens.is_empty() {
+        info!(
+            "🔐 HTTP Bearer Token Authentication enabled ({} token(s))",
+            cli.auth_tokens.len()
+        );
+        HttpAuthConfig::BearerToken {
+            tokens: cli.auth_tokens.clone(),
+        }
+    } else {
+        HttpAuthConfig::None
+    };
+
     // Build tunnel configuration
     let config = TunnelConfig {
         local_host,
@@ -1079,6 +1113,7 @@ async fn run_standalone(cli: Cli) -> Result<()> {
         failover: true,
         connection_timeout: Duration::from_secs(30),
         preferred_transport,
+        http_auth,
     };
 
     // Create cancellation token for Ctrl+C

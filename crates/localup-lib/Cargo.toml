@@ -9,6 +9,7 @@ authors.workspace = true
 localup-proto = { path = "../localup-proto" }
 localup-client = { path = "../localup-client", features = ["db-metrics"] }
 localup-auth = { path = "../localup-auth" }
+localup-http-auth = { path = "../localup-http-auth" }
 localup-router = { path = "../localup-router" }
 localup-server-tcp = { path = "../localup-server-tcp" }
 localup-server-tcp-proxy = { path = "../localup-server-tcp-proxy" }

@@ -24,8 +24,9 @@
 
 use localup_lib::{
     generate_self_signed_cert, generate_self_signed_cert_with_domains, generate_token,
-    ExitNodeConfig, InMemoryTunnelStorage, ProtocolConfig, SelfSignedCertificateProvider,
-    SimpleCounterDomainProvider, TlsRelayBuilder, TunnelClient, TunnelConfig,
+    ExitNodeConfig, HttpAuthConfig, InMemoryTunnelStorage, ProtocolConfig,
+    SelfSignedCertificateProvider, SimpleCounterDomainProvider, TlsRelayBuilder, TunnelClient,
+    TunnelConfig,
 };
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -195,6 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         failover: false,
         connection_timeout: std::time::Duration::from_secs(5),
         preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     match TunnelClient::connect(tunnel_config).await {

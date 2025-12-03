@@ -1,6 +1,7 @@
 //! Tunnel connection management
 
-use localup_proto::Endpoint;
+use localup_http_auth::HttpAuthenticator;
+use localup_proto::{Endpoint, HttpAuthConfig};
 use localup_transport_quic::QuicConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,6 +20,8 @@ pub struct TunnelConnection {
     pub endpoints: Vec<Endpoint>,
     pub connection: Arc<QuicConnection>, // ✅ Store connection instead of sender
     pub tcp_data_callback: Option<TcpDataCallback>,
+    /// HTTP authentication configuration for this tunnel
+    pub http_auth: HttpAuthConfig,
 }
 
 /// Manages all active tunnel connections
@@ -40,11 +43,24 @@ impl TunnelConnectionManager {
         endpoints: Vec<Endpoint>,
         connection: Arc<QuicConnection>,
     ) {
+        self.register_with_auth(localup_id, endpoints, connection, HttpAuthConfig::None)
+            .await;
+    }
+
+    /// Register a new tunnel connection with HTTP authentication configuration
+    pub async fn register_with_auth(
+        &self,
+        localup_id: String,
+        endpoints: Vec<Endpoint>,
+        connection: Arc<QuicConnection>,
+        http_auth: HttpAuthConfig,
+    ) {
         let localup_conn = TunnelConnection {
             localup_id: localup_id.clone(),
             endpoints,
             connection,
             tcp_data_callback: None,
+            http_auth,
         };
 
         self.connections
@@ -95,6 +111,27 @@ impl TunnelConnectionManager {
             .await
             .get(localup_id)
             .map(|conn| conn.endpoints.clone())
+    }
+
+    /// Get the HTTP authenticator for a tunnel
+    ///
+    /// Returns an `HttpAuthenticator` configured with the tunnel's authentication settings.
+    /// If no auth is configured, returns an authenticator that allows all requests.
+    pub async fn get_http_authenticator(&self, localup_id: &str) -> Option<HttpAuthenticator> {
+        self.connections
+            .read()
+            .await
+            .get(localup_id)
+            .map(|conn| HttpAuthenticator::from_config(&conn.http_auth))
+    }
+
+    /// Get the raw HTTP auth configuration for a tunnel
+    pub async fn get_http_auth_config(&self, localup_id: &str) -> Option<HttpAuthConfig> {
+        self.connections
+            .read()
+            .await
+            .get(localup_id)
+            .map(|conn| conn.http_auth.clone())
     }
 }
 
