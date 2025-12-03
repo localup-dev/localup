@@ -1,0 +1,65 @@
+{
+  "name": "@localup/sdk",
+  "version": "0.1.0",
+  "description": "LocalUp tunnel client SDK for Node.js",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target node && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test",
+    "lint": "biome check src",
+    "format": "biome format --write src",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "tunnel",
+    "localup",
+    "ngrok",
+    "quic",
+    "http2",
+    "websocket"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/bun": "^1.3.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@matrixai/quic": "^2.0.9",
+    "tsx": "^4.21.0"
+  },
+  "peerDependencies": {
+    "@matrixai/quic": "^2.0.9"
+  },
+  "peerDependenciesMeta": {
+    "@matrixai/quic": {
+      "optional": true
+    }
+  }
+}
