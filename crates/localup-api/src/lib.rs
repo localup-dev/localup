@@ -35,6 +35,8 @@ pub struct AppState {
     pub jwt_secret: Option<String>,
     /// Protocol discovery response for clients
     pub protocol_discovery: Option<localup_proto::ProtocolDiscoveryResponse>,
+    /// Whether the server is running with HTTPS (for Secure cookie flag)
+    pub is_https: bool,
 }
 
 /// OpenAPI documentation
@@ -182,12 +184,14 @@ impl ApiServer {
         db: DatabaseConnection,
         allow_signup: bool,
     ) -> Self {
+        let is_https = config.tls_cert_path.is_some() && config.tls_key_path.is_some();
         let state = Arc::new(AppState {
             localup_manager,
             db,
             allow_signup,
             jwt_secret: config.jwt_secret.clone(),
             protocol_discovery: None,
+            is_https,
         });
 
         Self { config, state }
@@ -201,12 +205,14 @@ impl ApiServer {
         allow_signup: bool,
         protocol_discovery: localup_proto::ProtocolDiscoveryResponse,
     ) -> Self {
+        let is_https = config.tls_cert_path.is_some() && config.tls_key_path.is_some();
         let state = Arc::new(AppState {
             localup_manager,
             db,
             allow_signup,
             jwt_secret: config.jwt_secret.clone(),
             protocol_discovery: Some(protocol_discovery),
+            is_https,
         });
 
         Self { config, state }

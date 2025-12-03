@@ -11,6 +11,47 @@ use crate::middleware::AuthUser;
 use crate::models::*;
 use crate::AppState;
 
+/// Determine if the request came over HTTPS by checking headers
+/// Checks X-Forwarded-Proto (common for reverse proxies) and falls back to server config
+fn is_request_secure(headers: &HeaderMap, server_is_https: bool) -> bool {
+    // Check X-Forwarded-Proto header (set by reverse proxies like nginx, Cloudflare, etc.)
+    if let Some(proto) = headers.get("x-forwarded-proto") {
+        if let Ok(proto_str) = proto.to_str() {
+            return proto_str.eq_ignore_ascii_case("https");
+        }
+    }
+
+    // Check X-Forwarded-Ssl header (alternative header used by some proxies)
+    if let Some(ssl) = headers.get("x-forwarded-ssl") {
+        if let Ok(ssl_str) = ssl.to_str() {
+            return ssl_str.eq_ignore_ascii_case("on");
+        }
+    }
+
+    // Fall back to server's TLS configuration
+    server_is_https
+}
+
+/// Create a session cookie with the appropriate Secure flag based on HTTPS mode
+fn create_session_cookie(token: &str, is_https: bool) -> String {
+    let secure_flag = if is_https { "; Secure" } else { "" };
+    format!(
+        "session_token={}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}{}",
+        token,
+        7 * 24 * 60 * 60, // 7 days in seconds
+        secure_flag
+    )
+}
+
+/// Create a cookie that clears the session (for logout)
+fn create_logout_cookie(is_https: bool) -> String {
+    let secure_flag = if is_https { "; Secure" } else { "" };
+    format!(
+        "session_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{}",
+        secure_flag
+    )
+}
+
 /// List all tunnels (active and optionally inactive)
 #[utoipa::path(
     get,
@@ -1143,6 +1184,7 @@ pub async fn auth_config(State(state): State<Arc<AppState>>) -> Json<crate::mode
 )]
 pub async fn register(
     State(state): State<Arc<AppState>>,
+    req_headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     use localup_relay_db::entities::user;
@@ -1337,12 +1379,9 @@ pub async fn register(
 
     let expires_at = now + Duration::days(7);
 
-    // Create HTTP-only cookie with session token
-    let cookie = format!(
-        "session_token={}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
-        token,
-        7 * 24 * 60 * 60 // 7 days in seconds
-    );
+    // Create HTTP-only cookie with session token (with Secure flag for HTTPS)
+    let is_secure = is_request_secure(&req_headers, state.is_https);
+    let cookie = create_session_cookie(&token, is_secure);
 
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
@@ -1382,6 +1421,7 @@ pub async fn register(
 )]
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    req_headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
     // Find user by email
@@ -1536,12 +1576,9 @@ pub async fn login(
 
     let expires_at = now + Duration::days(7);
 
-    // Create HTTP-only cookie with session token
-    let cookie = format!(
-        "session_token={}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
-        token,
-        7 * 24 * 60 * 60 // 7 days in seconds
-    );
+    // Create HTTP-only cookie with session token (with Secure flag for HTTPS)
+    let is_secure = is_request_secure(&req_headers, state.is_https);
+    let cookie = create_session_cookie(&token, is_secure);
 
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
@@ -1576,9 +1613,13 @@ pub async fn login(
     ),
     tag = "auth"
 )]
-pub async fn logout() -> impl IntoResponse {
-    // Clear the session cookie by setting Max-Age=0
-    let cookie = "session_token=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0";
+pub async fn logout(
+    State(state): State<Arc<AppState>>,
+    req_headers: HeaderMap,
+) -> impl IntoResponse {
+    // Clear the session cookie by setting Max-Age=0 (with Secure flag for HTTPS)
+    let is_secure = is_request_secure(&req_headers, state.is_https);
+    let cookie = create_logout_cookie(is_secure);
 
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
