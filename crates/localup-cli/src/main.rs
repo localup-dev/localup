@@ -845,6 +845,7 @@ fn handle_add_tunnel(
         failover: true,
         connection_timeout: Duration::from_secs(30),
         preferred_transport,
+        http_auth: localup_proto::HttpAuthConfig::None,
     };
 
     let stored_tunnel = localup_store::StoredTunnel {

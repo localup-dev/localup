@@ -3,7 +3,7 @@
 use localup_cli::daemon::{Daemon, DaemonCommand, TunnelStatus};
 use localup_cli::localup_store::{StoredTunnel, TunnelStore};
 use localup_client::{ProtocolConfig, TunnelConfig};
-use localup_proto::ExitNodeConfig;
+use localup_proto::{ExitNodeConfig, HttpAuthConfig};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
@@ -25,6 +25,7 @@ fn create_test_tunnel(name: &str, port: u16, enabled: bool) -> StoredTunnel {
             failover: true,
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
+            http_auth: HttpAuthConfig::None,
         },
     }
 }

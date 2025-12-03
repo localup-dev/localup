@@ -174,7 +174,7 @@ impl Default for TunnelStore {
 mod tests {
     use super::*;
     use localup_client::ProtocolConfig;
-    use localup_proto::ExitNodeConfig;
+    use localup_proto::{ExitNodeConfig, HttpAuthConfig};
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -201,6 +201,7 @@ mod tests {
                 failover: true,
                 connection_timeout: Duration::from_secs(30),
                 preferred_transport: None,
+                http_auth: HttpAuthConfig::None,
             },
         }
     }

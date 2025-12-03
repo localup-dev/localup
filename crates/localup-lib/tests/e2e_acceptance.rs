@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use localup_client::{ProtocolConfig, TunnelClient, TunnelConfig};
-use localup_proto::{Endpoint, ExitNodeConfig, TunnelMessage};
+use localup_proto::{Endpoint, ExitNodeConfig, HttpAuthConfig, TunnelMessage};
 use localup_transport::{TransportConnection, TransportListener, TransportStream};
 use localup_transport_quic::{QuicConfig, QuicListener};
 
@@ -142,6 +142,8 @@ async fn acceptance_e2e_basic_http_tunnel() {
         exit_node: ExitNodeConfig::Custom(relay_addr.clone()),
         failover: false,
         connection_timeout: Duration::from_secs(10),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("\n✓ Phase 1: SETUP COMPLETE");
@@ -234,6 +236,8 @@ async fn acceptance_e2e_multiple_protocols() {
         exit_node: ExitNodeConfig::Custom(relay_addr),
         failover: false,
         connection_timeout: Duration::from_secs(10),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("\n✓ Tunnel configured for:");
@@ -289,6 +293,8 @@ async fn acceptance_e2e_connection_lifecycle() {
         exit_node: ExitNodeConfig::Custom(relay_addr),
         failover: false,
         connection_timeout: Duration::from_secs(10),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("\n[1/5] INITIALIZATION");
@@ -356,6 +362,8 @@ async fn acceptance_e2e_error_recovery() {
         exit_node: ExitNodeConfig::Custom("127.0.0.1:1".to_string()),
         failover: false,
         connection_timeout: Duration::from_secs(1),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     match TunnelClient::connect(config).await {
@@ -380,6 +388,8 @@ async fn acceptance_e2e_error_recovery() {
         exit_node: ExitNodeConfig::Custom(relay_addr),
         failover: false,
         connection_timeout: Duration::from_secs(5),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     match TunnelClient::connect(config).await {

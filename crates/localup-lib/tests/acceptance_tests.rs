@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use localup_client::{ProtocolConfig, TunnelClient, TunnelConfig};
-use localup_proto::{ExitNodeConfig, Region};
+use localup_proto::{ExitNodeConfig, HttpAuthConfig, Region};
 
 // ============================================================================
 // ACCEPTANCE TEST 1: Expose a Simple HTTP Server
@@ -66,6 +66,8 @@ async fn acceptance_expose_http_server() {
         exit_node: ExitNodeConfig::Auto,
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("✓ Created tunnel configuration:");
@@ -147,6 +149,8 @@ async fn acceptance_expose_multiple_services() {
         exit_node: ExitNodeConfig::Auto,
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("✓ Configured tunnel for multiple protocols:");
@@ -194,6 +198,8 @@ async fn acceptance_configuration_validation() {
         exit_node: ExitNodeConfig::Auto,
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("Testing empty auth token...");
@@ -223,6 +229,8 @@ async fn acceptance_configuration_validation() {
         exit_node: ExitNodeConfig::Auto,
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("Testing privileged port (1)...");
@@ -264,6 +272,8 @@ async fn acceptance_error_handling() {
         exit_node: ExitNodeConfig::Specific(Region::UsEast),
         failover: false,
         connection_timeout: Duration::from_secs(1), // Short timeout
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("Testing connection to invalid host with short timeout...");
@@ -316,6 +326,8 @@ async fn acceptance_tunnel_lifecycle() {
         exit_node: ExitNodeConfig::Auto,
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("  Configuration created successfully");
@@ -383,6 +395,8 @@ async fn acceptance_regional_selection() {
         exit_node: ExitNodeConfig::Auto,
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("Testing auto region selection...");
@@ -406,6 +420,8 @@ async fn acceptance_regional_selection() {
         exit_node: ExitNodeConfig::Specific(Region::EuWest),
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("Testing specific region selection (eu-west)...");
@@ -447,6 +463,8 @@ async fn acceptance_subdomain_management() {
         exit_node: ExitNodeConfig::Auto,
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("Requesting subdomain 'myapp' for HTTPS service...");
@@ -497,6 +515,8 @@ async fn acceptance_metrics_monitoring() {
         exit_node: ExitNodeConfig::Auto,
         failover: true,
         connection_timeout: Duration::from_secs(30),
+        preferred_transport: None,
+        http_auth: HttpAuthConfig::None,
     };
 
     info!("Connecting and accessing metrics...");

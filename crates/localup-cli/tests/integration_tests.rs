@@ -2,7 +2,7 @@
 
 use localup_cli::localup_store::{StoredTunnel, TunnelStore};
 use localup_client::{ProtocolConfig, TunnelConfig};
-use localup_proto::ExitNodeConfig;
+use localup_proto::{ExitNodeConfig, HttpAuthConfig};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -22,6 +22,7 @@ fn create_test_config(name: &str, port: u16) -> StoredTunnel {
             failover: true,
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
+            http_auth: HttpAuthConfig::None,
         },
     }
 }
@@ -260,6 +261,7 @@ fn test_localup_store_protocol_types() {
             failover: true,
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
+            http_auth: HttpAuthConfig::None,
         },
     };
     store.save(&http_tunnel).unwrap();
@@ -279,6 +281,7 @@ fn test_localup_store_protocol_types() {
             failover: true,
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
+            http_auth: HttpAuthConfig::None,
         },
     };
     store.save(&https_tunnel).unwrap();
@@ -298,6 +301,7 @@ fn test_localup_store_protocol_types() {
             failover: true,
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
+            http_auth: HttpAuthConfig::None,
         },
     };
     store.save(&tcp_tunnel).unwrap();
@@ -317,6 +321,7 @@ fn test_localup_store_protocol_types() {
             failover: true,
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
+            http_auth: HttpAuthConfig::None,
         },
     };
     store.save(&tls_tunnel).unwrap();
@@ -370,6 +375,7 @@ fn test_localup_store_exit_node_configs() {
             failover: true,
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
+            http_auth: HttpAuthConfig::None,
         },
     };
     store.save(&auto_tunnel).unwrap();
@@ -389,6 +395,7 @@ fn test_localup_store_exit_node_configs() {
             failover: true,
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
+            http_auth: HttpAuthConfig::None,
         },
     };
     store.save(&custom_tunnel).unwrap();
@@ -420,6 +427,7 @@ fn test_localup_store_serialization_roundtrip() {
             failover: false,
             connection_timeout: Duration::from_secs(60),
             preferred_transport: None,
+            http_auth: HttpAuthConfig::None,
         },
     };
 
