@@ -2302,6 +2302,7 @@ dependencies = [
  "chrono",
  "localup-connection",
  "localup-control",
+ "localup-http-auth",
  "localup-proto",
  "localup-relay-db",
  "localup-router",
