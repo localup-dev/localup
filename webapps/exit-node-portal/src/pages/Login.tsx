@@ -1,20 +1,21 @@
 import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
+import { Mail, Lock, Eye, EyeOff, AlertCircle, Loader2 } from 'lucide-react';
 import { loginMutation } from '../api/client/@tanstack/react-query.gen';
-import { useAuthConfig } from '../contexts/AuthConfigContext';
+import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
+import { Button } from '../components/ui/button';
 
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const navigate = useNavigate();
-  const { authConfig } = useAuthConfig();
 
   const mutation = useMutation({
     ...loginMutation(),
     onSuccess: () => {
-      // Session cookie is automatically set by the backend
-      // No need to store anything in frontend
       navigate('/dashboard');
     },
   });
@@ -27,70 +28,80 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-900 flex items-center justify-center px-4">
+    <div className="min-h-screen bg-background flex items-center justify-center px-4">
       <div className="max-w-md w-full">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-white mb-2">LocalUp</h1>
-          <p className="text-gray-400">Sign in to your account</p>
+          <h1 className="text-4xl font-bold text-foreground mb-2">LocalUp</h1>
+          <p className="text-muted-foreground">Sign in to your account</p>
         </div>
 
-        <div className="bg-gray-800 rounded-lg shadow-lg p-8">
+        <div className="bg-card rounded-lg shadow-lg p-8 border border-border">
           <form onSubmit={handleSubmit} className="space-y-6">
             {mutation.error && (
-              <div className="bg-red-900/50 border border-red-500 text-red-200 px-4 py-3 rounded">
-                {mutation.error.message || 'Login failed'}
+              <div className="bg-destructive/10 border border-destructive/50 text-destructive px-4 py-3 rounded-lg flex items-center gap-2">
+                <AlertCircle className="h-4 w-4 flex-shrink-0" />
+                <span className="text-sm">{mutation.error.message || 'Login failed'}</span>
               </div>
             )}
 
-            <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-300 mb-2">
-                Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="you@example.com"
-              />
+            <div className="space-y-2">
+              <Label htmlFor="email">Email</Label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  id="email"
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  className="pl-10"
+                  placeholder="you@example.com"
+                />
+              </div>
             </div>
 
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-300 mb-2">
-                Password
-              </label>
-              <input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                placeholder="••••••••"
-              />
+            <div className="space-y-2">
+              <Label htmlFor="password">Password</Label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  id="password"
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  className="pl-10 pr-10"
+                  placeholder="Enter your password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showPassword ? (
+                    <EyeOff className="h-4 w-4" />
+                  ) : (
+                    <Eye className="h-4 w-4" />
+                  )}
+                </button>
+              </div>
             </div>
 
-            <button
+            <Button
               type="submit"
               disabled={mutation.isPending}
-              className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-gray-600 text-white font-medium py-2 px-4 rounded-md transition"
+              className="w-full"
             >
-              {mutation.isPending ? 'Signing in...' : 'Sign in'}
-            </button>
+              {mutation.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Signing in...
+                </>
+              ) : (
+                'Sign in'
+              )}
+            </Button>
           </form>
-
-          {authConfig?.signup_enabled && (
-            <div className="mt-6 text-center">
-              <p className="text-gray-400">
-                Don't have an account?{' '}
-                <Link to="/register" className="text-blue-400 hover:text-blue-300">
-                  Sign up
-                </Link>
-              </p>
-            </div>
-          )}
         </div>
       </div>
     </div>

@@ -1,82 +1,73 @@
-import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import { Apple, Monitor, Container, ExternalLink, Key, Cable, BookOpen } from 'lucide-react';
 import { getCurrentUserOptions, listAuthTokensOptions } from '../api/client/@tanstack/react-query.gen';
-import { Button } from '../components/ui/button';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
+import { CodeBlock } from '../components/CodeBlock';
+import { Link } from 'react-router-dom';
 
 const platforms = [
-  { id: 'macos', name: 'macOS', icon: '🍎' },
-  { id: 'windows', name: 'Windows', icon: '🪟' },
-  { id: 'linux', name: 'Linux', icon: '🐧' },
-  { id: 'docker', name: 'Docker', icon: '🐳' },
+  { id: 'macos', name: 'macOS', icon: Apple },
+  { id: 'windows', name: 'Windows', icon: Monitor },
+  { id: 'linux', name: 'Linux', icon: Monitor },
+  { id: 'docker', name: 'Docker', icon: Container },
 ];
 
-export default function Dashboard() {
-  const [selectedPlatform, setSelectedPlatform] = useState('macos');
-  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+const installCommands: Record<string, { method: string; steps: Array<{ title: string; command: string; description: string }> }> = {
+  macos: {
+    method: 'Homebrew',
+    steps: [
+      {
+        title: 'Install via Homebrew',
+        command: 'brew tap localup/tap && brew install localup',
+        description: 'Install LocalUp via Homebrew',
+      },
+    ],
+  },
+  windows: {
+    method: 'Download',
+    steps: [
+      {
+        title: 'Download the installer',
+        command: 'https://github.com/localup-dev/localup/releases/latest',
+        description: 'Download the Windows installer from GitHub releases',
+      },
+    ],
+  },
+  linux: {
+    method: 'Download Binary',
+    steps: [
+      {
+        title: 'Download and install',
+        command: 'curl -fsSL https://get.localup.dev | sh',
+        description: 'Install LocalUp on Linux',
+      },
+    ],
+  },
+  docker: {
+    method: 'Docker',
+    steps: [
+      {
+        title: 'Run with Docker',
+        command: 'docker run -it localup/localup:latest --port 3000 --relay relay.localup.dev:4443',
+        description: 'Run LocalUp in a Docker container',
+      },
+    ],
+  },
+};
 
+export default function Dashboard() {
   const { data: user } = useQuery(getCurrentUserOptions());
   const { data: tokensData } = useQuery(listAuthTokensOptions());
 
   const hasDefaultToken = tokensData?.tokens?.some((t) => t.name === 'Default') || false;
 
-  const copyToClipboard = (text: string, index: number) => {
-    navigator.clipboard.writeText(text);
-    setCopiedIndex(index);
-    setTimeout(() => setCopiedIndex(null), 2000);
-  };
-
-  const installCommands = {
-    macos: {
-      method: 'Homebrew',
-      steps: [
-        {
-          title: 'Install via Homebrew',
-          command: 'brew tap localup/tap && brew install localup',
-          description: 'Install LocalUp via Homebrew',
-        },
-      ],
-    },
-    windows: {
-      method: 'Download',
-      steps: [
-        {
-          title: 'Download the installer',
-          command: 'https://github.com/localup-dev/localup/releases/latest',
-          description: 'Download the Windows installer from GitHub releases',
-        },
-      ],
-    },
-    linux: {
-      method: 'Download Binary',
-      steps: [
-        {
-          title: 'Download and install',
-          command: 'curl -fsSL https://get.localup.dev | sh',
-          description: 'Install LocalUp on Linux',
-        },
-      ],
-    },
-    docker: {
-      method: 'Docker',
-      steps: [
-        {
-          title: 'Run with Docker',
-          command: 'docker run -it localup/localup:latest --port 3000 --relay relay.localup.dev:4443',
-          description: 'Run LocalUp in a Docker container',
-        },
-      ],
-    },
-  };
-
-  const currentPlatform = installCommands[selectedPlatform as keyof typeof installCommands];
-
   return (
-    <div className="min-h-screen bg-gray-900 text-white">
+    <div className="min-h-screen bg-background text-foreground">
       {/* Header */}
-      <div className="border-b border-gray-800">
+      <div className="border-b border-border">
         <div className="max-w-7xl mx-auto px-6 py-6">
           <h1 className="text-3xl font-bold">Welcome{user?.username ? `, ${user.username}` : ''}!</h1>
-          <p className="text-gray-400 mt-2">
+          <p className="text-muted-foreground mt-2">
             LocalUp is your app's front door—a globally distributed reverse proxy that secures,
             protects and accelerates your applications and network services, no matter where you run them.
           </p>
@@ -85,158 +76,139 @@ export default function Dashboard() {
 
       {/* Main Content */}
       <div className="max-w-7xl mx-auto px-6 py-8">
-        <div className="bg-gray-800 rounded-lg p-8">
-          <div className="flex items-center justify-between mb-6">
-            <div>
-              <div className="flex items-center gap-3 mb-2">
-                <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold">
-                  1
+        <div className="bg-card rounded-lg border border-border p-8">
+          <div className="flex items-center gap-3 mb-6">
+            <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center text-primary-foreground font-bold text-sm">
+              1
+            </div>
+            <h2 className="text-2xl font-bold">Get an endpoint online</h2>
+          </div>
+
+          {/* Platform Selector Tabs */}
+          <Tabs defaultValue="macos" className="w-full">
+            <div className="flex items-center gap-4 mb-6">
+              <span className="text-sm text-muted-foreground">Agent</span>
+              <TabsList>
+                {platforms.map((platform) => {
+                  const Icon = platform.icon;
+                  return (
+                    <TabsTrigger key={platform.id} value={platform.id} className="gap-2">
+                      <Icon className="h-4 w-4" />
+                      {platform.name}
+                    </TabsTrigger>
+                  );
+                })}
+              </TabsList>
+            </div>
+
+            {platforms.map((platform) => (
+              <TabsContent key={platform.id} value={platform.id} className="space-y-8">
+                {/* Installation */}
+                <div>
+                  <h3 className="text-lg font-semibold mb-4">Installation</h3>
+                  <div className="space-y-4">
+                    {installCommands[platform.id].steps.map((step, index) => (
+                      <div key={index}>
+                        <p className="text-muted-foreground mb-2">{step.description}</p>
+                        <CodeBlock code={step.command} />
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <h2 className="text-2xl font-bold">Get an endpoint online</h2>
-              </div>
-            </div>
-          </div>
 
-          {/* Platform Selector */}
-          <div className="mb-8">
-            <div className="flex items-center gap-2 mb-4">
-              <span className="text-sm text-gray-400">Agent</span>
-              <div className="flex gap-2">
-                {platforms.map((platform) => (
-                  <Button
-                    key={platform.id}
-                    onClick={() => setSelectedPlatform(platform.id)}
-                    variant={selectedPlatform === platform.id ? 'default' : 'outline'}
-                  >
-                    <span className="mr-2">{platform.icon}</span>
-                    {platform.name}
-                  </Button>
-                ))}
-              </div>
-            </div>
-          </div>
+                {/* Setup authtoken */}
+                <div>
+                  <h3 className="text-lg font-semibold mb-4">Setup your authtoken</h3>
+                  <p className="text-muted-foreground mb-4">
+                    Run the following command to add your authtoken to the default configuration file.
+                  </p>
 
-          {/* Installation Steps */}
-          <div className="space-y-6">
-            {/* Installation */}
-            <div>
-              <h3 className="text-lg font-semibold mb-4">Installation</h3>
-              <div className="space-y-4">
-                {currentPlatform.steps.map((step, index) => (
-                  <div key={index}>
-                    <p className="text-gray-400 mb-2">{step.description}</p>
-                    <div className="bg-gray-900 rounded-md p-4 flex items-center justify-between">
-                      <code className="text-blue-400 font-mono text-sm">{step.command}</code>
-                      <Button
-                        onClick={() => copyToClipboard(step.command, index)}
-                        variant="secondary"
-                        size="sm"
-                        className="ml-4 flex-shrink-0"
-                      >
-                        {copiedIndex === index ? '✓ Copied' : '📋 Copy'}
-                      </Button>
+                  <CodeBlock code="localup config add-authtoken <YOUR_AUTH_TOKEN>" />
+
+                  <div className="mt-4 p-4 bg-primary/10 border border-primary/30 rounded-lg">
+                    <div className="flex items-start gap-3">
+                      <Key className="h-5 w-5 text-primary flex-shrink-0 mt-0.5" />
+                      <div>
+                        <p className="text-primary font-medium text-sm">
+                          Your auth token was automatically created when you {hasDefaultToken ? 'logged in' : 'registered'}.
+                        </p>
+                        <p className="text-muted-foreground text-sm mt-1">
+                          Go to the{' '}
+                          <Link to="/tokens" className="text-primary hover:underline">
+                            Auth Tokens
+                          </Link>{' '}
+                          page to view your tokens and create new ones if needed.
+                        </p>
+                      </div>
                     </div>
                   </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Setup authtoken */}
-            <div>
-              <h3 className="text-lg font-semibold mb-4">Setup your authtoken</h3>
-              <p className="text-gray-400 mb-4">
-                Run the following command to add your authtoken to the default configuration file.
-              </p>
-
-              <div>
-                <div className="bg-gray-900 rounded-md p-4 mb-4">
-                  <code className="text-blue-400 font-mono text-sm">
-                    localup config add-authtoken {'<YOUR_AUTH_TOKEN>'}
-                  </code>
                 </div>
-                <div className="p-4 bg-blue-900/20 border border-blue-600/30 rounded-md">
-                  <p className="text-blue-300 text-sm">
-                    💡 <strong>Your auth token was automatically created when you {hasDefaultToken ? 'logged in' : 'registered'}.</strong>
+
+                {/* Connect Command */}
+                <div>
+                  <h3 className="text-lg font-semibold mb-4">Deploy your app online</h3>
+                  <p className="text-muted-foreground mb-2">
+                    Run the following in the command line to expose a local web server:
                   </p>
-                  <p className="text-gray-400 text-sm mt-2">
-                    Go to the{' '}
-                    <a href="/tokens" className="text-blue-400 hover:text-blue-300 underline">
-                      Auth Tokens
-                    </a>{' '}
-                    page to view your tokens and create new ones if needed.
+                  <CodeBlock code="localup http 80" />
+                  <p className="text-muted-foreground text-sm mt-4">
+                    Go to your dev domain to see your app!
                   </p>
+                  <a
+                    href="http://localhost:18080"
+                    className="inline-flex items-center gap-2 text-primary hover:underline text-sm font-mono mt-1"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    http://localhost:18080
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
                 </div>
-              </div>
-            </div>
+              </TabsContent>
+            ))}
+          </Tabs>
 
-            {/* Connect Command */}
-            <div>
-              <h3 className="text-lg font-semibold mb-4">Deploy your app online</h3>
-              <p className="text-gray-400 mb-2">
-                Run the following in the command line to expose a local web server:
-              </p>
-              <div className="bg-gray-900 rounded-md p-4 flex items-center justify-between">
-                <code className="text-blue-400 font-mono text-sm">
-                  localup http 80
-                </code>
-                <Button
-                  onClick={() => copyToClipboard('localup http 80', 100)}
-                  variant="secondary"
-                  size="sm"
-                  className="ml-4 flex-shrink-0"
-                >
-                  {copiedIndex === 100 ? '✓ Copied' : '📋 Copy'}
-                </Button>
-              </div>
-              <p className="text-gray-400 text-sm mt-4">
-                Go to your dev domain to see your app!
-              </p>
-              <a
-                href="http://localhost:18080"
-                className="text-blue-400 hover:text-blue-300 text-sm font-mono"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                http://localhost:18080
-              </a>
-            </div>
-
-            {/* Next Steps */}
-            <div className="mt-8 pt-6 border-t border-gray-700">
-              <h3 className="text-lg font-semibold mb-4">Next Steps</h3>
-              <ul className="space-y-2 text-gray-400">
-                <li className="flex items-start">
-                  <span className="mr-2">•</span>
-                  <span>
-                    Visit the{' '}
-                    <a href="/tokens" className="text-blue-400 hover:text-blue-300">
-                      Auth Tokens
-                    </a>{' '}
-                    page to manage your API tokens
-                  </span>
-                </li>
-                <li className="flex items-start">
-                  <span className="mr-2">•</span>
-                  <span>
-                    View your{' '}
-                    <a href="/tunnels" className="text-blue-400 hover:text-blue-300">
-                      Active Tunnels
-                    </a>{' '}
-                    and monitor traffic
-                  </span>
-                </li>
-                <li className="flex items-start">
-                  <span className="mr-2">•</span>
-                  <span>
-                    Check out the{' '}
-                    <a href="https://github.com/localup-dev/localup" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">
-                      documentation
-                    </a>{' '}
-                    for advanced features
-                  </span>
-                </li>
-              </ul>
-            </div>
+          {/* Next Steps */}
+          <div className="mt-8 pt-6 border-t border-border">
+            <h3 className="text-lg font-semibold mb-4">Next Steps</h3>
+            <ul className="space-y-3">
+              <li className="flex items-start gap-3 text-muted-foreground">
+                <Key className="h-5 w-5 text-muted-foreground flex-shrink-0 mt-0.5" />
+                <span>
+                  Visit the{' '}
+                  <Link to="/tokens" className="text-primary hover:underline">
+                    Auth Tokens
+                  </Link>{' '}
+                  page to manage your API tokens
+                </span>
+              </li>
+              <li className="flex items-start gap-3 text-muted-foreground">
+                <Cable className="h-5 w-5 text-muted-foreground flex-shrink-0 mt-0.5" />
+                <span>
+                  View your{' '}
+                  <Link to="/tunnels" className="text-primary hover:underline">
+                    Active Tunnels
+                  </Link>{' '}
+                  and monitor traffic
+                </span>
+              </li>
+              <li className="flex items-start gap-3 text-muted-foreground">
+                <BookOpen className="h-5 w-5 text-muted-foreground flex-shrink-0 mt-0.5" />
+                <span>
+                  Check out the{' '}
+                  <a
+                    href="https://github.com/localup-dev/localup"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary hover:underline inline-flex items-center gap-1"
+                  >
+                    documentation
+                    <ExternalLink className="h-3 w-3" />
+                  </a>{' '}
+                  for advanced features
+                </span>
+              </li>
+            </ul>
           </div>
         </div>
       </div>

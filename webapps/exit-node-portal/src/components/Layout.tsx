@@ -1,12 +1,22 @@
 import { type ReactNode, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
+import { Home, Cable, Key, LogOut, ChevronDown } from 'lucide-react';
 import { getCurrentUserOptions, logoutMutation } from '../api/client/@tanstack/react-query.gen';
 import { useTeam } from '../contexts/TeamContext';
+import { Avatar, AvatarFallback } from './ui/avatar';
+import { Separator } from './ui/separator';
+import { Button } from './ui/button';
 
 interface LayoutProps {
   children: ReactNode;
 }
+
+const navItems = [
+  { to: '/dashboard', icon: Home, label: 'Getting Started' },
+  { to: '/tunnels', icon: Cable, label: 'Tunnels' },
+  { to: '/tokens', icon: Key, label: 'Auth Tokens' },
+];
 
 export default function Layout({ children }: LayoutProps) {
   const navigate = useNavigate();
@@ -17,7 +27,6 @@ export default function Layout({ children }: LayoutProps) {
     retry: false,
   });
 
-  // Redirect to login if not authenticated (React Query v5 pattern)
   useEffect(() => {
     if (isError) {
       navigate('/login');
@@ -35,89 +44,91 @@ export default function Layout({ children }: LayoutProps) {
     logout.mutate({});
   };
 
+  const getInitials = (email?: string) => {
+    if (!email) return '?';
+    return email.substring(0, 2).toUpperCase();
+  };
+
   return (
-    <div className="min-h-screen bg-gray-900 flex">
+    <div className="min-h-screen bg-background flex">
       {/* Sidebar */}
-      <div className="w-64 bg-gray-800 border-r border-gray-700 flex flex-col">
+      <div className="w-64 bg-card border-r border-border flex flex-col">
         <div className="p-6">
-          <h1 className="text-2xl font-bold text-white">LocalUp</h1>
-          <p className="text-sm text-gray-400 mt-1">{user?.email}</p>
+          <h1 className="text-2xl font-bold text-foreground">LocalUp</h1>
+          <div className="flex items-center gap-3 mt-4">
+            <Avatar className="h-8 w-8">
+              <AvatarFallback className="bg-primary text-primary-foreground text-xs">
+                {getInitials(user?.email)}
+              </AvatarFallback>
+            </Avatar>
+            <p className="text-sm text-muted-foreground truncate">{user?.email}</p>
+          </div>
         </div>
+
+        <Separator />
 
         {/* Team Selector */}
         {teams.length > 0 && (
-          <div className="px-4 mb-4">
-            <label htmlFor="team-select" className="block text-xs text-gray-400 mb-2">
+          <div className="px-4 py-4">
+            <label htmlFor="team-select" className="block text-xs text-muted-foreground mb-2">
               Team
             </label>
-            <select
-              id="team-select"
-              value={selectedTeam?.id || ''}
-              onChange={(e) => {
-                const team = teams.find((t) => t.id === e.target.value);
-                if (team) selectTeam(team);
-              }}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              {teams.map((team) => (
-                <option key={team.id} value={team.id}>
-                  {team.name}
-                </option>
-              ))}
-            </select>
+            <div className="relative">
+              <select
+                id="team-select"
+                value={selectedTeam?.id || ''}
+                onChange={(e) => {
+                  const team = teams.find((t) => t.id === e.target.value);
+                  if (team) selectTeam(team);
+                }}
+                className="w-full px-3 py-2 bg-muted border border-border rounded-md text-foreground text-sm focus:outline-none focus:ring-2 focus:ring-ring appearance-none cursor-pointer"
+              >
+                {teams.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.name}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+            </div>
           </div>
         )}
 
-        <nav className="flex-1 px-4">
+        <nav className="flex-1 px-4 py-2">
           <div className="space-y-1">
-            <NavLink
-              to="/dashboard"
-              className={({ isActive }) =>
-                `block px-4 py-2 rounded-md text-sm font-medium transition ${
-                  isActive
-                    ? 'bg-gray-700 text-white'
-                    : 'text-gray-400 hover:bg-gray-700 hover:text-white'
-                }`
-              }
-            >
-              🏠 Getting Started
-            </NavLink>
-
-            <NavLink
-              to="/tunnels"
-              className={({ isActive }) =>
-                `block px-4 py-2 rounded-md text-sm font-medium transition ${
-                  isActive
-                    ? 'bg-gray-700 text-white'
-                    : 'text-gray-400 hover:bg-gray-700 hover:text-white'
-                }`
-              }
-            >
-              🔌 Tunnels
-            </NavLink>
-
-            <NavLink
-              to="/tokens"
-              className={({ isActive }) =>
-                `block px-4 py-2 rounded-md text-sm font-medium transition ${
-                  isActive
-                    ? 'bg-gray-700 text-white'
-                    : 'text-gray-400 hover:bg-gray-700 hover:text-white'
-                }`
-              }
-            >
-              🔑 Auth Tokens
-            </NavLink>
+            {navItems.map((item) => {
+              const Icon = item.icon;
+              return (
+                <NavLink
+                  key={item.to}
+                  to={item.to}
+                  className={({ isActive }) =>
+                    `flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                      isActive
+                        ? 'bg-muted text-foreground'
+                        : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                    }`
+                  }
+                >
+                  <Icon className="h-4 w-4" />
+                  {item.label}
+                </NavLink>
+              );
+            })}
           </div>
         </nav>
 
-        <div className="p-4 border-t border-gray-700">
-          <button
+        <Separator />
+
+        <div className="p-4">
+          <Button
             onClick={handleLogout}
-            className="w-full px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-md text-sm font-medium text-gray-300 transition"
+            variant="ghost"
+            className="w-full justify-start gap-3 text-muted-foreground hover:text-foreground"
           >
-            🚪 Logout
-          </button>
+            <LogOut className="h-4 w-4" />
+            Logout
+          </Button>
         </div>
       </div>
 

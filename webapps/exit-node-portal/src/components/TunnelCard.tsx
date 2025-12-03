@@ -1,4 +1,5 @@
 import { useNavigate } from 'react-router-dom';
+import { BarChart3, Link2 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 
@@ -135,13 +136,13 @@ export default function TunnelCard({ tunnel }: TunnelCardProps) {
         </div>
 
         {/* Stats preview */}
-        <div className="flex items-center gap-4 pt-2 text-xs text-muted-foreground border-t">
-          <div className="flex items-center gap-1">
-            <span>📊</span>
+        <div className="flex items-center gap-4 pt-2 text-xs text-muted-foreground border-t border-border">
+          <div className="flex items-center gap-1.5">
+            <BarChart3 className="h-3.5 w-3.5" />
             <span>View traffic</span>
           </div>
-          <div className="flex items-center gap-1">
-            <span>🔗</span>
+          <div className="flex items-center gap-1.5">
+            <Link2 className="h-3.5 w-3.5" />
             <span>{tunnel.endpoints.length} endpoint{tunnel.endpoints.length !== 1 ? 's' : ''}</span>
           </div>
         </div>
