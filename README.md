@@ -186,20 +186,18 @@ psql -h localhost -U postgres -p 19432
 
 ## 📦 Installation
 
-Choose one of two methods:
-
 ### Option 1: Homebrew (macOS/Linux)
 
 ```bash
 brew tap localup-dev/tap
 brew install localup
 
-# Verify
+# Verify installation
 localup --version
 localup --help
 ```
 
-### Option 2: Quick Install (One-Liner)
+### Option 2: Quick Install Script
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/localup-dev/localup/main/scripts/install.sh | bash

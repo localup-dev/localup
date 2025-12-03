@@ -18,7 +18,7 @@ const installCommands: Record<string, { method: string; steps: Array<{ title: st
     steps: [
       {
         title: 'Install via Homebrew',
-        command: 'brew tap localup/tap && brew install localup',
+        command: 'brew tap localup-dev/tap && brew install localup',
         description: 'Install LocalUp via Homebrew',
       },
     ],
@@ -34,12 +34,12 @@ const installCommands: Record<string, { method: string; steps: Array<{ title: st
     ],
   },
   linux: {
-    method: 'Download Binary',
+    method: 'Homebrew',
     steps: [
       {
-        title: 'Download and install',
-        command: 'curl -fsSL https://get.localup.dev | sh',
-        description: 'Install LocalUp on Linux',
+        title: 'Install via Homebrew',
+        command: 'brew tap localup-dev/tap && brew install localup',
+        description: 'Install LocalUp via Homebrew (works on Linux too)',
       },
     ],
   },
@@ -48,7 +48,7 @@ const installCommands: Record<string, { method: string; steps: Array<{ title: st
     steps: [
       {
         title: 'Run with Docker',
-        command: 'docker run -it localup/localup:latest --port 3000 --relay relay.localup.dev:4443',
+        command: 'docker run -it localup/localup:latest --port 3000 --relay tunnel.kfs.es:4443 --token $TOKEN',
         description: 'Run LocalUp in a Docker container',
       },
     ],
@@ -120,10 +120,15 @@ export default function Dashboard() {
                 <div>
                   <h3 className="text-lg font-semibold mb-4">Setup your authtoken</h3>
                   <p className="text-muted-foreground mb-4">
-                    Run the following command to add your authtoken to the default configuration file.
+                    Run the following command to set your JWT token in the configuration.
                   </p>
 
-                  <CodeBlock code="localup config add-authtoken <YOUR_AUTH_TOKEN>" />
+                  <CodeBlock code="localup config set-token <YOUR_JWT_TOKEN>" />
+
+                  <p className="text-muted-foreground text-sm mt-3 mb-2">
+                    Or export it as an environment variable:
+                  </p>
+                  <CodeBlock code="export TOKEN=<YOUR_JWT_TOKEN>" />
 
                   <div className="mt-4 p-4 bg-primary/10 border border-primary/30 rounded-lg">
                     <div className="flex items-start gap-3">
@@ -148,19 +153,25 @@ export default function Dashboard() {
                 <div>
                   <h3 className="text-lg font-semibold mb-4">Deploy your app online</h3>
                   <p className="text-muted-foreground mb-2">
-                    Run the following in the command line to expose a local web server:
+                    For HTTP tunnels, run the following to expose a local web server:
                   </p>
-                  <CodeBlock code="localup http 80" />
+                  <CodeBlock code='localup --relay=tunnel.kfs.es:4443 --port=3000 --token=$TOKEN --subdomain="myapp"' />
+
+                  <p className="text-muted-foreground text-sm mt-4 mb-2">
+                    For TCP tunnels (e.g., SSH, databases):
+                  </p>
+                  <CodeBlock code='localup --port=22 --relay=tunnel.kfs.es:5443 --protocol=tcp --token=$TOKEN' />
+
                   <p className="text-muted-foreground text-sm mt-4">
                     Go to your dev domain to see your app!
                   </p>
                   <a
-                    href="http://localhost:18080"
+                    href="http://myapp.tunnel.kfs.es"
                     className="inline-flex items-center gap-2 text-primary hover:underline text-sm font-mono mt-1"
                     target="_blank"
                     rel="noopener noreferrer"
                   >
-                    http://localhost:18080
+                    http://myapp.tunnel.kfs.es
                     <ExternalLink className="h-3 w-3" />
                   </a>
                 </div>

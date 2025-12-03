@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { handleApiMetrics, handleApiStats, handleApiTcpConnections } from './api/generated/sdk.gen';
 import type { HttpMetric, MetricsStats, TcpMetric } from './api/generated/types.gen';
 
@@ -19,6 +19,188 @@ interface TcpStats {
 }
 
 const ITEMS_PER_PAGE = 20;
+
+// Quick Connect Component
+function QuickConnect({ tunnelInfo }: { tunnelInfo: TunnelEndpoint[] }) {
+  const [token, setToken] = useState('');
+  const [relayAddr, setRelayAddr] = useState('tunnel.kfs.es:4443');
+  const [localPort, setLocalPort] = useState('3000');
+  const [subdomain, setSubdomain] = useState('myapp');
+  const [protocol, setProtocol] = useState<'http' | 'tcp'>('http');
+  const [copied, setCopied] = useState<string | null>(null);
+
+  // Detect relay address from tunnel info
+  useEffect(() => {
+    if (tunnelInfo.length > 0) {
+      const endpoint = tunnelInfo[0];
+      if (endpoint.protocol.Tcp) {
+        setProtocol('tcp');
+      } else {
+        setProtocol('http');
+      }
+    }
+  }, [tunnelInfo]);
+
+  const copyToClipboard = useCallback((text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopied(id);
+    setTimeout(() => setCopied(null), 2000);
+  }, []);
+
+  const httpCommand = `localup --relay=${relayAddr} --port=${localPort} --token=$TOKEN --subdomain="${subdomain}"`;
+  const tcpCommand = `localup --port=${localPort} --relay=${relayAddr} --protocol=tcp --token=$TOKEN`;
+  const setTokenCommand = `localup config set-token "${token || 'YOUR_JWT_TOKEN'}"`;
+  const exportTokenCommand = `export TOKEN="${token || 'YOUR_JWT_TOKEN'}"`;
+
+  return (
+    <div className="card-dark p-6 mb-8">
+      <h2 className="text-xl font-semibold text-dark-text-primary mb-4">Quick Connect</h2>
+      <p className="text-dark-text-secondary text-sm mb-6">
+        Configure your tunnel connection settings and copy the commands below.
+      </p>
+
+      {/* Configuration Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+        <div>
+          <label className="block text-sm font-medium text-dark-text-secondary mb-2">Relay Address</label>
+          <input
+            type="text"
+            value={relayAddr}
+            onChange={(e) => setRelayAddr(e.target.value)}
+            placeholder="tunnel.kfs.es:4443"
+            className="w-full px-3 py-2 bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-accent-blue"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-dark-text-secondary mb-2">Local Port</label>
+          <input
+            type="text"
+            value={localPort}
+            onChange={(e) => setLocalPort(e.target.value)}
+            placeholder="3000"
+            className="w-full px-3 py-2 bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-accent-blue"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-dark-text-secondary mb-2">Subdomain (HTTP)</label>
+          <input
+            type="text"
+            value={subdomain}
+            onChange={(e) => setSubdomain(e.target.value)}
+            placeholder="myapp"
+            className="w-full px-3 py-2 bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-accent-blue"
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-medium text-dark-text-secondary mb-2">Protocol</label>
+          <select
+            value={protocol}
+            onChange={(e) => setProtocol(e.target.value as 'http' | 'tcp')}
+            className="w-full px-3 py-2 bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-accent-blue"
+          >
+            <option value="http">HTTP/HTTPS</option>
+            <option value="tcp">TCP</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Token Input */}
+      <div className="mb-6">
+        <label className="block text-sm font-medium text-dark-text-secondary mb-2">
+          JWT Token
+          <span className="text-dark-text-muted ml-2">(paste your token here)</span>
+        </label>
+        <textarea
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+          rows={2}
+          className="w-full px-3 py-2 bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent-blue resize-none"
+        />
+      </div>
+
+      {/* Commands */}
+      <div className="space-y-4">
+        {/* Step 1: Set Token */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-medium text-dark-text-primary">Step 1: Set your token</h3>
+          </div>
+          <div className="relative">
+            <code className="block w-full px-4 py-3 pr-24 bg-dark-surface-light border border-dark-border rounded-lg text-sm font-mono text-accent-blue overflow-x-auto">
+              {setTokenCommand}
+            </code>
+            <button
+              onClick={() => copyToClipboard(setTokenCommand, 'set-token')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-dark-surface hover:bg-dark-border text-dark-text-secondary hover:text-dark-text-primary rounded text-xs transition-colors"
+            >
+              {copied === 'set-token' ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+          <p className="text-xs text-dark-text-muted mt-1">Or export as environment variable:</p>
+          <div className="relative mt-1">
+            <code className="block w-full px-4 py-2 pr-24 bg-dark-surface-light border border-dark-border rounded-lg text-sm font-mono text-dark-text-secondary overflow-x-auto">
+              {exportTokenCommand}
+            </code>
+            <button
+              onClick={() => copyToClipboard(exportTokenCommand, 'export-token')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-dark-surface hover:bg-dark-border text-dark-text-secondary hover:text-dark-text-primary rounded text-xs transition-colors"
+            >
+              {copied === 'export-token' ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+        </div>
+
+        {/* Step 2: Connect */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-medium text-dark-text-primary">
+              Step 2: Connect ({protocol === 'http' ? 'HTTP Relay' : 'TCP Relay'})
+            </h3>
+          </div>
+          <div className="relative">
+            <code className="block w-full px-4 py-3 pr-24 bg-dark-surface-light border border-dark-border rounded-lg text-sm font-mono text-accent-green overflow-x-auto">
+              {protocol === 'http' ? httpCommand : tcpCommand}
+            </code>
+            <button
+              onClick={() => copyToClipboard(protocol === 'http' ? httpCommand : tcpCommand, 'connect')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-dark-surface hover:bg-dark-border text-dark-text-secondary hover:text-dark-text-primary rounded text-xs transition-colors"
+            >
+              {copied === 'connect' ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+        </div>
+
+        {/* Full Command with Token */}
+        {token && (
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-medium text-dark-text-primary">Full command (with token embedded)</h3>
+            </div>
+            <div className="relative">
+              <code className="block w-full px-4 py-3 pr-24 bg-dark-surface-light border border-dark-border rounded-lg text-sm font-mono text-accent-purple overflow-x-auto whitespace-pre-wrap break-all">
+                {protocol === 'http'
+                  ? `localup --relay=${relayAddr} --port=${localPort} --token="${token}" --subdomain="${subdomain}"`
+                  : `localup --port=${localPort} --relay=${relayAddr} --protocol=tcp --token="${token}"`}
+              </code>
+              <button
+                onClick={() => copyToClipboard(
+                  protocol === 'http'
+                    ? `localup --relay=${relayAddr} --port=${localPort} --token="${token}" --subdomain="${subdomain}"`
+                    : `localup --port=${localPort} --relay=${relayAddr} --protocol=tcp --token="${token}"`,
+                  'full'
+                )}
+                className="absolute right-2 top-2 px-3 py-1.5 bg-dark-surface hover:bg-dark-border text-dark-text-secondary hover:text-dark-text-primary rounded text-xs transition-colors"
+              >
+                {copied === 'full' ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function App() {
   const [viewMode, setViewMode] = useState<ViewMode | null>(null); // null until we detect protocol
@@ -161,6 +343,9 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Quick Connect Section */}
+        <QuickConnect tunnelInfo={tunnelInfo} />
+
         {/* Tunnel List Section */}
         <div className="mb-8">
           <div className="card-dark p-6">
