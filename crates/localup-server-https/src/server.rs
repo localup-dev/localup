@@ -4,7 +4,7 @@ use localup_proto::TunnelMessage;
 use localup_relay_db::entities::custom_domain;
 use localup_router::{RouteKey, RouteRegistry};
 use localup_transport::TransportConnection;
-use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
@@ -63,6 +63,13 @@ pub struct HttpsServer {
     localup_manager: Option<Arc<TunnelConnectionManager>>,
     pending_requests: Option<Arc<PendingRequests>>,
     db: Option<DatabaseConnection>,
+}
+
+/// Captured response data from transparent proxy
+struct ResponseCapture {
+    status: Option<u16>,
+    headers: Option<Vec<(String, String)>>,
+    body: Option<Vec<u8>>,
 }
 
 /// SNI-based certificate resolver that supports custom domain certificates
@@ -284,6 +291,7 @@ impl HttpsServer {
         let route_registry = self.route_registry.clone();
         let localup_manager = self.localup_manager.clone();
         let pending_requests = self.pending_requests.clone();
+        let db = self.db.clone();
 
         // Accept connections
         loop {
@@ -293,10 +301,11 @@ impl HttpsServer {
                     let registry = route_registry.clone();
                     let manager = localup_manager.clone();
                     let pending = pending_requests.clone();
+                    let db = db.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_connection(
-                            stream, peer_addr, acceptor, registry, manager, pending,
+                            stream, peer_addr, acceptor, registry, manager, pending, db,
                         )
                         .await
                         {
@@ -318,6 +327,7 @@ impl HttpsServer {
         route_registry: Arc<RouteRegistry>,
         localup_manager: Option<Arc<TunnelConnectionManager>>,
         pending_requests: Option<Arc<PendingRequests>>,
+        db: Option<DatabaseConnection>,
     ) -> Result<(), HttpsServerError> {
         debug!("New HTTPS connection from {}", peer_addr);
 
@@ -387,7 +397,7 @@ impl HttpsServer {
         // Forward through tunnel (same as HTTP server)
         if let (Some(manager), Some(pending)) = (localup_manager, pending_requests) {
             Self::handle_localup_request(
-                tls_stream, manager, pending, localup_id, &request, &buffer,
+                tls_stream, manager, pending, localup_id, &request, &buffer, db,
             )
             .await?;
         } else {
@@ -404,10 +414,31 @@ impl HttpsServer {
         localup_manager: Arc<TunnelConnectionManager>,
         _pending_requests: Arc<PendingRequests>,
         localup_id: &str,
-        _request: &str,
+        request: &str,
         request_bytes: &[u8],
+        db: Option<DatabaseConnection>,
     ) -> Result<(), HttpsServerError> {
         debug!("Transparent HTTPS streaming for tunnel: {}", localup_id);
+
+        // Record start time and generate request ID for database capture
+        let request_start = chrono::Utc::now();
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        // Parse request for database capture
+        let (method, uri, headers) = Self::parse_http_request(request);
+        let host = Self::extract_host_from_request(request);
+
+        // Extract body from request bytes (after \r\n\r\n)
+        let body = if let Some(pos) = request.find("\r\n\r\n") {
+            let body_offset = pos + 4;
+            if body_offset < request_bytes.len() {
+                Some(request_bytes[body_offset..].to_vec())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Check HTTP authentication if configured for this tunnel
         if let Some(authenticator) = localup_manager.get_http_authenticator(localup_id).await {
@@ -483,20 +514,111 @@ impl HttpsServer {
             stream_id
         );
 
-        // Now enter bidirectional streaming loop
-        Self::proxy_transparent_stream(tls_stream, quic_send, quic_recv, stream_id).await?;
+        // Now enter bidirectional streaming loop and capture response
+        let response_capture =
+            Self::proxy_transparent_stream(tls_stream, quic_send, quic_recv, stream_id).await?;
+
+        // Save captured request/response to database
+        if let Some(ref db_conn) = db {
+            use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
+
+            let response_end = chrono::Utc::now();
+            let latency_ms = (response_end - request_start).num_milliseconds() as i32;
+
+            let captured_request = localup_relay_db::entities::captured_request::ActiveModel {
+                id: Set(request_id.clone()),
+                localup_id: Set(localup_id.to_string()),
+                method: Set(method.clone()),
+                path: Set(uri.clone()),
+                host: Set(host),
+                headers: Set(serde_json::to_string(&headers).unwrap_or_default()),
+                body: Set(body.as_ref().map(|b| BASE64.encode(b))),
+                status: Set(response_capture.status.map(|s| s as i32)),
+                response_headers: Set(response_capture
+                    .headers
+                    .as_ref()
+                    .map(|h| serde_json::to_string(h).unwrap_or_default())),
+                response_body: Set(response_capture.body.as_ref().map(|b| BASE64.encode(b))),
+                created_at: Set(request_start),
+                responded_at: Set(Some(response_end)),
+                latency_ms: Set(Some(latency_ms)),
+            };
+
+            use sea_orm::EntityTrait;
+            if let Err(e) =
+                localup_relay_db::entities::prelude::CapturedRequest::insert(captured_request)
+                    .exec(db_conn)
+                    .await
+            {
+                warn!(
+                    "Failed to save captured HTTPS request {}: {}",
+                    request_id, e
+                );
+            } else {
+                debug!("Captured HTTPS request {} to database", request_id);
+            }
+        }
 
         Ok(())
     }
 
-    /// Bidirectional transparent streaming proxy
+    /// Parse HTTP request into components
+    fn parse_http_request(request: &str) -> (String, String, Vec<(String, String)>) {
+        let mut lines = request.lines();
+
+        // Parse request line
+        let (method, uri) = if let Some(line) = lines.next() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                (parts[0].to_string(), parts[1].to_string())
+            } else {
+                ("GET".to_string(), "/".to_string())
+            }
+        } else {
+            ("GET".to_string(), "/".to_string())
+        };
+
+        // Parse headers
+        let mut headers = Vec::new();
+        for line in lines {
+            if line.is_empty() {
+                break;
+            }
+            if let Some(colon_pos) = line.find(':') {
+                let name = line[..colon_pos].trim().to_string();
+                let value = line[colon_pos + 1..].trim().to_string();
+                headers.push((name, value));
+            }
+        }
+
+        (method, uri, headers)
+    }
+
+    /// Extract Host header from HTTP request
+    fn extract_host_from_request(request: &str) -> Option<String> {
+        for line in request.lines() {
+            if line.to_lowercase().starts_with("host:") {
+                let host = line.split(':').nth(1)?.trim();
+                // Remove port if present
+                let host = host.split(':').next().unwrap_or(host);
+                return Some(host.to_string());
+            }
+        }
+        None
+    }
+
+    /// Bidirectional transparent streaming proxy with response capture
     async fn proxy_transparent_stream(
         mut tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
         mut quic_send: localup_transport_quic::QuicSendHalf,
         mut quic_recv: localup_transport_quic::QuicRecvHalf,
         stream_id: u32,
-    ) -> Result<(), HttpsServerError> {
+    ) -> Result<ResponseCapture, HttpsServerError> {
         let mut client_buffer = vec![0u8; 16384];
+        let mut response_buffer = Vec::new();
+        let mut headers_parsed = false;
+        let mut status: Option<u16> = None;
+        let mut response_headers: Option<Vec<(String, String)>> = None;
 
         loop {
             tokio::select! {
@@ -532,6 +654,44 @@ impl HttpsServer {
                     match result {
                         Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
                             debug!("Forwarding {} bytes from tunnel to client (stream {})", data.len(), stream_id);
+
+                            // Capture response data for database (limit to first 64KB)
+                            if response_buffer.len() < 65536 {
+                                let remaining = 65536 - response_buffer.len();
+                                let to_capture = data.len().min(remaining);
+                                response_buffer.extend_from_slice(&data[..to_capture]);
+                            }
+
+                            // Parse headers from first chunk if not already done
+                            if !headers_parsed {
+                                if let Ok(response_str) = std::str::from_utf8(&response_buffer) {
+                                    if let Some(header_end) = response_str.find("\r\n\r\n") {
+                                        let header_section = &response_str[..header_end];
+                                        let mut lines = header_section.lines();
+
+                                        // Parse status line
+                                        if let Some(status_line) = lines.next() {
+                                            let parts: Vec<&str> = status_line.split_whitespace().collect();
+                                            if parts.len() >= 2 {
+                                                status = parts[1].parse().ok();
+                                            }
+                                        }
+
+                                        // Parse headers
+                                        let mut hdrs = Vec::new();
+                                        for line in lines {
+                                            if let Some(colon_pos) = line.find(':') {
+                                                let name = line[..colon_pos].trim().to_string();
+                                                let value = line[colon_pos + 1..].trim().to_string();
+                                                hdrs.push((name, value));
+                                            }
+                                        }
+                                        response_headers = Some(hdrs);
+                                        headers_parsed = true;
+                                    }
+                                }
+                            }
+
                             if let Err(e) = tls_stream.write_all(&data).await {
                                 warn!("Failed to write to client: {}", e);
                                 break;
@@ -563,7 +723,28 @@ impl HttpsServer {
 
         debug!("Transparent stream proxy ended (stream {})", stream_id);
         let _ = tls_stream.shutdown().await;
-        Ok(())
+
+        // Extract body from response buffer
+        let body = if let Ok(response_str) = std::str::from_utf8(&response_buffer) {
+            if let Some(header_end) = response_str.find("\r\n\r\n") {
+                let body_start = header_end + 4;
+                if body_start < response_buffer.len() {
+                    Some(response_buffer[body_start..].to_vec())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(ResponseCapture {
+            status,
+            headers: response_headers,
+            body,
+        })
     }
 }
 
