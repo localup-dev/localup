@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" width="200" height="200">
+    <rect width="200" height="200" fill="#0f0f3d"/>
+    <text x="100" y="140"
+          font-family="Inter, Segoe UI, Arial, sans-serif"
+          font-weight="900"
+          font-size="120"
+          fill="#ffffff"
+          text-anchor="middle">L</text>
+  </svg>

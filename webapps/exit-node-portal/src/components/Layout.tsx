@@ -68,7 +68,9 @@ export default function Layout({ children }: LayoutProps) {
       {/* Sidebar */}
       <div className="w-64 bg-card border-r border-border flex flex-col">
         <div className="p-6">
-          <h1 className="text-2xl font-bold text-foreground">LocalUp</h1>
+          <div className="flex items-center gap-2">
+            <img src="/logo.svg" alt="LocalUp" className="h-8" />
+          </div>
           <div className="flex items-center gap-3 mt-4">
             <Avatar className="h-8 w-8">
               <AvatarFallback className="bg-primary text-primary-foreground text-xs">
