@@ -1167,6 +1167,7 @@ use uuid::Uuid;
 pub async fn auth_config(State(state): State<Arc<AppState>>) -> Json<crate::models::AuthConfig> {
     Json(crate::models::AuthConfig {
         signup_enabled: state.allow_signup,
+        relay: state.relay_config.clone(),
     })
 }
 

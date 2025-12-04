@@ -1,9 +1,12 @@
-import { useQuery } from '@tanstack/react-query';
-import { Apple, Monitor, Container, ExternalLink, Key, Cable, BookOpen } from 'lucide-react';
-import { getCurrentUserOptions, listAuthTokensOptions } from '../api/client/@tanstack/react-query.gen';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+import { Apple, Monitor, Container, ExternalLink, Key, Cable, BookOpen, Loader2, Check } from 'lucide-react';
+import { getCurrentUserOptions, listAuthTokensOptions, createAuthTokenMutation, listAuthTokensQueryKey, authConfigOptions } from '../api/client/@tanstack/react-query.gen';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { CodeBlock } from '../components/CodeBlock';
 import { Link } from 'react-router-dom';
+import { Button } from '../components/ui/button';
+import type { RelayConfig } from '../api/client/types.gen';
 
 const platforms = [
   { id: 'macos', name: 'macOS', icon: Apple },
@@ -48,16 +51,53 @@ const installCommands: Record<string, { method: string; steps: Array<{ title: st
     steps: [
       {
         title: 'Run with Docker',
-        command: 'docker run -it localup/localup:latest --port 3000 --relay tunnel.kfs.es:4443 --token $TOKEN',
+        command: 'docker run -it localup/localup:latest --help',
         description: 'Run LocalUp in a Docker container',
       },
     ],
   },
 };
 
+// Default relay config (fallback if API doesn't provide one)
+const DEFAULT_RELAY_CONFIG: RelayConfig = {
+  domain: 'localhost',
+  relay_addr: 'localhost:4443',
+  supports_http: true,
+  supports_tcp: false,
+};
+
 export default function Dashboard() {
+  const queryClient = useQueryClient();
   const { data: user } = useQuery(getCurrentUserOptions());
   const { data: tokensData } = useQuery(listAuthTokensOptions());
+  const { data: authConfig } = useQuery(authConfigOptions());
+  const [generatedToken, setGeneratedToken] = useState<string | null>(null);
+  const [tokenExpiresAt, setTokenExpiresAt] = useState<string | null>(null);
+
+  // Get relay config from API or use default
+  const relayConfig = authConfig?.relay || DEFAULT_RELAY_CONFIG;
+
+  const createTokenMutation = useMutation({
+    ...createAuthTokenMutation(),
+    onSuccess: (data) => {
+      setGeneratedToken(data.token);
+      setTokenExpiresAt(data.expires_at || null);
+      queryClient.invalidateQueries({ queryKey: listAuthTokensQueryKey() });
+    },
+  });
+
+  const handleGenerateToken = () => {
+    const username = user?.username || user?.email?.split('@')[0] || 'user';
+    const timestamp = Math.floor(Date.now() / 1000);
+    const tokenName = `${username} ${timestamp}`;
+
+    createTokenMutation.mutate({
+      body: {
+        name: tokenName,
+        description: 'Generated from dashboard quick setup',
+      },
+    });
+  };
 
   const hasDefaultToken = tokensData?.tokens?.some((t) => t.name === 'Default') || false;
 
@@ -119,61 +159,127 @@ export default function Dashboard() {
                 {/* Setup authtoken */}
                 <div>
                   <h3 className="text-lg font-semibold mb-4">Setup your authtoken</h3>
-                  <p className="text-muted-foreground mb-4">
-                    Run the following command to set your JWT token in the configuration.
-                  </p>
 
-                  <CodeBlock code="localup config set-token <YOUR_JWT_TOKEN>" />
+                  {generatedToken ? (
+                    // Token generated - show inline
+                    <div className="space-y-4">
+                      <div className="flex items-center gap-2 text-green-600 dark:text-green-400">
+                        <Check className="h-5 w-5" />
+                        <span className="font-medium">Token generated successfully!</span>
+                      </div>
 
-                  <p className="text-muted-foreground text-sm mt-3 mb-2">
-                    Or export it as an environment variable:
-                  </p>
-                  <CodeBlock code="export TOKEN=<YOUR_JWT_TOKEN>" />
-
-                  <div className="mt-4 p-4 bg-primary/10 border border-primary/30 rounded-lg">
-                    <div className="flex items-start gap-3">
-                      <Key className="h-5 w-5 text-primary flex-shrink-0 mt-0.5" />
                       <div>
-                        <p className="text-primary font-medium text-sm">
-                          Your auth token was automatically created when you {hasDefaultToken ? 'logged in' : 'registered'}.
+                        <p className="text-muted-foreground mb-2">
+                          Run this command to save your token:
                         </p>
-                        <p className="text-muted-foreground text-sm mt-1">
-                          Go to the{' '}
-                          <Link to="/tokens" className="text-primary hover:underline">
-                            Auth Tokens
-                          </Link>{' '}
-                          page to view your tokens and create new ones if needed.
+                        <CodeBlock code={`localup config set-token ${generatedToken}`} />
+                      </div>
+
+                      {tokenExpiresAt && (
+                        <p className="text-sm text-muted-foreground">
+                          <span className="font-medium">Expires:</span>{' '}
+                          {new Date(tokenExpiresAt).toLocaleString()}
+                        </p>
+                      )}
+
+                      <div className="p-3 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
+                        <p className="text-yellow-600 dark:text-yellow-400 text-sm font-medium">
+                          ⚠️ Copy this token now! It won't be shown again.
                         </p>
                       </div>
                     </div>
-                  </div>
+                  ) : (
+                    // No token yet - show generate button
+                    <div className="space-y-4">
+                      <p className="text-muted-foreground">
+                        Generate a new auth token to authenticate your LocalUp client.
+                      </p>
+
+                      <Button
+                        onClick={handleGenerateToken}
+                        disabled={createTokenMutation.isPending}
+                        className="gap-2"
+                      >
+                        {createTokenMutation.isPending ? (
+                          <>
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            Generating...
+                          </>
+                        ) : (
+                          <>
+                            <Key className="h-4 w-4" />
+                            Generate Auth Token
+                          </>
+                        )}
+                      </Button>
+
+                      {createTokenMutation.isError && (
+                        <div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg text-destructive text-sm">
+                          Failed to generate token. Please try again.
+                        </div>
+                      )}
+
+                      <div className="p-4 bg-primary/10 border border-primary/30 rounded-lg">
+                        <div className="flex items-start gap-3">
+                          <Key className="h-5 w-5 text-primary flex-shrink-0 mt-0.5" />
+                          <div>
+                            <p className="text-primary font-medium text-sm">
+                              Your auth token was automatically created when you {hasDefaultToken ? 'logged in' : 'registered'}.
+                            </p>
+                            <p className="text-muted-foreground text-sm mt-1">
+                              Go to the{' '}
+                              <Link to="/tokens" className="text-primary hover:underline">
+                                Auth Tokens
+                              </Link>{' '}
+                              page to view your tokens and create new ones if needed.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                {/* Connect Command */}
+                {/* Deploy Commands */}
                 <div>
                   <h3 className="text-lg font-semibold mb-4">Deploy your app online</h3>
-                  <p className="text-muted-foreground mb-2">
-                    For HTTP tunnels, run the following to expose a local web server:
-                  </p>
-                  <CodeBlock code='localup --relay=tunnel.kfs.es:4443 --port=3000 --token=$TOKEN --subdomain="myapp"' />
 
-                  <p className="text-muted-foreground text-sm mt-4 mb-2">
-                    For TCP tunnels (e.g., SSH, databases):
-                  </p>
-                  <CodeBlock code='localup --port=22 --relay=tunnel.kfs.es:5443 --protocol=tcp --token=$TOKEN' />
+                  {relayConfig.supports_http && (
+                    <div className="mb-6">
+                      <p className="text-muted-foreground mb-2">
+                        Expose a local HTTP web server:
+                      </p>
+                      <CodeBlock code={`localup --relay=${relayConfig.relay_addr} --port=3000 --subdomain="myapp"`} />
 
-                  <p className="text-muted-foreground text-sm mt-4">
-                    Go to your dev domain to see your app!
-                  </p>
-                  <a
-                    href="http://myapp.tunnel.kfs.es"
-                    className="inline-flex items-center gap-2 text-primary hover:underline text-sm font-mono mt-1"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    http://myapp.tunnel.kfs.es
-                    <ExternalLink className="h-3 w-3" />
-                  </a>
+                      <p className="text-muted-foreground text-sm mt-4">
+                        Go to your dev domain to see your app!
+                      </p>
+                      <a
+                        href={`http://myapp.${relayConfig.domain}`}
+                        className="inline-flex items-center gap-2 text-primary hover:underline text-sm font-mono mt-1"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        http://myapp.{relayConfig.domain}
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </div>
+                  )}
+
+                  {relayConfig.supports_tcp && (
+                    <div>
+                      <p className="text-muted-foreground mb-2">
+                        Expose a TCP service (e.g., SSH, databases):
+                      </p>
+                      <CodeBlock code={`localup --relay=${relayConfig.relay_addr} --port=22 --protocol=tcp`} />
+                    </div>
+                  )}
+
+                  {!relayConfig.supports_http && !relayConfig.supports_tcp && (
+                    <p className="text-muted-foreground">
+                      No tunnel protocols are currently configured on this relay.
+                    </p>
+                  )}
                 </div>
               </TabsContent>
             ))}

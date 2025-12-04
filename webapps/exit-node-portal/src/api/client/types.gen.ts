@@ -5,6 +5,36 @@ export type ClientOptions = {
 };
 
 /**
+ * Relay configuration for client setup
+ */
+export type RelayConfig = {
+    /**
+     * Public domain for the relay (e.g., "tunnel.kfs.es")
+     */
+    domain: string;
+    /**
+     * Relay address for client connections (e.g., "tunnel.kfs.es:4443")
+     */
+    relay_addr: string;
+    /**
+     * Whether HTTP/HTTPS tunnels are supported
+     */
+    supports_http: boolean;
+    /**
+     * Whether TCP tunnels are supported
+     */
+    supports_tcp: boolean;
+    /**
+     * HTTP port (if supports_http is true)
+     */
+    http_port?: number | null;
+    /**
+     * HTTPS port (if supports_http is true)
+     */
+    https_port?: number | null;
+};
+
+/**
  * Authentication configuration
  */
 export type AuthConfig = {
@@ -12,6 +42,10 @@ export type AuthConfig = {
      * Whether public user registration is allowed
      */
     signup_enabled: boolean;
+    /**
+     * Relay configuration (if available)
+     */
+    relay?: RelayConfig | null;
 };
 
 /**

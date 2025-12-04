@@ -37,6 +37,8 @@ pub struct AppState {
     pub protocol_discovery: Option<localup_proto::ProtocolDiscoveryResponse>,
     /// Whether the server is running with HTTPS (for Secure cookie flag)
     pub is_https: bool,
+    /// Relay configuration for dashboard
+    pub relay_config: Option<models::RelayConfig>,
 }
 
 /// OpenAPI documentation
@@ -124,6 +126,7 @@ pub struct AppState {
             models::AuthTokenList,
             models::UpdateAuthTokenRequest,
             models::AuthConfig,
+            models::RelayConfig,
             models::ProtocolDiscoveryResponse,
             models::TransportEndpoint,
             models::TransportProtocol,
@@ -192,6 +195,7 @@ impl ApiServer {
             jwt_secret: config.jwt_secret.clone(),
             protocol_discovery: None,
             is_https,
+            relay_config: None,
         });
 
         Self { config, state }
@@ -213,6 +217,30 @@ impl ApiServer {
             jwt_secret: config.jwt_secret.clone(),
             protocol_discovery: Some(protocol_discovery),
             is_https,
+            relay_config: None,
+        });
+
+        Self { config, state }
+    }
+
+    /// Create a new API server with relay configuration
+    pub fn with_relay_config(
+        config: ApiServerConfig,
+        localup_manager: Arc<TunnelConnectionManager>,
+        db: DatabaseConnection,
+        allow_signup: bool,
+        protocol_discovery: Option<localup_proto::ProtocolDiscoveryResponse>,
+        relay_config: models::RelayConfig,
+    ) -> Self {
+        let is_https = config.tls_cert_path.is_some() && config.tls_key_path.is_some();
+        let state = Arc::new(AppState {
+            localup_manager,
+            db,
+            allow_signup,
+            jwt_secret: config.jwt_secret.clone(),
+            protocol_discovery,
+            is_https,
+            relay_config: Some(relay_config),
         });
 
         Self { config, state }

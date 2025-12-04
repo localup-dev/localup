@@ -625,6 +625,28 @@ pub struct AuthTokenList {
 pub struct AuthConfig {
     /// Whether public user registration is allowed
     pub signup_enabled: bool,
+    /// Relay configuration (if available)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayConfig>,
+}
+
+/// Relay configuration for client setup
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RelayConfig {
+    /// Public domain for the relay (e.g., "tunnel.kfs.es")
+    pub domain: String,
+    /// Relay address for client connections (e.g., "tunnel.kfs.es:4443")
+    pub relay_addr: String,
+    /// Whether HTTP/HTTPS tunnels are supported
+    pub supports_http: bool,
+    /// Whether TCP tunnels are supported
+    pub supports_tcp: bool,
+    /// HTTP port (if supports_http is true)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http_port: Option<u16>,
+    /// HTTPS port (if supports_http is true)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub https_port: Option<u16>,
 }
 
 /// Request to update an auth token

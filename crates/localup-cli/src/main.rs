@@ -2336,6 +2336,31 @@ async fn handle_relay_command(
             protocol_version: 1,
         };
 
+        // Build relay configuration for the dashboard
+        let supports_http = !http_addr.is_empty() || https_addr.is_some();
+        let supports_tcp = tcp_port_range.is_some();
+
+        // Parse HTTP port from http_addr (format: "0.0.0.0:28080")
+        let http_port = if !http_addr.is_empty() {
+            http_addr.parse::<SocketAddr>().ok().map(|addr| addr.port())
+        } else {
+            None
+        };
+
+        // Parse HTTPS port from https_addr (format: "0.0.0.0:28443")
+        let https_port = https_addr
+            .as_ref()
+            .and_then(|addr| addr.parse::<SocketAddr>().ok().map(|a| a.port()));
+
+        let relay_config = localup_api::models::RelayConfig {
+            domain: domain.clone(),
+            relay_addr: format!("{}:{}", domain, localup_addr_parsed.port()),
+            supports_http,
+            supports_tcp,
+            http_port,
+            https_port,
+        };
+
         let protocol = if api_tls_cert.is_some() {
             "https"
         } else {
@@ -2369,12 +2394,13 @@ async fn handle_relay_command(
                 tls_key_path: api_tls_key_clone,
             };
 
-            let server = ApiServer::with_protocol_discovery(
+            let server = ApiServer::with_relay_config(
                 config,
                 api_localup_manager,
                 api_db,
                 api_allow_signup,
-                protocol_discovery,
+                Some(protocol_discovery),
+                relay_config,
             );
             if let Err(e) = server.start().await {
                 error!("API server error: {}", e);
