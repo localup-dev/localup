@@ -22,16 +22,10 @@ export default function Layout({ children }: LayoutProps) {
   const navigate = useNavigate();
   const { teams, selectedTeam, selectTeam } = useTeam();
 
-  const { data: user, isError } = useQuery({
+  const { data: user, isLoading, isError } = useQuery({
     ...getCurrentUserOptions(),
     retry: false,
   });
-
-  useEffect(() => {
-    if (isError) {
-      navigate('/login');
-    }
-  }, [isError, navigate]);
 
   const logout = useMutation({
     ...logoutMutation(),
@@ -39,6 +33,12 @@ export default function Layout({ children }: LayoutProps) {
       navigate('/login');
     },
   });
+
+  useEffect(() => {
+    if (isError) {
+      navigate('/login');
+    }
+  }, [isError, navigate]);
 
   const handleLogout = () => {
     logout.mutate({});
@@ -48,6 +48,20 @@ export default function Layout({ children }: LayoutProps) {
     if (!email) return '?';
     return email.substring(0, 2).toUpperCase();
   };
+
+  // Show loading state while checking authentication
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-muted-foreground">Loading...</div>
+      </div>
+    );
+  }
+
+  // If error occurred, we're redirecting - don't render anything
+  if (isError) {
+    return null;
+  }
 
   return (
     <div className="min-h-screen bg-background flex">
