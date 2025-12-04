@@ -53,6 +53,23 @@ const formatBytes = (bytes: number) => {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 };
 
+// Decode base64 to string, returning preview text
+const decodeBase64Preview = (base64: string, maxLength: number = 200): string => {
+  try {
+    const decoded = atob(base64);
+    // Check if it's printable text
+    const isPrintable = /^[\x20-\x7E\s]*$/.test(decoded.substring(0, 100));
+    if (isPrintable) {
+      const preview = decoded.substring(0, maxLength);
+      return preview + (decoded.length > maxLength ? '...' : '');
+    }
+    return '[Binary data]';
+  } catch {
+    // If decoding fails, try showing as-is (might already be decoded)
+    return base64.substring(0, maxLength) + (base64.length > maxLength ? '...' : '');
+  }
+};
+
 const getProtocolBadgeColor = (type: string) => {
   switch (type.toLowerCase()) {
     case 'tcp':
@@ -360,29 +377,28 @@ export default function TunnelDetail() {
                           </span>
                         </div>
                         <div className="flex items-center gap-2 shrink-0 ml-3">
-                          {request.status_code && (
-                            <Badge variant={getStatusCodeBadgeVariant(request.status_code)}>
-                              {request.status_code}
+                          {request.status && (
+                            <Badge variant={getStatusCodeBadgeVariant(request.status)}>
+                              {request.status}
                             </Badge>
                           )}
-                          {request.latency_ms !== undefined && (
+                          {request.duration_ms !== undefined && request.duration_ms !== null && (
                             <Badge variant="outline">
-                              {request.latency_ms}ms
+                              {request.duration_ms}ms
                             </Badge>
                           )}
                         </div>
                       </div>
 
                       <div className="text-xs text-muted-foreground">
-                        {formatDate(request.created_at)}
+                        {request.timestamp ? formatDate(request.timestamp) : 'Unknown time'}
                       </div>
 
                       {request.response_body && (
                         <div className="mt-3 pt-3 border-t">
                           <div className="text-xs text-muted-foreground mb-2">Response Preview</div>
                           <div className="text-xs text-muted-foreground font-mono bg-muted p-2 rounded max-h-24 overflow-auto">
-                            {request.response_body.substring(0, 200)}
-                            {request.response_body.length > 200 && '...'}
+                            {decodeBase64Preview(request.response_body)}
                           </div>
                         </div>
                       )}
