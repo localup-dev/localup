@@ -188,9 +188,9 @@ enum Commands {
         #[arg(long, env = "LOCALUP_RELAY_ADDR", default_value = "localhost:4443")]
         relay: String,
 
-        /// Authentication token for the relay
+        /// Authentication token for the relay (uses saved token if not provided)
         #[arg(long, env = "LOCALUP_AUTH_TOKEN")]
-        token: String,
+        token: Option<String>,
 
         /// Target address to forward traffic to (host:port)
         #[arg(long, env = "LOCALUP_TARGET_ADDRESS")]
@@ -1394,14 +1394,37 @@ async fn handle_connect_command(
     // Validate relay address
     validate_relay_addr(&relay)?;
 
+    // Get token from CLI arg, or fall back to saved config
+    let auth_token = match token {
+        Some(t) => t,
+        None => {
+            // Try to load from config
+            match config::ConfigManager::get_token() {
+                Ok(Some(t)) => {
+                    info!("Using saved auth token from ~/.localup/config.json");
+                    t
+                }
+                _ => {
+                    eprintln!("Error: No authentication token provided.");
+                    eprintln!();
+                    eprintln!("Options:");
+                    eprintln!("  1. Use --token to provide a token:");
+                    eprintln!("     localup connect --relay <RELAY> --remote-address <ADDR> --agent-id <ID> --token <TOKEN>");
+                    eprintln!();
+                    eprintln!("  2. Save a default token (recommended):");
+                    eprintln!("     localup config set-token <TOKEN>");
+                    eprintln!("     localup connect --relay <RELAY> --remote-address <ADDR> --agent-id <ID>");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+
     // Build configuration
     let mut config =
         ReverseTunnelConfig::new(relay.clone(), remote_address.clone(), agent_id.clone())
-            .with_insecure(insecure);
-
-    if let Some(token_value) = token {
-        config = config.with_auth_token(token_value);
-    }
+            .with_insecure(insecure)
+            .with_auth_token(auth_token);
 
     if let Some(agent_token_value) = agent_token {
         config = config.with_agent_token(agent_token_value);
@@ -1580,9 +1603,10 @@ async fn handle_connect_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_agent_command(
     relay: String,
-    token: String,
+    token: Option<String>,
     target_address: String,
     agent_id: Option<String>,
     insecure: bool,
@@ -1598,13 +1622,39 @@ async fn handle_agent_command(
 
     info!("Starting LocalUp Agent");
 
+    // Get token from CLI arg, or fall back to saved config
+    let auth_token = match token {
+        Some(t) => t,
+        None => {
+            // Try to load from config
+            match config::ConfigManager::get_token() {
+                Ok(Some(t)) => {
+                    info!("Using saved auth token from ~/.localup/config.json");
+                    t
+                }
+                _ => {
+                    eprintln!("Error: No authentication token provided.");
+                    eprintln!();
+                    eprintln!("Options:");
+                    eprintln!("  1. Use --token to provide a token:");
+                    eprintln!("     localup agent --target-address <ADDR> --token <TOKEN>");
+                    eprintln!();
+                    eprintln!("  2. Save a default token (recommended):");
+                    eprintln!("     localup config set-token <TOKEN>");
+                    eprintln!("     localup agent --target-address <ADDR>");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+
     // Create agent configuration
     let agent_id = agent_id.unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let config = AgentConfig {
         agent_id: agent_id.clone(),
         relay_addr: relay.clone(),
-        auth_token: token.clone(),
+        auth_token,
         target_address: target_address.clone(),
         insecure,
         local_address: None,
@@ -2551,6 +2601,7 @@ async fn handle_agent_server_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_generate_token_command(
     secret: String,
     sub: Option<String>,
