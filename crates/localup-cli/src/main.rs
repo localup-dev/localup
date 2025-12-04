@@ -2033,7 +2033,8 @@ async fn handle_relay_command(
 
         let https_server = HttpsServer::new(https_config, registry.clone())
             .with_localup_manager(localup_manager.clone())
-            .with_pending_requests(pending_requests.clone());
+            .with_pending_requests(pending_requests.clone())
+            .with_database(db.clone());
 
         Some(tokio::spawn(async move {
             info!("Starting HTTPS relay server");
