@@ -7,6 +7,7 @@ import { useTeam } from '../contexts/TeamContext';
 import { Avatar, AvatarFallback } from './ui/avatar';
 import { Separator } from './ui/separator';
 import { Button } from './ui/button';
+import { Logo } from './Logo';
 
 interface LayoutProps {
   children: ReactNode;
@@ -68,9 +69,7 @@ export default function Layout({ children }: LayoutProps) {
       {/* Sidebar */}
       <div className="w-64 bg-card border-r border-border flex flex-col">
         <div className="p-6">
-          <div className="flex items-center gap-2">
-            <img src="/logo.svg" alt="LocalUp" className="h-8" />
-          </div>
+          <Logo size="md" className="text-foreground" />
           <div className="flex items-center gap-3 mt-4">
             <Avatar className="h-8 w-8">
               <AvatarFallback className="bg-primary text-primary-foreground text-xs">

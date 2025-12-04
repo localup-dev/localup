@@ -6,6 +6,7 @@ import { loginMutation } from '../api/client/@tanstack/react-query.gen';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Button } from '../components/ui/button';
+import { Logo } from '../components/Logo';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -31,7 +32,9 @@ export default function Login() {
     <div className="min-h-screen bg-background flex items-center justify-center px-4">
       <div className="max-w-md w-full">
         <div className="text-center mb-8">
-          <img src="/logo.svg" alt="LocalUp" className="h-12 mx-auto mb-4" />
+          <div className="flex justify-center mb-4">
+            <Logo size="lg" className="text-foreground" />
+          </div>
           <p className="text-muted-foreground">Sign in to your account</p>
         </div>
 
