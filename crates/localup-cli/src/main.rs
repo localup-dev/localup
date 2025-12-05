@@ -1105,6 +1105,9 @@ async fn run_standalone(cli: Cli) -> Result<()> {
         HttpAuthConfig::None
     };
 
+    // Save local_host for display (before it's moved into config)
+    let local_host_display = local_host.clone();
+
     // Build tunnel configuration
     let config = TunnelConfig {
         local_host,
@@ -1177,9 +1180,19 @@ async fn run_standalone(cli: Cli) -> Result<()> {
 
                 // Display public URL if available
                 if let Some(url) = client.public_url() {
+                    // Determine the local URL scheme based on protocol
+                    let local_scheme = match protocol_str.as_str() {
+                        "http" => "http",
+                        "https" => "https",
+                        "tcp" | "tls" => "tcp",
+                        _ => "http", // fallback
+                    };
                     println!();
                     println!("🌍 Your local server is now public!");
-                    println!("📍 Local:  http://localhost:{}", local_port);
+                    println!(
+                        "📍 Local:  {}://{}:{}",
+                        local_scheme, local_host_display, local_port
+                    );
                     println!("🌐 Public: {}", url);
                     println!();
                 }
