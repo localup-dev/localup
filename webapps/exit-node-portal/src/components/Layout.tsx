@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { Home, Cable, Key, LogOut, ChevronDown } from 'lucide-react';
+import { Home, Cable, Key, Globe, LogOut, ChevronDown } from 'lucide-react';
 import { getCurrentUserOptions, logoutMutation } from '../api/client/@tanstack/react-query.gen';
 import { useTeam } from '../contexts/TeamContext';
 import { Avatar, AvatarFallback } from './ui/avatar';
@@ -16,6 +16,7 @@ interface LayoutProps {
 const navItems = [
   { to: '/dashboard', icon: Home, label: 'Getting Started' },
   { to: '/tunnels', icon: Cable, label: 'Tunnels' },
+  { to: '/domains', icon: Globe, label: 'Custom Domains' },
   { to: '/tokens', icon: Key, label: 'Auth Tokens' },
 ];
 

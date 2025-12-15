@@ -7,7 +7,9 @@ pub mod acme;
 pub mod self_signed;
 pub mod storage;
 
-pub use acme::{AcmeClient, AcmeConfig, AcmeError, Http01Challenge, Http01ChallengeCallback};
+pub use acme::{
+    AcmeClient, AcmeConfig, AcmeError, ChallengeState, Http01Challenge, Http01ChallengeCallback,
+};
 pub use self_signed::{
     generate_self_signed_cert, generate_self_signed_cert_with_domains, SelfSignedCertificate,
     SelfSignedError,

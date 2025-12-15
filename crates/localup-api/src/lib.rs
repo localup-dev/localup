@@ -17,8 +17,10 @@ use tracing::info;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
+use localup_cert::AcmeClient;
 use localup_control::TunnelConnectionManager;
 use sea_orm::DatabaseConnection;
+use tokio::sync::RwLock;
 
 // TLS imports
 use axum_server::tls_rustls::RustlsConfig;
@@ -39,6 +41,10 @@ pub struct AppState {
     pub is_https: bool,
     /// Relay configuration for dashboard
     pub relay_config: Option<models::RelayConfig>,
+    /// ACME client for Let's Encrypt certificate provisioning
+    pub acme_client: Option<Arc<RwLock<AcmeClient>>>,
+    /// HTTP-01 challenge responses (token -> key_authorization)
+    pub acme_challenges: Arc<RwLock<std::collections::HashMap<String, String>>>,
 }
 
 /// OpenAPI documentation
@@ -69,6 +75,8 @@ pub struct AppState {
         handlers::delete_custom_domain,
         handlers::initiate_challenge,
         handlers::complete_challenge,
+        handlers::serve_acme_challenge,
+        handlers::request_acme_certificate,
         handlers::auth_config,
         handlers::register,
         handlers::login,
@@ -196,6 +204,8 @@ impl ApiServer {
             protocol_discovery: None,
             is_https,
             relay_config: None,
+            acme_client: None,
+            acme_challenges: Arc::new(RwLock::new(std::collections::HashMap::new())),
         });
 
         Self { config, state }
@@ -218,6 +228,8 @@ impl ApiServer {
             protocol_discovery: Some(protocol_discovery),
             is_https,
             relay_config: None,
+            acme_client: None,
+            acme_challenges: Arc::new(RwLock::new(std::collections::HashMap::new())),
         });
 
         Self { config, state }
@@ -241,6 +253,34 @@ impl ApiServer {
             protocol_discovery,
             is_https,
             relay_config: Some(relay_config),
+            acme_client: None,
+            acme_challenges: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        });
+
+        Self { config, state }
+    }
+
+    /// Create a new API server with ACME client for Let's Encrypt
+    pub fn with_acme_client(
+        config: ApiServerConfig,
+        localup_manager: Arc<TunnelConnectionManager>,
+        db: DatabaseConnection,
+        allow_signup: bool,
+        protocol_discovery: Option<localup_proto::ProtocolDiscoveryResponse>,
+        relay_config: Option<models::RelayConfig>,
+        acme_client: AcmeClient,
+    ) -> Self {
+        let is_https = config.tls_cert_path.is_some() && config.tls_key_path.is_some();
+        let state = Arc::new(AppState {
+            localup_manager,
+            db,
+            allow_signup,
+            jwt_secret: config.jwt_secret.clone(),
+            protocol_discovery,
+            is_https,
+            relay_config,
+            acme_client: Some(Arc::new(RwLock::new(acme_client))),
+            acme_challenges: Arc::new(RwLock::new(std::collections::HashMap::new())),
         });
 
         Self { config, state }
@@ -267,6 +307,11 @@ impl ApiServer {
             .route(
                 "/.well-known/localup-protocols",
                 get(handlers::protocol_discovery),
+            )
+            // ACME HTTP-01 challenge endpoint (must be accessible without auth)
+            .route(
+                "/.well-known/acme-challenge/{token}",
+                get(handlers::serve_acme_challenge),
             )
             .with_state(self.state.clone());
 
@@ -303,6 +348,11 @@ impl ApiServer {
             .route(
                 "/api/domains/challenge/complete",
                 post(handlers::complete_challenge),
+            )
+            // ACME certificate request (Let's Encrypt)
+            .route(
+                "/api/domains/{domain}/certificate",
+                post(handlers::request_acme_certificate),
             )
             // Auth token management routes (require session token authentication)
             .route(

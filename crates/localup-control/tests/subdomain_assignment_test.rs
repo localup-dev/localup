@@ -108,6 +108,7 @@ async fn test_user_provided_subdomain() {
         auth_token: "test-token".to_string(),
         protocols: vec![Protocol::Http {
             subdomain: Some(user_subdomain.to_string()),
+            custom_domain: None,
         }],
         config: TunnelConfig::default(),
     };
@@ -127,7 +128,7 @@ async fn test_user_provided_subdomain() {
 
             let endpoint = &endpoints[0];
             match &endpoint.protocol {
-                Protocol::Http { subdomain } => {
+                Protocol::Http { subdomain, .. } => {
                     let assigned_subdomain =
                         subdomain.as_ref().expect("Subdomain should be assigned");
                     assert_eq!(
@@ -219,6 +220,7 @@ async fn test_auto_generated_subdomain() {
         auth_token: "test-token".to_string(),
         protocols: vec![Protocol::Http {
             subdomain: None, // ← Auto-generate
+            custom_domain: None,
         }],
         config: TunnelConfig::default(),
     };
@@ -238,7 +240,7 @@ async fn test_auto_generated_subdomain() {
 
             let endpoint = &endpoints[0];
             match &endpoint.protocol {
-                Protocol::Http { subdomain } => {
+                Protocol::Http { subdomain, .. } => {
                     let assigned_subdomain = subdomain
                         .as_ref()
                         .expect("Subdomain should be auto-generated");
@@ -336,6 +338,7 @@ async fn test_deterministic_auto_generation() {
             auth_token: "test-token".to_string(),
             protocols: vec![Protocol::Http {
                 subdomain: None, // Auto-generate
+                custom_domain: None,
             }],
             config: TunnelConfig::default(),
         };
@@ -349,7 +352,7 @@ async fn test_deterministic_auto_generation() {
             .expect("Empty");
 
         if let TunnelMessage::Connected { endpoints, .. } = response {
-            if let Protocol::Http { subdomain } = &endpoints[0].protocol {
+            if let Protocol::Http { subdomain, .. } = &endpoints[0].protocol {
                 let subdomain_str = subdomain.as_ref().unwrap().clone();
                 info!("Iteration {}: Generated subdomain: {}", i, subdomain_str);
                 subdomains.push(subdomain_str);

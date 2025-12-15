@@ -2011,10 +2011,12 @@ dependencies = [
  "rustls 0.23.32",
  "rustls-pemfile 2.2.0",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "time",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

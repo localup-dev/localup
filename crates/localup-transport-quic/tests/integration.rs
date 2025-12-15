@@ -159,6 +159,7 @@ async fn test_quic_message_exchange() {
             endpoints: vec![Endpoint {
                 protocol: Protocol::Http {
                     subdomain: Some("test".to_string()),
+                    custom_domain: None,
                 },
                 public_url: "https://test.tunnel.io".to_string(),
                 port: Some(8080),
@@ -192,6 +193,7 @@ async fn test_quic_message_exchange() {
         auth_token: "token123".to_string(),
         protocols: vec![Protocol::Http {
             subdomain: Some("test".to_string()),
+            custom_domain: None,
         }],
         config: TunnelConfig::default(),
     };

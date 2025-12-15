@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard';
 import AuthTokens from './pages/AuthTokens';
 import Tunnels from './pages/Tunnels';
 import TunnelDetail from './pages/TunnelDetail';
+import Domains from './pages/Domains';
 import { client } from './api/client/client.gen';
 
 // Configure OpenAPI client with credentials and base URL
@@ -51,6 +52,7 @@ function App() {
               <Route path="/tokens" element={<Layout><AuthTokens /></Layout>} />
               <Route path="/tunnels" element={<Layout><Tunnels /></Layout>} />
               <Route path="/tunnels/:tunnelId" element={<Layout><TunnelDetail /></Layout>} />
+              <Route path="/domains" element={<Layout><Domains /></Layout>} />
               <Route path="/" element={<Navigate to="/dashboard" />} />
             </Routes>
             <Toaster richColors position="bottom-right" />

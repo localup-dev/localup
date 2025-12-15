@@ -1,8 +1,13 @@
 //! ACME client for automatic certificate provisioning via Let's Encrypt
 //!
-//! NOTE: Full ACME implementation is in progress. For now, use manual certificate upload.
+//! Supports HTTP-01 challenges for domain validation.
+//!
+//! Note: Full ACME implementation requires instant-acme integration.
+//! Current implementation provides the interface but returns NotImplemented
+//! for actual ACME operations. Manual certificate upload is supported.
 
 use std::sync::Arc;
+
 use thiserror::Error;
 use tokio::fs;
 use tracing::info;
@@ -45,18 +50,50 @@ pub enum AcmeError {
     #[error("Authorization not found for domain: {0}")]
     AuthorizationNotFound(String),
 
-    #[error("Not implemented - use manual certificate upload for now")]
-    NotImplemented,
+    #[error("Challenge response callback failed")]
+    ChallengeCallbackFailed,
+
+    #[error("Challenge not ready: {0}")]
+    ChallengeNotReady(String),
+
+    #[error("Not implemented: {0}")]
+    NotImplemented(String),
 }
 
 /// HTTP-01 challenge data
 #[derive(Debug, Clone)]
 pub struct Http01Challenge {
+    /// The token from the ACME server
     pub token: String,
+    /// The key authorization (token.account_thumbprint)
     pub key_authorization: String,
+    /// The domain being validated
+    pub domain: String,
+}
+
+/// Challenge state for tracking
+#[derive(Debug, Clone)]
+pub struct ChallengeState {
+    /// Challenge ID
+    pub challenge_id: String,
+    /// Domain being validated
+    pub domain: String,
+    /// Challenge type
+    pub challenge_type: String,
+    /// Challenge token (for HTTP-01)
+    pub token: Option<String>,
+    /// Key authorization (for HTTP-01)
+    pub key_authorization: Option<String>,
+    /// DNS record name (for DNS-01)
+    pub dns_record_name: Option<String>,
+    /// DNS record value (for DNS-01)
+    pub dns_record_value: Option<String>,
+    /// Expiration timestamp
+    pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Callback for HTTP-01 challenge validation
+/// Should return true if the challenge file was successfully served
 pub type Http01ChallengeCallback = Arc<dyn Fn(Http01Challenge) -> bool + Send + Sync>;
 
 /// ACME configuration
@@ -95,21 +132,76 @@ impl Default for AcmeConfig {
 }
 
 /// ACME client for certificate provisioning
+///
+/// Note: Full ACME integration with Let's Encrypt is planned but not yet implemented.
+/// Use manual certificate upload (POST /api/domains) for now.
 pub struct AcmeClient {
-    #[allow(dead_code)]
     config: AcmeConfig,
 }
 
 impl AcmeClient {
+    /// Create a new ACME client
     pub fn new(config: AcmeConfig) -> Self {
         Self { config }
     }
 
-    /// Request a certificate for a domain using HTTP-01 challenge
-    ///
-    /// NOTE: This is not yet implemented. Use load_certificate_from_files() instead.
-    pub async fn request_certificate(&self, _domain: &str) -> Result<Certificate, AcmeError> {
-        Err(AcmeError::NotImplemented)
+    /// Initialize the ACME account
+    pub async fn init(&mut self) -> Result<(), AcmeError> {
+        // Ensure cert directory exists
+        fs::create_dir_all(&self.config.cert_dir).await?;
+        info!(
+            "ACME client initialized (cert_dir: {})",
+            self.config.cert_dir
+        );
+        Ok(())
+    }
+
+    /// Initiate a certificate order for a domain (step 1)
+    /// Returns the challenge information that the caller must satisfy
+    pub async fn initiate_order(&self, domain: &str) -> Result<ChallengeState, AcmeError> {
+        Self::validate_domain(domain)?;
+
+        // For now, return a mock challenge that indicates manual setup is needed
+        // Full ACME implementation will be added in a future version
+        let challenge_id = uuid::Uuid::new_v4().to_string();
+        let token = format!("manual-{}", &challenge_id[..8]);
+
+        info!(
+            "Certificate request initiated for {} (manual verification required)",
+            domain
+        );
+
+        Ok(ChallengeState {
+            challenge_id,
+            domain: domain.to_string(),
+            challenge_type: "http-01".to_string(),
+            token: Some(token.clone()),
+            key_authorization: Some(format!("{}.placeholder-key-auth", token)),
+            dns_record_name: None,
+            dns_record_value: None,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        })
+    }
+
+    /// Complete the certificate order after challenge is satisfied (step 2)
+    pub async fn complete_order(&self, domain: &str) -> Result<Certificate, AcmeError> {
+        Self::validate_domain(domain)?;
+
+        // Check if certificate files already exist (from manual upload)
+        let cert_path = format!("{}/{}.crt", self.config.cert_dir, domain);
+        let key_path = format!("{}/{}.key", self.config.cert_dir, domain);
+
+        if self.certificate_exists(domain).await {
+            // Load existing certificate
+            return Self::load_certificate_from_files(&cert_path, &key_path).await;
+        }
+
+        // Full ACME not implemented yet
+        Err(AcmeError::NotImplemented(
+            "Automatic Let's Encrypt certificate provisioning is not yet implemented. \
+            Please upload your certificate manually via POST /api/domains."
+                .to_string(),
+        ))
     }
 
     /// Load certificate from PEM files
@@ -138,13 +230,7 @@ impl AcmeClient {
         })
     }
 
-    /// Renew a certificate
-    pub async fn renew_certificate(&self, _domain: &str) -> Result<Certificate, AcmeError> {
-        Err(AcmeError::NotImplemented)
-    }
-
     /// Validate domain name
-    #[allow(dead_code)]
     fn validate_domain(domain: &str) -> Result<(), AcmeError> {
         if domain.is_empty() {
             return Err(AcmeError::InvalidDomain(
@@ -164,7 +250,27 @@ impl AcmeClient {
             ));
         }
 
+        // Check for wildcard (not supported with HTTP-01)
+        if domain.starts_with('*') {
+            return Err(AcmeError::InvalidDomain(
+                "Wildcard domains require DNS-01 challenge (not yet supported)".to_string(),
+            ));
+        }
+
         Ok(())
+    }
+
+    /// Get the certificate directory path
+    pub fn cert_dir(&self) -> &str {
+        &self.config.cert_dir
+    }
+
+    /// Check if a certificate exists for a domain
+    pub async fn certificate_exists(&self, domain: &str) -> bool {
+        let cert_path = format!("{}/{}.crt", self.config.cert_dir, domain);
+        let key_path = format!("{}/{}.key", self.config.cert_dir, domain);
+
+        fs::metadata(&cert_path).await.is_ok() && fs::metadata(&key_path).await.is_ok()
     }
 }
 
@@ -193,15 +299,22 @@ mod tests {
         assert!(AcmeClient::validate_domain("invalid domain.com").is_err());
         assert!(AcmeClient::validate_domain(".example.com").is_err());
         assert!(AcmeClient::validate_domain("example.com.").is_err());
+        assert!(AcmeClient::validate_domain("*.example.com").is_err());
     }
 
     #[tokio::test]
-    async fn test_request_certificate_not_implemented() {
+    async fn test_acme_client_new() {
         let config = AcmeConfig::default();
-        let client = AcmeClient::new(config);
+        let _client = AcmeClient::new(config);
+    }
 
-        let result = client.request_certificate("example.com").await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), AcmeError::NotImplemented));
+    #[tokio::test]
+    async fn test_certificate_exists() {
+        let config = AcmeConfig {
+            cert_dir: "/tmp/nonexistent_certs_dir_12345".to_string(),
+            ..Default::default()
+        };
+        let client = AcmeClient::new(config);
+        assert!(!client.certificate_exists("example.com").await);
     }
 }

@@ -302,10 +302,12 @@ impl TunnelConnector {
                 ProtocolConfig::Http { subdomain, .. } => Protocol::Http {
                     // Send None if no subdomain - server will auto-generate one
                     subdomain: subdomain.clone(),
+                    custom_domain: None,
                 },
                 ProtocolConfig::Https { subdomain, .. } => Protocol::Https {
                     // Send None if no subdomain - server will auto-generate one
                     subdomain: subdomain.clone(),
+                    custom_domain: None,
                 },
                 ProtocolConfig::Tcp { remote_port, .. } => Protocol::Tcp {
                     // 0 means auto-allocate, specific port means request that port

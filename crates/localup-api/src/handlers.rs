@@ -5,7 +5,7 @@ use axum::{
     Extension, Json,
 };
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 use crate::middleware::AuthUser;
 use crate::models::*;
@@ -89,16 +89,20 @@ pub async fn list_tunnels(
                     .iter()
                     .map(|e| TunnelEndpoint {
                         protocol: match &e.protocol {
-                            localup_proto::Protocol::Http { subdomain } => TunnelProtocol::Http {
-                                subdomain: subdomain
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown".to_string()),
-                            },
-                            localup_proto::Protocol::Https { subdomain } => TunnelProtocol::Https {
-                                subdomain: subdomain
-                                    .clone()
-                                    .unwrap_or_else(|| "unknown".to_string()),
-                            },
+                            localup_proto::Protocol::Http { subdomain, .. } => {
+                                TunnelProtocol::Http {
+                                    subdomain: subdomain
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                }
+                            }
+                            localup_proto::Protocol::Https { subdomain, .. } => {
+                                TunnelProtocol::Https {
+                                    subdomain: subdomain
+                                        .clone()
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                }
+                            }
                             localup_proto::Protocol::Tcp { port } => {
                                 TunnelProtocol::Tcp { port: *port }
                             }
@@ -218,10 +222,10 @@ pub async fn get_tunnel(
                 .iter()
                 .map(|e| TunnelEndpoint {
                     protocol: match &e.protocol {
-                        localup_proto::Protocol::Http { subdomain } => TunnelProtocol::Http {
+                        localup_proto::Protocol::Http { subdomain, .. } => TunnelProtocol::Http {
                             subdomain: subdomain.clone().unwrap_or_else(|| "unknown".to_string()),
                         },
-                        localup_proto::Protocol::Https { subdomain } => TunnelProtocol::Https {
+                        localup_proto::Protocol::Https { subdomain, .. } => TunnelProtocol::Https {
                             subdomain: subdomain.clone().unwrap_or_else(|| "unknown".to_string()),
                         },
                         localup_proto::Protocol::Tcp { port } => {
@@ -722,7 +726,6 @@ use chrono::Utc;
 use localup_cert::AcmeClient;
 use localup_relay_db::entities::custom_domain;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
-use tracing::error;
 
 /// Upload a custom domain certificate
 #[utoipa::path(
@@ -1134,16 +1137,213 @@ pub async fn initiate_challenge(
     tag = "domains"
 )]
 pub async fn complete_challenge(
-    Json(_req): Json<CompleteChallengeRequest>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CompleteChallengeRequest>,
 ) -> Result<Json<UploadCustomDomainResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // This will be implemented when ACME client is fully integrated
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ErrorResponse {
-            error: "ACME challenge completion not yet implemented. Please upload certificates manually via POST /api/domains for now.".to_string(),
-            code: Some("NOT_IMPLEMENTED".to_string()),
-        }),
-    ))
+    info!("Completing ACME challenge for domain: {}", req.domain);
+
+    // Check if we have an ACME client configured
+    let acme_client = state.acme_client.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "ACME client not configured. Set ACME_EMAIL environment variable to enable Let's Encrypt.".to_string(),
+                code: Some("ACME_NOT_CONFIGURED".to_string()),
+            }),
+        )
+    })?;
+
+    // Complete the ACME order
+    let client = acme_client.read().await;
+    let _cert = client.complete_order(&req.domain).await.map_err(|e| {
+        error!("ACME order completion failed: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to complete ACME challenge: {}", e),
+                code: Some("ACME_COMPLETE_FAILED".to_string()),
+            }),
+        )
+    })?;
+    drop(client);
+
+    // Get certificate paths
+    let acme_client_read = acme_client.read().await;
+    let cert_dir = acme_client_read.cert_dir();
+    let cert_path = format!("{}/{}.crt", cert_dir, req.domain);
+    let key_path = format!("{}/{}.key", cert_dir, req.domain);
+    drop(acme_client_read);
+
+    // Calculate expiration (Let's Encrypt certs are valid for 90 days)
+    let expires_at = Utc::now() + chrono::Duration::days(90);
+
+    // Save to database
+    let domain_model = custom_domain::ActiveModel {
+        domain: Set(req.domain.clone()),
+        cert_path: Set(Some(cert_path)),
+        key_path: Set(Some(key_path)),
+        status: Set(localup_relay_db::entities::custom_domain::DomainStatus::Active),
+        provisioned_at: Set(Utc::now()),
+        expires_at: Set(Some(expires_at)),
+        auto_renew: Set(true),
+        error_message: Set(None),
+    };
+
+    // Try to update if exists, otherwise insert
+    use sea_orm::sea_query::OnConflict;
+    custom_domain::Entity::insert(domain_model)
+        .on_conflict(
+            OnConflict::column(custom_domain::Column::Domain)
+                .update_columns([
+                    custom_domain::Column::CertPath,
+                    custom_domain::Column::KeyPath,
+                    custom_domain::Column::Status,
+                    custom_domain::Column::ProvisionedAt,
+                    custom_domain::Column::ExpiresAt,
+                    custom_domain::Column::AutoRenew,
+                    custom_domain::Column::ErrorMessage,
+                ])
+                .to_owned(),
+        )
+        .exec(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to save domain: {}", e),
+                    code: Some("DB_INSERT_FAILED".to_string()),
+                }),
+            )
+        })?;
+
+    // Remove challenge from memory
+    let mut challenges = state.acme_challenges.write().await;
+    challenges.retain(|_, v| !v.contains(&req.domain));
+
+    info!("Certificate issued successfully for {}", req.domain);
+
+    Ok(Json(UploadCustomDomainResponse {
+        domain: req.domain,
+        status: CustomDomainStatus::Active,
+        message: "Let's Encrypt certificate issued successfully".to_string(),
+    }))
+}
+
+/// Serve ACME HTTP-01 challenge response
+///
+/// This endpoint serves the key authorization for ACME HTTP-01 challenges.
+/// Let's Encrypt will request this URL to verify domain ownership.
+#[utoipa::path(
+    get,
+    path = "/.well-known/acme-challenge/{token}",
+    params(
+        ("token" = String, Path, description = "ACME challenge token")
+    ),
+    responses(
+        (status = 200, description = "Key authorization"),
+        (status = 404, description = "Challenge not found")
+    ),
+    tag = "domains"
+)]
+pub async fn serve_acme_challenge(
+    State(state): State<Arc<AppState>>,
+    Path(token): Path<String>,
+) -> Result<String, StatusCode> {
+    let challenges = state.acme_challenges.read().await;
+
+    if let Some(key_authorization) = challenges.get(&token) {
+        debug!("Serving ACME challenge for token: {}", token);
+        Ok(key_authorization.clone())
+    } else {
+        debug!("ACME challenge not found for token: {}", token);
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
+/// Request Let's Encrypt certificate for a domain
+///
+/// This initiates the ACME HTTP-01 challenge flow and provisions a certificate.
+/// The domain must resolve to this server for the challenge to succeed.
+#[utoipa::path(
+    post,
+    path = "/api/domains/{domain}/certificate",
+    params(
+        ("domain" = String, Path, description = "Domain name to get certificate for")
+    ),
+    responses(
+        (status = 200, description = "Certificate provisioning started", body = InitiateChallengeResponse),
+        (status = 400, description = "Invalid domain", body = ErrorResponse),
+        (status = 503, description = "ACME not configured", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn request_acme_certificate(
+    State(state): State<Arc<AppState>>,
+    Path(domain): Path<String>,
+) -> Result<Json<InitiateChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    info!("Requesting Let's Encrypt certificate for: {}", domain);
+
+    // Check if we have an ACME client configured
+    let acme_client = state.acme_client.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "ACME client not configured. Set ACME_EMAIL environment variable to enable Let's Encrypt.".to_string(),
+                code: Some("ACME_NOT_CONFIGURED".to_string()),
+            }),
+        )
+    })?;
+
+    // Initiate the ACME order
+    let client = acme_client.read().await;
+    let challenge_state = client.initiate_order(&domain).await.map_err(|e| {
+        error!("ACME order initiation failed: {}", e);
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Failed to initiate certificate request: {}", e),
+                code: Some("ACME_INIT_FAILED".to_string()),
+            }),
+        )
+    })?;
+
+    // Store the challenge for serving
+    if let (Some(token), Some(key_auth)) =
+        (&challenge_state.token, &challenge_state.key_authorization)
+    {
+        let mut challenges = state.acme_challenges.write().await;
+        challenges.insert(token.clone(), key_auth.clone());
+        info!("Stored ACME challenge for token: {}", token);
+    }
+
+    // Create the challenge info for response
+    let challenge = ChallengeInfo::Http01 {
+        domain: domain.clone(),
+        token: challenge_state.token.clone().unwrap_or_default(),
+        key_authorization: challenge_state
+            .key_authorization
+            .clone()
+            .unwrap_or_default(),
+        file_path: format!(
+            "http://{}/.well-known/acme-challenge/{}",
+            domain,
+            challenge_state.token.as_ref().unwrap_or(&String::new())
+        ),
+        instructions: vec![
+            "1. Ensure your domain DNS points to this server".to_string(),
+            "2. The challenge response is automatically served at the URL above".to_string(),
+            "3. Call POST /api/domains/challenge/complete to complete the verification".to_string(),
+        ],
+    };
+
+    Ok(Json(InitiateChallengeResponse {
+        domain,
+        challenge,
+        challenge_id: challenge_state.challenge_id,
+        expires_at: challenge_state.expires_at,
+    }))
 }
 
 // ============================================================================

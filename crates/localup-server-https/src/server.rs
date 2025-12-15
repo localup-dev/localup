@@ -73,24 +73,55 @@ struct ResponseCapture {
 }
 
 /// SNI-based certificate resolver that supports custom domain certificates
+/// This resolver can be shared and updated at runtime for hot-reload support.
 #[derive(Debug)]
-struct CustomCertResolver {
+pub struct CustomCertResolver {
     default_cert: Arc<CertifiedKey>,
     custom_certs: Arc<RwLock<HashMap<String, Arc<CertifiedKey>>>>,
 }
 
 impl CustomCertResolver {
-    fn new(default_cert: Arc<CertifiedKey>) -> Self {
+    /// Create a new certificate resolver with a default certificate
+    pub fn new(default_cert: Arc<CertifiedKey>) -> Self {
         Self {
             default_cert,
             custom_certs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    async fn add_custom_cert(&self, domain: String, cert: Arc<CertifiedKey>) {
+    /// Add or update a custom certificate for a domain (hot-reload support)
+    pub async fn add_custom_cert(&self, domain: String, cert: Arc<CertifiedKey>) {
         let mut certs = self.custom_certs.write().await;
-        info!("Adding custom certificate for domain: {}", domain);
+        info!("Adding/updating custom certificate for domain: {}", domain);
         certs.insert(domain, cert);
+    }
+
+    /// Remove a custom certificate for a domain
+    pub async fn remove_custom_cert(&self, domain: &str) -> bool {
+        let mut certs = self.custom_certs.write().await;
+        let removed = certs.remove(domain).is_some();
+        if removed {
+            info!("Removed custom certificate for domain: {}", domain);
+        }
+        removed
+    }
+
+    /// Check if a custom certificate exists for a domain
+    pub async fn has_custom_cert(&self, domain: &str) -> bool {
+        let certs = self.custom_certs.read().await;
+        certs.contains_key(domain)
+    }
+
+    /// List all domains with custom certificates
+    pub async fn list_domains(&self) -> Vec<String> {
+        let certs = self.custom_certs.read().await;
+        certs.keys().cloned().collect()
+    }
+
+    /// Get the number of custom certificates loaded
+    pub async fn custom_cert_count(&self) -> usize {
+        let certs = self.custom_certs.read().await;
+        certs.len()
     }
 }
 
@@ -221,7 +252,11 @@ impl HttpsServer {
     }
 
     /// Load a single domain's certificate and key into a CertifiedKey
-    fn load_domain_cert(cert_path: &str, key_path: &str) -> Result<CertifiedKey, HttpsServerError> {
+    /// This can be used for hot-reload of certificates.
+    pub fn load_domain_cert(
+        cert_path: &str,
+        key_path: &str,
+    ) -> Result<CertifiedKey, HttpsServerError> {
         let certs = Self::load_certs(Path::new(cert_path))?;
         let key = Self::load_private_key(Path::new(key_path))?;
 

@@ -235,9 +235,21 @@ pub enum Protocol {
     /// TLS tunnel with SNI routing
     Tls { port: u16, sni_pattern: String },
     /// HTTP tunnel - subdomain is optional (auto-generated if None)
-    Http { subdomain: Option<String> },
+    /// If custom_domain is set, it takes precedence over subdomain
+    Http {
+        subdomain: Option<String>,
+        /// Full custom domain (e.g., "api.example.com") - requires certificate to be provisioned first
+        #[serde(default)]
+        custom_domain: Option<String>,
+    },
     /// HTTPS tunnel - subdomain is optional (auto-generated if None)
-    Https { subdomain: Option<String> },
+    /// If custom_domain is set, it takes precedence over subdomain
+    Https {
+        subdomain: Option<String>,
+        /// Full custom domain (e.g., "api.example.com") - requires certificate to be provisioned first
+        #[serde(default)]
+        custom_domain: Option<String>,
+    },
 }
 
 /// Tunnel endpoint information
@@ -408,6 +420,7 @@ mod tests {
     fn test_protocol_config() {
         let protocol = Protocol::Https {
             subdomain: Some("myapp".to_string()),
+            custom_domain: None,
         };
         let serialized = bincode::serialize(&protocol).unwrap();
         let deserialized: Protocol = bincode::deserialize(&serialized).unwrap();

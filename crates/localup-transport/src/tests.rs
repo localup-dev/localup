@@ -285,6 +285,7 @@ mod test_mock {
             auth_token: "token123".to_string(),
             protocols: vec![Protocol::Http {
                 subdomain: Some("test".to_string()),
+                custom_domain: None,
             }],
             config: Default::default(),
         };

@@ -1719,10 +1719,12 @@ impl TunnelHandler {
                     let endpoint_protocol = if matches!(protocol, Protocol::Http { .. }) {
                         Protocol::Http {
                             subdomain: Some(actual_subdomain.clone()),
+                            custom_domain: None,
                         }
                     } else {
                         Protocol::Https {
                             subdomain: Some(actual_subdomain.clone()),
+                            custom_domain: None,
                         }
                     };
 
@@ -1775,11 +1777,25 @@ impl TunnelHandler {
 
     fn register_route(&self, localup_id: &str, endpoint: &Endpoint) -> Result<Option<u16>, String> {
         match &endpoint.protocol {
-            Protocol::Http { subdomain } | Protocol::Https { subdomain } => {
-                let subdomain_str = subdomain
-                    .as_ref()
-                    .ok_or_else(|| "Subdomain is required for HTTP/HTTPS routes".to_string())?;
-                let host = format!("{}.{}", subdomain_str, self.domain);
+            Protocol::Http {
+                subdomain,
+                custom_domain,
+            }
+            | Protocol::Https {
+                subdomain,
+                custom_domain,
+            } => {
+                // Determine the host: custom_domain takes precedence over subdomain
+                let (host, is_custom_domain) = if let Some(custom) = custom_domain {
+                    (custom.clone(), true)
+                } else if let Some(sub) = subdomain {
+                    (format!("{}.{}", sub, self.domain), false)
+                } else {
+                    return Err(
+                        "Either subdomain or custom_domain is required for HTTP/HTTPS routes"
+                            .to_string(),
+                    );
+                };
 
                 let route_key = RouteKey::HttpHost(host.clone());
 
@@ -1799,10 +1815,18 @@ impl TunnelHandler {
                                 "Route {} already exists for different tunnel {} (current tunnel: {}). Route conflict!",
                                 host, existing_target.localup_id, localup_id
                             );
-                            return Err(format!(
-                                "Subdomain '{}' is already taken by another tunnel",
-                                subdomain_str
-                            ));
+                            let error_msg = if is_custom_domain {
+                                format!(
+                                    "Custom domain '{}' is already in use by another tunnel",
+                                    host
+                                )
+                            } else {
+                                format!(
+                                    "Subdomain '{}' is already taken by another tunnel",
+                                    subdomain.as_deref().unwrap_or(&host)
+                                )
+                            };
+                            return Err(error_msg);
                         }
                     }
                 }
@@ -1810,7 +1834,11 @@ impl TunnelHandler {
                 let route_target = RouteTarget {
                     localup_id: localup_id.to_string(),
                     target_addr: format!("tunnel:{}", localup_id), // Special marker for tunnel routing
-                    metadata: Some("via-tunnel".to_string()),
+                    metadata: Some(if is_custom_domain {
+                        "custom-domain".to_string()
+                    } else {
+                        "via-tunnel".to_string()
+                    }),
                 };
 
                 self.route_registry
@@ -1820,7 +1848,14 @@ impl TunnelHandler {
                         e.to_string()
                     })?;
 
-                info!("✅ Registered route: {} -> tunnel:{}", host, localup_id);
+                if is_custom_domain {
+                    info!(
+                        "✅ Registered custom domain route: {} -> tunnel:{}",
+                        host, localup_id
+                    );
+                } else {
+                    info!("✅ Registered route: {} -> tunnel:{}", host, localup_id);
+                }
                 Ok(None)
             }
             Protocol::Tcp { port } => {
@@ -1897,21 +1932,33 @@ impl TunnelHandler {
 
     async fn unregister_route(&self, localup_id: &str, endpoint: &Endpoint) {
         match &endpoint.protocol {
-            Protocol::Http { subdomain } | Protocol::Https { subdomain } => {
-                if let Some(subdomain_str) = subdomain {
-                    let host = format!("{}.{}", subdomain_str, self.domain);
+            Protocol::Http {
+                subdomain,
+                custom_domain,
+            }
+            | Protocol::Https {
+                subdomain,
+                custom_domain,
+            } => {
+                // Determine the host: custom_domain takes precedence over subdomain
+                let host = if let Some(custom) = custom_domain {
+                    custom.clone()
+                } else if let Some(sub) = subdomain {
+                    format!("{}.{}", sub, self.domain)
+                } else {
+                    return;
+                };
 
-                    let route_key = RouteKey::HttpHost(host.clone());
-                    match self.route_registry.unregister(&route_key) {
-                        Ok(_) => {
-                            info!("🗑️  Unregistered route: {} (tunnel: {})", host, localup_id);
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Failed to unregister route {}: {} (may already be removed)",
-                                host, e
-                            );
-                        }
+                let route_key = RouteKey::HttpHost(host.clone());
+                match self.route_registry.unregister(&route_key) {
+                    Ok(_) => {
+                        info!("🗑️  Unregistered route: {} (tunnel: {})", host, localup_id);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to unregister route {}: {} (may already be removed)",
+                            host, e
+                        );
                     }
                 }
             }
@@ -2016,6 +2063,7 @@ mod tests {
         let localup_id = "test-tunnel";
         let protocols = vec![Protocol::Http {
             subdomain: Some("custom".to_string()),
+            custom_domain: None,
         }];
         let config = TunnelConfig::default();
 
@@ -2027,7 +2075,7 @@ mod tests {
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].public_url, "https://custom.tunnel.test");
         assert!(
-            matches!(endpoints[0].protocol, Protocol::Http { subdomain: Some(ref s) } if s == "custom")
+            matches!(endpoints[0].protocol, Protocol::Http { subdomain: Some(ref s), .. } if s == "custom")
         );
     }
 
@@ -2046,7 +2094,10 @@ mod tests {
         );
 
         let localup_id = "test-tunnel";
-        let protocols = vec![Protocol::Http { subdomain: None }]; // Auto-generate subdomain
+        let protocols = vec![Protocol::Http {
+            subdomain: None,
+            custom_domain: None,
+        }]; // Auto-generate subdomain
         let config = TunnelConfig::default();
 
         let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
@@ -2059,6 +2110,7 @@ mod tests {
         // Should have generated a subdomain
         if let Protocol::Http {
             subdomain: Some(ref s),
+            ..
         } = endpoints[0].protocol
         {
             assert!(!s.is_empty());
@@ -2085,6 +2137,7 @@ mod tests {
         let localup_id = "test-tunnel";
         let protocols = vec![Protocol::Https {
             subdomain: Some("secure".to_string()),
+            custom_domain: None,
         }];
         let config = TunnelConfig::default();
 
@@ -2096,7 +2149,7 @@ mod tests {
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].public_url, "https://secure.tunnel.test");
         assert!(
-            matches!(endpoints[0].protocol, Protocol::Https { subdomain: Some(ref s) } if s == "secure")
+            matches!(endpoints[0].protocol, Protocol::Https { subdomain: Some(ref s), .. } if s == "secure")
         );
     }
 
@@ -2146,9 +2199,11 @@ mod tests {
         let protocols = vec![
             Protocol::Http {
                 subdomain: Some("http".to_string()),
+                custom_domain: None,
             },
             Protocol::Https {
                 subdomain: Some("https".to_string()),
+                custom_domain: None,
             },
             Protocol::Tcp { port: 8080 },
         ];
@@ -2267,6 +2322,7 @@ mod tests {
         let endpoint = Endpoint {
             protocol: Protocol::Http {
                 subdomain: Some("test".to_string()),
+                custom_domain: None,
             },
             public_url: "https://test.tunnel.test".to_string(),
             port: None,
@@ -2298,6 +2354,7 @@ mod tests {
         let endpoint = Endpoint {
             protocol: Protocol::Https {
                 subdomain: Some("secure".to_string()),
+                custom_domain: None,
             },
             public_url: "https://secure.tunnel.test".to_string(),
             port: None,
@@ -2396,6 +2453,7 @@ mod tests {
         let endpoint = Endpoint {
             protocol: Protocol::Http {
                 subdomain: Some("test".to_string()),
+                custom_domain: None,
             },
             public_url: "https://test.tunnel.test".to_string(),
             port: None,

@@ -114,6 +114,7 @@ async fn test_disconnect_on_auth_failure() {
         auth_token: "invalid-token-that-will-fail".to_string(), // Invalid JWT
         protocols: vec![Protocol::Http {
             subdomain: Some("myapp".to_string()),
+            custom_domain: None,
         }],
         config: TunnelConfig::default(),
     };
@@ -187,6 +188,7 @@ async fn test_disconnect_delivery_to_slow_client() {
         auth_token: "invalid-token".to_string(),
         protocols: vec![Protocol::Http {
             subdomain: Some("slowapp".to_string()),
+            custom_domain: None,
         }],
         config: TunnelConfig::default(),
     };
@@ -412,6 +414,7 @@ async fn test_disconnect_delivery_concurrent_clients() {
                 auth_token: format!("bad-token-{}", i),
                 protocols: vec![Protocol::Http {
                     subdomain: Some(format!("app{}", i)),
+                    custom_domain: None,
                 }],
                 config: TunnelConfig::default(),
             };
