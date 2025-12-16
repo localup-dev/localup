@@ -476,10 +476,16 @@ async fn main() -> Result<()> {
 
     // Start API server for dashboard/management
     let api_handle = if !args.no_api {
+        // JWT secret is required for API server
+        let api_jwt_secret = jwt_secret_for_api.ok_or_else(|| {
+            anyhow::anyhow!(
+                "JWT secret is required for API server. Use --jwt-secret <secret> or set TUNNEL_JWT_SECRET environment variable"
+            )
+        })?;
+
         let api_addr: SocketAddr = args.api_addr.parse()?;
         let api_localup_manager = localup_manager.clone();
         let api_db = db.clone();
-        let api_jwt_secret = jwt_secret_for_api;
 
         info!("Starting API server on {}", api_addr);
         info!("OpenAPI spec: http://{}/api/openapi.json", api_addr);

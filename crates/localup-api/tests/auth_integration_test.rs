@@ -33,7 +33,7 @@ fn create_test_server(db: DatabaseConnection) -> ApiServer {
         bind_addr: "127.0.0.1:0".parse().unwrap(), // Random port
         enable_cors: true,
         cors_origins: None,
-        jwt_secret: Some("test-secret".to_string()),
+        jwt_secret: "test-secret".to_string(),
         tls_cert_path: None,
         tls_key_path: None,
     };

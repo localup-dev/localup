@@ -34,7 +34,8 @@ pub struct AppState {
     pub localup_manager: Arc<TunnelConnectionManager>,
     pub db: DatabaseConnection,
     pub allow_signup: bool,
-    pub jwt_secret: Option<String>,
+    /// JWT secret for signing/validating tokens (required)
+    pub jwt_secret: String,
     /// Protocol discovery response for clients
     pub protocol_discovery: Option<localup_proto::ProtocolDiscoveryResponse>,
     /// Whether the server is running with HTTPS (for Secure cookie flag)
@@ -160,25 +161,12 @@ pub struct ApiServerConfig {
     pub enable_cors: bool,
     /// Allowed CORS origins (if None, allows all)
     pub cors_origins: Option<Vec<String>>,
-    /// JWT secret for signing auth tokens
-    pub jwt_secret: Option<String>,
+    /// JWT secret for signing auth tokens (required)
+    pub jwt_secret: String,
     /// TLS certificate path for HTTPS (enables HTTPS if provided)
     pub tls_cert_path: Option<String>,
     /// TLS private key path for HTTPS (required if tls_cert_path is set)
     pub tls_key_path: Option<String>,
-}
-
-impl Default for ApiServerConfig {
-    fn default() -> Self {
-        Self {
-            bind_addr: "127.0.0.1:8080".parse().unwrap(),
-            enable_cors: true,
-            cors_origins: None,
-            jwt_secret: None,
-            tls_cert_path: None,
-            tls_key_path: None,
-        }
-    }
 }
 
 /// API Server
@@ -291,10 +279,8 @@ impl ApiServer {
         // Get the OpenAPI spec
         let api_doc = ApiDoc::openapi();
 
-        // Create JWT state for authentication middleware
-        // TODO: Make JWT secret configurable via environment variable or config
-        let jwt_secret = b"temporary-secret-change-me-in-production";
-        let jwt_state = Arc::new(middleware::JwtState::new(jwt_secret));
+        // Create JWT state for authentication middleware using configured secret
+        let jwt_state = Arc::new(middleware::JwtState::new(self.state.jwt_secret.as_bytes()));
 
         // Build PUBLIC routes (no authentication required)
         let public_router = Router::new()
@@ -476,12 +462,13 @@ pub async fn run_api_server(
     localup_manager: Arc<TunnelConnectionManager>,
     db: DatabaseConnection,
     allow_signup: bool,
+    jwt_secret: String,
 ) -> Result<(), anyhow::Error> {
     let config = ApiServerConfig {
         bind_addr,
         enable_cors: true,
         cors_origins: Some(vec!["http://localhost:3000".to_string()]),
-        jwt_secret: None,
+        jwt_secret,
         tls_cert_path: None,
         tls_key_path: None,
     };

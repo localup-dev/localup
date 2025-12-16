@@ -1492,7 +1492,7 @@ pub async fn register(
     use sha2::{Digest, Sha256};
 
     let auth_token_id = Uuid::new_v4();
-    let jwt_secret = b"temporary-secret-change-me-in-production";
+    let jwt_secret = state.jwt_secret.as_bytes();
 
     // Generate JWT auth token (never expires for default token)
     let auth_claims = JwtClaims::new(
@@ -1552,8 +1552,7 @@ pub async fn register(
     tracing::info!("Created default auth token for user {}", user_id);
 
     // Generate session token (7 days validity)
-    // TODO: Get JWT secret from config/environment
-    let jwt_secret = b"temporary-secret-change-me-in-production";
+    let jwt_secret = state.jwt_secret.as_bytes();
     let user_role_str = match user.role {
         user::UserRole::Admin => "admin",
         user::UserRole::User => "user",
@@ -1697,7 +1696,7 @@ pub async fn login(
 
     if existing_default_token.is_none() {
         let auth_token_id = Uuid::new_v4();
-        let jwt_secret = b"temporary-secret-change-me-in-production";
+        let jwt_secret = state.jwt_secret.as_bytes();
         let now = chrono::Utc::now();
 
         // Generate JWT auth token (never expires for default token)
@@ -1748,8 +1747,7 @@ pub async fn login(
     }
 
     // Generate session token (7 days validity)
-    // TODO: Get JWT secret from config/environment
-    let jwt_secret = b"temporary-secret-change-me-in-production";
+    let jwt_secret = state.jwt_secret.as_bytes();
     let now = chrono::Utc::now();
     let user_role_str = match user.role {
         user::UserRole::Admin => "admin",
@@ -2009,12 +2007,7 @@ pub async fn create_auth_token(
     let expires_at = req.expires_in_days.map(|days| now + Duration::days(days));
 
     // Generate JWT auth token
-    // Use the JWT secret from config, or fallback to default if not configured
-    let jwt_secret_str = state
-        .jwt_secret
-        .as_deref()
-        .unwrap_or("temporary-secret-change-me-in-production");
-    let jwt_secret_bytes = jwt_secret_str.as_bytes();
+    let jwt_secret_bytes = state.jwt_secret.as_bytes();
 
     let mut claims = JwtClaims::new(
         token_id.to_string(),
