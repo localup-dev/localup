@@ -3,8 +3,8 @@
 import { type InfiniteData, infiniteQueryOptions, queryOptions, type UseMutationOptions } from '@tanstack/react-query';
 
 import { client } from '../client.gen';
-import { authConfig, completeChallenge, createAuthToken, deleteAuthToken, deleteCustomDomain, deleteTunnel, getAuthToken, getCurrentUser, getCustomDomain, getLocalupMetrics, getRequest, getTunnel, healthCheck, initiateChallenge, listAuthTokens, listCustomDomains, listRequests, listTcpConnections, listTunnels, listUserTeams, login, logout, type Options, register, replayRequest, updateAuthToken, uploadCustomDomain } from '../sdk.gen';
-import type { AuthConfigData, CompleteChallengeData, CompleteChallengeError, CompleteChallengeResponse, CreateAuthTokenData, CreateAuthTokenError, CreateAuthTokenResponse2, DeleteAuthTokenData, DeleteAuthTokenError, DeleteAuthTokenResponse, DeleteCustomDomainData, DeleteCustomDomainError, DeleteCustomDomainResponse, DeleteTunnelData, DeleteTunnelError, DeleteTunnelResponse, GetAuthTokenData, GetCurrentUserData, GetCustomDomainData, GetLocalupMetricsData, GetRequestData, GetTunnelData, HealthCheckData, InitiateChallengeData, InitiateChallengeError, InitiateChallengeResponse2, ListAuthTokensData, ListCustomDomainsData, ListRequestsData, ListRequestsError, ListRequestsResponse, ListTcpConnectionsData, ListTcpConnectionsError, ListTcpConnectionsResponse, ListTunnelsData, ListUserTeamsData, LoginData, LoginError, LoginResponse2, LogoutData, LogoutError, RegisterData, RegisterError, RegisterResponse2, ReplayRequestData, ReplayRequestError, ReplayRequestResponse, UpdateAuthTokenData, UpdateAuthTokenError, UpdateAuthTokenResponse, UploadCustomDomainData, UploadCustomDomainError, UploadCustomDomainResponse2 } from '../types.gen';
+import { authConfig, cancelChallenge, completeChallenge, createAuthToken, deleteAuthToken, deleteCustomDomain, deleteTunnel, getAuthToken, getCurrentUser, getCustomDomain, getDomainById, getDomainChallenges, getLocalupMetrics, getRequest, getTunnel, healthCheck, initiateChallenge, listAuthTokens, listCustomDomains, listRequests, listTcpConnections, listTunnels, listUserTeams, login, logout, type Options, protocolDiscovery, register, replayRequest, requestAcmeCertificate, restartChallenge, serveAcmeChallenge, updateAuthToken, uploadCustomDomain } from '../sdk.gen';
+import type { AuthConfigData, CancelChallengeData, CancelChallengeError, CompleteChallengeData, CompleteChallengeError, CompleteChallengeResponse, CreateAuthTokenData, CreateAuthTokenError, CreateAuthTokenResponse2, DeleteAuthTokenData, DeleteAuthTokenError, DeleteAuthTokenResponse, DeleteCustomDomainData, DeleteCustomDomainError, DeleteCustomDomainResponse, DeleteTunnelData, DeleteTunnelError, DeleteTunnelResponse, GetAuthTokenData, GetCurrentUserData, GetCustomDomainData, GetDomainByIdData, GetDomainChallengesData, GetLocalupMetricsData, GetRequestData, GetTunnelData, HealthCheckData, InitiateChallengeData, InitiateChallengeError, InitiateChallengeResponse2, ListAuthTokensData, ListCustomDomainsData, ListRequestsData, ListRequestsError, ListRequestsResponse, ListTcpConnectionsData, ListTcpConnectionsError, ListTcpConnectionsResponse, ListTunnelsData, ListUserTeamsData, LoginData, LoginError, LoginResponse2, LogoutData, LogoutError, ProtocolDiscoveryData, RegisterData, RegisterError, RegisterResponse2, ReplayRequestData, ReplayRequestError, ReplayRequestResponse, RequestAcmeCertificateData, RequestAcmeCertificateError, RequestAcmeCertificateResponse, RestartChallengeData, RestartChallengeError, RestartChallengeResponse, ServeAcmeChallengeData, UpdateAuthTokenData, UpdateAuthTokenError, UpdateAuthTokenResponse, UploadCustomDomainData, UploadCustomDomainError, UploadCustomDomainResponse2 } from '../types.gen';
 
 export type QueryKey<TOptions extends Options> = [
     Pick<TOptions, 'baseUrl' | 'body' | 'headers' | 'path' | 'query'> & {
@@ -39,6 +39,52 @@ const createQueryKey = <TOptions extends Options>(id: string, options?: TOptions
     return [
         params
     ];
+};
+
+export const serveAcmeChallengeQueryKey = (options: Options<ServeAcmeChallengeData>) => createQueryKey('serveAcmeChallenge', options);
+
+/**
+ * Serve ACME HTTP-01 challenge response
+ *
+ * This endpoint serves the key authorization for ACME HTTP-01 challenges.
+ * Let's Encrypt will request this URL to verify domain ownership.
+ */
+export const serveAcmeChallengeOptions = (options: Options<ServeAcmeChallengeData>) => {
+    return queryOptions({
+        queryFn: async ({ queryKey, signal }) => {
+            const { data } = await serveAcmeChallenge({
+                ...options,
+                ...queryKey[0],
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: serveAcmeChallengeQueryKey(options)
+    });
+};
+
+export const protocolDiscoveryQueryKey = (options?: Options<ProtocolDiscoveryData>) => createQueryKey('protocolDiscovery', options);
+
+/**
+ * Get available transport protocols (well-known endpoint)
+ *
+ * This endpoint is used by clients to discover which transport protocols
+ * are available on this relay (QUIC, WebSocket, HTTP/2).
+ */
+export const protocolDiscoveryOptions = (options?: Options<ProtocolDiscoveryData>) => {
+    return queryOptions({
+        queryFn: async ({ queryKey, signal }) => {
+            const { data } = await protocolDiscovery({
+                ...options,
+                ...queryKey[0],
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: protocolDiscoveryQueryKey(options)
+    });
 };
 
 export const listAuthTokensQueryKey = (options?: Options<ListAuthTokensData>) => createQueryKey('listAuthTokens', options);
@@ -260,6 +306,26 @@ export const uploadCustomDomainMutation = (options?: Partial<Options<UploadCusto
     return mutationOptions;
 };
 
+export const getDomainByIdQueryKey = (options: Options<GetDomainByIdData>) => createQueryKey('getDomainById', options);
+
+/**
+ * Get a custom domain by ID
+ */
+export const getDomainByIdOptions = (options: Options<GetDomainByIdData>) => {
+    return queryOptions({
+        queryFn: async ({ queryKey, signal }) => {
+            const { data } = await getDomainById({
+                ...options,
+                ...queryKey[0],
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: getDomainByIdQueryKey(options)
+    });
+};
+
 /**
  * Complete/verify ACME challenge
  */
@@ -328,6 +394,82 @@ export const getCustomDomainOptions = (options: Options<GetCustomDomainData>) =>
             return data;
         },
         queryKey: getCustomDomainQueryKey(options)
+    });
+};
+
+/**
+ * Request Let's Encrypt certificate for a domain
+ *
+ * This initiates the ACME HTTP-01 challenge flow and provisions a certificate.
+ * The domain must resolve to this server for the challenge to succeed.
+ */
+export const requestAcmeCertificateMutation = (options?: Partial<Options<RequestAcmeCertificateData>>): UseMutationOptions<RequestAcmeCertificateResponse, RequestAcmeCertificateError, Options<RequestAcmeCertificateData>> => {
+    const mutationOptions: UseMutationOptions<RequestAcmeCertificateResponse, RequestAcmeCertificateError, Options<RequestAcmeCertificateData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await requestAcmeCertificate({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Cancel a pending ACME challenge
+ */
+export const cancelChallengeMutation = (options?: Partial<Options<CancelChallengeData>>): UseMutationOptions<unknown, CancelChallengeError, Options<CancelChallengeData>> => {
+    const mutationOptions: UseMutationOptions<unknown, CancelChallengeError, Options<CancelChallengeData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await cancelChallenge({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+/**
+ * Restart ACME challenge for a domain (cancel existing and start new)
+ */
+export const restartChallengeMutation = (options?: Partial<Options<RestartChallengeData>>): UseMutationOptions<RestartChallengeResponse, RestartChallengeError, Options<RestartChallengeData>> => {
+    const mutationOptions: UseMutationOptions<RestartChallengeResponse, RestartChallengeError, Options<RestartChallengeData>> = {
+        mutationFn: async (fnOptions) => {
+            const { data } = await restartChallenge({
+                ...options,
+                ...fnOptions,
+                throwOnError: true
+            });
+            return data;
+        }
+    };
+    return mutationOptions;
+};
+
+export const getDomainChallengesQueryKey = (options: Options<GetDomainChallengesData>) => createQueryKey('getDomainChallenges', options);
+
+/**
+ * Get pending challenges for a domain
+ *
+ * Returns any pending ACME challenges for the specified domain.
+ */
+export const getDomainChallengesOptions = (options: Options<GetDomainChallengesData>) => {
+    return queryOptions({
+        queryFn: async ({ queryKey, signal }) => {
+            const { data } = await getDomainChallenges({
+                ...options,
+                ...queryKey[0],
+                signal,
+                throwOnError: true
+            });
+            return data;
+        },
+        queryKey: getDomainChallengesQueryKey(options)
     });
 };
 

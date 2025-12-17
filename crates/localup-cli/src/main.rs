@@ -84,6 +84,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Add a new tunnel configuration
     Add {
@@ -343,9 +344,13 @@ enum RelayCommands {
         #[arg(long, default_value = "info")]
         log_level: String,
 
-        /// API server bind address
-        #[arg(long, default_value = "127.0.0.1:3080")]
-        api_addr: String,
+        /// HTTP API server bind address (at least one of api_http_addr or api_https_addr required unless --no-api)
+        #[arg(long, env = "API_HTTP_ADDR", required_unless_present_any = ["api_https_addr", "no_api"])]
+        api_http_addr: Option<String>,
+
+        /// HTTPS API server bind address (requires api_tls_cert and api_tls_key)
+        #[arg(long, env = "API_HTTPS_ADDR", required_unless_present_any = ["api_http_addr", "no_api"])]
+        api_https_addr: Option<String>,
 
         /// Disable API server
         #[arg(long)]
@@ -361,11 +366,11 @@ enum RelayCommands {
         #[arg(long)]
         tls_key: Option<String>,
 
-        /// TLS certificate path for HTTPS API server (enables HTTPS if provided)
+        /// TLS certificate path for HTTPS API server (required if api_https_addr is set)
         #[arg(long, env = "API_TLS_CERT")]
         api_tls_cert: Option<String>,
 
-        /// TLS private key path for HTTPS API server (required if api_tls_cert is set)
+        /// TLS private key path for HTTPS API server (required if api_https_addr is set)
         #[arg(long, env = "API_TLS_KEY")]
         api_tls_key: Option<String>,
 
@@ -412,9 +417,13 @@ enum RelayCommands {
         #[arg(long, default_value = "info")]
         log_level: String,
 
-        /// API server bind address
-        #[arg(long, default_value = "127.0.0.1:3080")]
-        api_addr: String,
+        /// HTTP API server bind address (at least one of api_http_addr or api_https_addr required unless --no-api)
+        #[arg(long, env = "API_HTTP_ADDR", required_unless_present_any = ["api_https_addr", "no_api"])]
+        api_http_addr: Option<String>,
+
+        /// HTTPS API server bind address (requires api_tls_cert and api_tls_key)
+        #[arg(long, env = "API_HTTPS_ADDR", required_unless_present_any = ["api_http_addr", "no_api"])]
+        api_https_addr: Option<String>,
 
         /// Disable API server
         #[arg(long)]
@@ -450,11 +459,11 @@ enum RelayCommands {
         #[arg(long, env = "ALLOW_SIGNUP")]
         allow_signup: bool,
 
-        /// TLS certificate path for HTTPS API server (enables HTTPS if provided)
+        /// TLS certificate path for HTTPS API server (required if api_https_addr is set)
         #[arg(long, env = "API_TLS_CERT")]
         api_tls_cert: Option<String>,
 
-        /// TLS private key path for HTTPS API server (required if api_tls_cert is set)
+        /// TLS private key path for HTTPS API server (required if api_https_addr is set)
         #[arg(long, env = "API_TLS_KEY")]
         api_tls_key: Option<String>,
     },
@@ -493,9 +502,13 @@ enum RelayCommands {
         #[arg(long, default_value = "info")]
         log_level: String,
 
-        /// API server bind address
-        #[arg(long, default_value = "127.0.0.1:3080")]
-        api_addr: String,
+        /// HTTP API server bind address (at least one of api_http_addr or api_https_addr required unless --no-api)
+        #[arg(long, env = "API_HTTP_ADDR", required_unless_present_any = ["api_https_addr", "no_api"])]
+        api_http_addr: Option<String>,
+
+        /// HTTPS API server bind address (requires api_tls_cert and api_tls_key)
+        #[arg(long, env = "API_HTTPS_ADDR", required_unless_present_any = ["api_http_addr", "no_api"])]
+        api_https_addr: Option<String>,
 
         /// Disable API server
         #[arg(long)]
@@ -521,11 +534,11 @@ enum RelayCommands {
         #[arg(long, env = "ALLOW_SIGNUP")]
         allow_signup: bool,
 
-        /// TLS certificate path for HTTPS API server (enables HTTPS if provided)
+        /// TLS certificate path for HTTPS API server (required if api_https_addr is set)
         #[arg(long, env = "API_TLS_CERT")]
         api_tls_cert: Option<String>,
 
-        /// TLS private key path for HTTPS API server (required if api_tls_cert is set)
+        /// TLS private key path for HTTPS API server (required if api_https_addr is set)
         #[arg(long, env = "API_TLS_KEY")]
         api_tls_key: Option<String>,
 
@@ -536,6 +549,18 @@ enum RelayCommands {
         /// WebSocket endpoint path (only used with --transport websocket)
         #[arg(long, default_value = "/localup")]
         websocket_path: String,
+
+        /// ACME email address for Let's Encrypt (enables automatic SSL certificates)
+        #[arg(long, env = "ACME_EMAIL")]
+        acme_email: Option<String>,
+
+        /// Use Let's Encrypt staging environment (for testing - certificates won't be trusted)
+        #[arg(long)]
+        acme_staging: bool,
+
+        /// Directory to store ACME certificates and account info
+        #[arg(long, default_value = "/opt/localup/certs/acme")]
+        acme_cert_dir: String,
     },
 }
 
@@ -1719,7 +1744,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             domain,
             jwt_secret,
             log_level,
-            api_addr,
+            api_http_addr,
+            api_https_addr,
             no_api,
             tls_cert,
             tls_key,
@@ -1742,7 +1768,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 jwt_secret,
                 log_level,
                 Some(tcp_port_range),
-                api_addr,
+                api_http_addr,
+                api_https_addr,
                 no_api,
                 api_tls_cert,
                 api_tls_key,
@@ -1753,6 +1780,9 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 allow_signup,
                 TransportType::Quic,    // transport (TCP relay always uses QUIC)
                 "/localup".to_string(), // websocket_path (unused)
+                None,                   // acme_email (not used for TCP)
+                false,                  // acme_staging
+                "/opt/localup/certs/acme".to_string(), // acme_cert_dir (default)
             )
             .await
         }
@@ -1762,7 +1792,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             domain,
             jwt_secret,
             log_level,
-            api_addr,
+            api_http_addr,
+            api_https_addr,
             no_api,
             tls_cert,
             tls_key,
@@ -1785,7 +1816,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 jwt_secret,
                 log_level,
                 None, // tcp_port_range
-                api_addr,
+                api_http_addr,
+                api_https_addr,
                 no_api,
                 api_tls_cert,
                 api_tls_key,
@@ -1796,6 +1828,9 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 allow_signup,
                 TransportType::Quic,    // transport (TLS relay always uses QUIC)
                 "/localup".to_string(), // websocket_path (unused)
+                None,                   // acme_email (not used for TLS passthrough)
+                false,                  // acme_staging
+                "/opt/localup/certs/acme".to_string(), // acme_cert_dir (default)
             )
             .await
         }
@@ -1808,7 +1843,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             domain,
             jwt_secret,
             log_level,
-            api_addr,
+            api_http_addr,
+            api_https_addr,
             no_api,
             api_tls_cert,
             api_tls_key,
@@ -1819,6 +1855,9 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             allow_signup,
             transport,
             websocket_path,
+            acme_email,
+            acme_staging,
+            acme_cert_dir,
         } => {
             handle_relay_command(
                 http_addr,
@@ -1831,7 +1870,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 jwt_secret,
                 log_level,
                 None, // tcp_port_range
-                api_addr,
+                api_http_addr,
+                api_https_addr,
                 no_api,
                 api_tls_cert,
                 api_tls_key,
@@ -1842,6 +1882,9 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 allow_signup,
                 transport,
                 websocket_path,
+                acme_email,
+                acme_staging,
+                acme_cert_dir,
             )
             .await
         }
@@ -1860,7 +1903,8 @@ async fn handle_relay_command(
     jwt_secret: Option<String>,
     log_level: String,
     tcp_port_range: Option<String>,
-    api_addr: String,
+    api_http_addr: Option<String>,
+    api_https_addr: Option<String>,
     no_api: bool,
     api_tls_cert: Option<String>,
     api_tls_key: Option<String>,
@@ -1871,6 +1915,9 @@ async fn handle_relay_command(
     allow_signup: bool,
     transport: TransportType,
     websocket_path: String,
+    acme_email: Option<String>,
+    acme_staging: bool,
+    acme_cert_dir: String,
 ) -> Result<()> {
     use localup_auth::JwtValidator;
     use localup_control::{
@@ -2354,12 +2401,37 @@ async fn handle_relay_command(
 
     // Start API server for dashboard/management
     let api_handle = if !no_api {
-        let api_addr_parsed: SocketAddr = api_addr.parse()?;
+        // JWT secret is required for API server
+        let jwt_secret_value = jwt_secret.clone().unwrap_or_else(|| {
+            warn!("No JWT secret provided, using random generated secret");
+            uuid::Uuid::new_v4().to_string()
+        });
+
+        // Parse API addresses
+        let api_http_addr_parsed: Option<SocketAddr> = api_http_addr
+            .as_ref()
+            .map(|addr| addr.parse())
+            .transpose()?;
+        let api_https_addr_parsed: Option<SocketAddr> = api_https_addr
+            .as_ref()
+            .map(|addr| addr.parse())
+            .transpose()?;
+
+        // Validate HTTPS configuration
+        if api_https_addr_parsed.is_some() && (api_tls_cert.is_none() || api_tls_key.is_none()) {
+            return Err(anyhow::anyhow!(
+                "HTTPS API server requires both --api-tls-cert and --api-tls-key"
+            ));
+        }
+
         let api_localup_manager = localup_manager.clone();
         let api_db = db.clone();
         let api_allow_signup = allow_signup;
         let api_tls_cert_clone = api_tls_cert.clone();
         let api_tls_key_clone = api_tls_key.clone();
+        let acme_email_clone = acme_email.clone();
+        let acme_staging_clone = acme_staging;
+        let acme_cert_dir_clone = acme_cert_dir.clone();
 
         // Build protocol discovery response based on enabled transports
         use localup_proto::{ProtocolDiscoveryResponse, TransportEndpoint, TransportProtocol};
@@ -2425,23 +2497,21 @@ async fn handle_relay_command(
             https_port,
         };
 
-        let protocol = if api_tls_cert.is_some() {
-            "https"
-        } else {
-            "http"
-        };
-        info!("Starting API server on {}://{}", protocol, api_addr_parsed);
-        info!(
-            "OpenAPI spec: {}://{}/api/openapi.json",
-            protocol, api_addr_parsed
-        );
-        info!("Swagger UI: {}://{}/swagger-ui", protocol, api_addr_parsed);
+        // Log API server addresses
+        if let Some(addr) = api_http_addr_parsed {
+            info!("Starting HTTP API server on http://{}", addr);
+        }
+        if let Some(addr) = api_https_addr_parsed {
+            info!("Starting HTTPS API server on https://{}", addr);
+        }
 
         Some(tokio::spawn(async move {
             use localup_api::{ApiServer, ApiServerConfig};
+            use localup_cert::{AcmeClient, AcmeConfig};
 
             let config = ApiServerConfig {
-                bind_addr: api_addr_parsed,
+                http_addr: api_http_addr_parsed,
+                https_addr: api_https_addr_parsed,
                 enable_cors: true,
                 cors_origins: Some(vec![
                     "http://localhost:5173".to_string(),
@@ -2453,19 +2523,54 @@ async fn handle_relay_command(
                     "http://localhost:3002".to_string(),
                     "http://127.0.0.1:3002".to_string(),
                 ]),
-                jwt_secret: jwt_secret.clone(),
+                jwt_secret: jwt_secret_value.clone(),
                 tls_cert_path: api_tls_cert_clone,
                 tls_key_path: api_tls_key_clone,
             };
 
-            let server = ApiServer::with_relay_config(
-                config,
-                api_localup_manager,
-                api_db,
-                api_allow_signup,
-                Some(protocol_discovery),
-                relay_config,
-            );
+            // Create ACME client if email is provided
+            let server = if let Some(email) = acme_email_clone {
+                info!("ACME enabled with email: {}", email);
+                if acme_staging_clone {
+                    info!(
+                        "Using Let's Encrypt STAGING environment (certificates won't be trusted)"
+                    );
+                }
+
+                let acme_config = AcmeConfig {
+                    contact_email: email,
+                    use_staging: acme_staging_clone,
+                    cert_dir: acme_cert_dir_clone,
+                    http01_callback: None,
+                };
+                let mut acme_client = AcmeClient::new(acme_config);
+
+                // Initialize the ACME client
+                if let Err(e) = acme_client.init().await {
+                    error!("Failed to initialize ACME client: {}", e);
+                }
+
+                ApiServer::with_acme_client(
+                    config,
+                    api_localup_manager,
+                    api_db,
+                    api_allow_signup,
+                    Some(protocol_discovery),
+                    Some(relay_config),
+                    acme_client,
+                )
+            } else {
+                info!("ACME disabled (no --acme-email provided)");
+                ApiServer::with_relay_config(
+                    config,
+                    api_localup_manager,
+                    api_db,
+                    api_allow_signup,
+                    Some(protocol_discovery),
+                    relay_config,
+                )
+            };
+
             if let Err(e) = server.start().await {
                 error!("API server error: {}", e);
             }

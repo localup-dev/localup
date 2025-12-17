@@ -1,16 +1,21 @@
 //! ACME client for automatic certificate provisioning via Let's Encrypt
 //!
-//! Supports HTTP-01 challenges for domain validation.
+//! Supports both HTTP-01 and DNS-01 challenges for domain validation.
 //!
-//! Note: Full ACME implementation requires instant-acme integration.
-//! Current implementation provides the interface but returns NotImplemented
-//! for actual ACME operations. Manual certificate upload is supported.
+//! - HTTP-01: Requires serving a file at /.well-known/acme-challenge/{token}
+//! - DNS-01: Requires adding a TXT record at _acme-challenge.{domain}
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use instant_acme::{
+    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt,
+    NewAccount, NewOrder, OrderStatus,
+};
 use thiserror::Error;
 use tokio::fs;
-use tracing::info;
+use tokio::sync::RwLock;
+use tracing::{debug, error, info};
 
 use crate::Certificate;
 
@@ -44,8 +49,11 @@ pub enum AcmeError {
     #[error("Certificate generation error: {0}")]
     CertGen(String),
 
-    #[error("HTTP-01 challenge not supported")]
+    #[error("HTTP-01 challenge not supported for this domain")]
     Http01NotSupported,
+
+    #[error("DNS-01 challenge not supported for this domain")]
+    Dns01NotSupported,
 
     #[error("Authorization not found for domain: {0}")]
     AuthorizationNotFound(String),
@@ -56,12 +64,34 @@ pub enum AcmeError {
     #[error("Challenge not ready: {0}")]
     ChallengeNotReady(String),
 
-    #[error("Not implemented: {0}")]
-    NotImplemented(String),
+    #[error("Order not found: {0}")]
+    OrderNotFound(String),
+
+    #[error("Account not initialized")]
+    AccountNotInitialized,
+}
+
+/// Challenge type enum for API
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AcmeChallengeType {
+    /// HTTP-01 challenge - serve file at /.well-known/acme-challenge/{token}
+    Http01,
+    /// DNS-01 challenge - add TXT record at _acme-challenge.{domain}
+    Dns01,
+}
+
+impl std::fmt::Display for AcmeChallengeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AcmeChallengeType::Http01 => write!(f, "http-01"),
+            AcmeChallengeType::Dns01 => write!(f, "dns-01"),
+        }
+    }
 }
 
 /// HTTP-01 challenge data
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Http01Challenge {
     /// The token from the ACME server
     pub token: String,
@@ -69,25 +99,36 @@ pub struct Http01Challenge {
     pub key_authorization: String,
     /// The domain being validated
     pub domain: String,
+    /// The URL path to serve the challenge at
+    pub url_path: String,
+}
+
+/// DNS-01 challenge data
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Dns01Challenge {
+    /// The domain being validated
+    pub domain: String,
+    /// The DNS record name (e.g., _acme-challenge.example.com)
+    pub record_name: String,
+    /// The DNS record type (always TXT)
+    pub record_type: String,
+    /// The DNS record value (base64url-encoded SHA256 of key authorization)
+    pub record_value: String,
 }
 
 /// Challenge state for tracking
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChallengeState {
-    /// Challenge ID
-    pub challenge_id: String,
+    /// Unique order ID for this challenge
+    pub order_id: String,
     /// Domain being validated
     pub domain: String,
     /// Challenge type
-    pub challenge_type: String,
-    /// Challenge token (for HTTP-01)
-    pub token: Option<String>,
-    /// Key authorization (for HTTP-01)
-    pub key_authorization: Option<String>,
-    /// DNS record name (for DNS-01)
-    pub dns_record_name: Option<String>,
-    /// DNS record value (for DNS-01)
-    pub dns_record_value: Option<String>,
+    pub challenge_type: AcmeChallengeType,
+    /// HTTP-01 challenge details (if applicable)
+    pub http01: Option<Http01Challenge>,
+    /// DNS-01 challenge details (if applicable)
+    pub dns01: Option<Dns01Challenge>,
     /// Expiration timestamp
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
@@ -103,9 +144,9 @@ pub struct AcmeConfig {
     pub contact_email: String,
     /// Use Let's Encrypt staging environment (for testing)
     pub use_staging: bool,
-    /// Directory to store certificates
+    /// Directory to store certificates and account credentials
     pub cert_dir: String,
-    /// HTTP-01 challenge callback
+    /// HTTP-01 challenge callback (optional - for automatic challenge response)
     pub http01_callback: Option<Http01ChallengeCallback>,
 }
 
@@ -131,77 +172,330 @@ impl Default for AcmeConfig {
     }
 }
 
-/// ACME client for certificate provisioning
+/// Stored order state (for multi-step challenge flow)
+struct StoredOrder {
+    /// The order URL for refreshing
+    order_url: String,
+    /// Domain being validated
+    domain: String,
+    /// Challenge type
+    challenge_type: AcmeChallengeType,
+}
+
+/// ACME client for certificate provisioning via Let's Encrypt
 ///
-/// Note: Full ACME integration with Let's Encrypt is planned but not yet implemented.
-/// Use manual certificate upload (POST /api/domains) for now.
+/// Supports both HTTP-01 and DNS-01 challenges.
 pub struct AcmeClient {
     config: AcmeConfig,
+    account: Option<Account>,
+    /// Pending orders keyed by order_id
+    pending_orders: RwLock<HashMap<String, StoredOrder>>,
 }
 
 impl AcmeClient {
     /// Create a new ACME client
     pub fn new(config: AcmeConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            account: None,
+            pending_orders: RwLock::new(HashMap::new()),
+        }
     }
 
-    /// Initialize the ACME account
+    /// Initialize the ACME client and create/load account
     pub async fn init(&mut self) -> Result<(), AcmeError> {
         // Ensure cert directory exists
         fs::create_dir_all(&self.config.cert_dir).await?;
+
+        // Try to load existing account credentials
+        let account_path = format!("{}/account.json", self.config.cert_dir);
+
+        let account = if let Ok(creds_json) = fs::read_to_string(&account_path).await {
+            // Load existing account
+            let creds: AccountCredentials = serde_json::from_str(&creds_json).map_err(|e| {
+                AcmeError::AccountCreationFailed(format!(
+                    "Failed to parse account credentials: {}",
+                    e
+                ))
+            })?;
+
+            let account = Account::builder()
+                .map_err(|e| AcmeError::AccountCreationFailed(e.to_string()))?
+                .from_credentials(creds)
+                .await
+                .map_err(|e| AcmeError::AccountCreationFailed(e.to_string()))?;
+
+            info!("ACME account loaded from {}", account_path);
+            account
+        } else {
+            // Create new account
+            let directory_url = if self.config.use_staging {
+                info!("Using Let's Encrypt STAGING environment");
+                LetsEncrypt::Staging.url().to_string()
+            } else {
+                info!("Using Let's Encrypt PRODUCTION environment");
+                LetsEncrypt::Production.url().to_string()
+            };
+
+            let (account, creds) = Account::builder()
+                .map_err(|e| AcmeError::AccountCreationFailed(e.to_string()))?
+                .create(
+                    &NewAccount {
+                        contact: &[&format!("mailto:{}", self.config.contact_email)],
+                        terms_of_service_agreed: true,
+                        only_return_existing: false,
+                    },
+                    directory_url,
+                    None,
+                )
+                .await
+                .map_err(|e| AcmeError::AccountCreationFailed(e.to_string()))?;
+
+            // Save account credentials
+            let creds_json = serde_json::to_string_pretty(&creds).map_err(|e| {
+                AcmeError::AccountCreationFailed(format!(
+                    "Failed to serialize account credentials: {}",
+                    e
+                ))
+            })?;
+            fs::write(&account_path, creds_json).await?;
+
+            info!("ACME account created and saved to {}", account_path);
+            account
+        };
+
+        self.account = Some(account);
+
         info!(
-            "ACME client initialized (cert_dir: {})",
-            self.config.cert_dir
+            "ACME client initialized (cert_dir: {}, staging: {})",
+            self.config.cert_dir, self.config.use_staging
         );
+
         Ok(())
     }
 
-    /// Initiate a certificate order for a domain (step 1)
-    /// Returns the challenge information that the caller must satisfy
-    pub async fn initiate_order(&self, domain: &str) -> Result<ChallengeState, AcmeError> {
-        Self::validate_domain(domain)?;
+    /// Initiate a certificate order for a domain
+    ///
+    /// Returns challenge information that must be satisfied before calling complete_order.
+    /// For HTTP-01: serve the key_authorization at /.well-known/acme-challenge/{token}
+    /// For DNS-01: create a TXT record at _acme-challenge.{domain} with the record_value
+    pub async fn initiate_order(
+        &self,
+        domain: &str,
+        challenge_type: AcmeChallengeType,
+    ) -> Result<ChallengeState, AcmeError> {
+        Self::validate_domain(domain, challenge_type)?;
 
-        // For now, return a mock challenge that indicates manual setup is needed
-        // Full ACME implementation will be added in a future version
-        let challenge_id = uuid::Uuid::new_v4().to_string();
-        let token = format!("manual-{}", &challenge_id[..8]);
+        let account = self
+            .account
+            .as_ref()
+            .ok_or(AcmeError::AccountNotInitialized)?;
+
+        // Create the order
+        let identifiers = [Identifier::Dns(domain.to_string())];
+        let new_order = NewOrder::new(&identifiers);
+        let mut order = account
+            .new_order(&new_order)
+            .await
+            .map_err(|e| AcmeError::OrderCreationFailed(e.to_string()))?;
+
+        // Get the order URL before consuming authorizations
+        let order_url = order.url().to_string();
+
+        // Get authorizations
+        let mut authorizations = order.authorizations();
+        let mut authz_handle = authorizations
+            .next()
+            .await
+            .ok_or_else(|| AcmeError::AuthorizationNotFound(domain.to_string()))?
+            .map_err(|e| {
+                AcmeError::OrderCreationFailed(format!("Failed to get authorization: {}", e))
+            })?;
+
+        // Check authorization status
+        match authz_handle.status {
+            AuthorizationStatus::Valid => {
+                info!("Domain {} is already authorized", domain);
+            }
+            AuthorizationStatus::Pending => {
+                debug!("Domain {} authorization is pending", domain);
+            }
+            other => {
+                return Err(AcmeError::ChallengeFailed(format!(
+                    "Authorization status is {:?}",
+                    other
+                )));
+            }
+        }
+
+        // Find the appropriate challenge
+        let acme_challenge_type = match challenge_type {
+            AcmeChallengeType::Http01 => ChallengeType::Http01,
+            AcmeChallengeType::Dns01 => ChallengeType::Dns01,
+        };
+
+        let challenge_handle =
+            authz_handle
+                .challenge(acme_challenge_type)
+                .ok_or(match challenge_type {
+                    AcmeChallengeType::Http01 => AcmeError::Http01NotSupported,
+                    AcmeChallengeType::Dns01 => AcmeError::Dns01NotSupported,
+                })?;
+
+        // Get key authorization
+        let key_auth = challenge_handle.key_authorization();
+        let key_auth_str = key_auth.as_str().to_string();
+        let dns_value = key_auth.dns_value();
+
+        // Get challenge details
+        let token = challenge_handle.token.clone();
+
+        // Generate a unique order ID
+        let order_id = uuid::Uuid::new_v4().to_string();
+
+        // Build challenge state based on type
+        let (http01, dns01) = match challenge_type {
+            AcmeChallengeType::Http01 => {
+                let http01_challenge = Http01Challenge {
+                    token: token.clone(),
+                    key_authorization: key_auth_str.clone(),
+                    domain: domain.to_string(),
+                    url_path: format!("/.well-known/acme-challenge/{}", token),
+                };
+                (Some(http01_challenge), None)
+            }
+            AcmeChallengeType::Dns01 => {
+                let dns01_challenge = Dns01Challenge {
+                    domain: domain.to_string(),
+                    record_name: format!("_acme-challenge.{}", domain.trim_start_matches("*.")),
+                    record_type: "TXT".to_string(),
+                    record_value: dns_value.clone(),
+                };
+                (None, Some(dns01_challenge))
+            }
+        };
+
+        let challenge_state = ChallengeState {
+            order_id: order_id.clone(),
+            domain: domain.to_string(),
+            challenge_type,
+            http01,
+            dns01,
+            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        };
+
+        // Store the order for later completion
+        let stored_order = StoredOrder {
+            order_url,
+            domain: domain.to_string(),
+            challenge_type,
+        };
+
+        self.pending_orders
+            .write()
+            .await
+            .insert(order_id.clone(), stored_order);
 
         info!(
-            "Certificate request initiated for {} (manual verification required)",
-            domain
+            "ACME order {} initiated for {} using {:?} challenge",
+            order_id, domain, challenge_type
         );
 
-        Ok(ChallengeState {
-            challenge_id,
-            domain: domain.to_string(),
-            challenge_type: "http-01".to_string(),
-            token: Some(token.clone()),
-            key_authorization: Some(format!("{}.placeholder-key-auth", token)),
-            dns_record_name: None,
-            dns_record_value: None,
-            expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
-        })
+        Ok(challenge_state)
     }
 
-    /// Complete the certificate order after challenge is satisfied (step 2)
-    pub async fn complete_order(&self, domain: &str) -> Result<Certificate, AcmeError> {
-        Self::validate_domain(domain)?;
+    /// Complete the certificate order after challenge has been satisfied
+    ///
+    /// Call this after you've set up the HTTP-01 or DNS-01 challenge response.
+    pub async fn complete_order(&self, order_id: &str) -> Result<Certificate, AcmeError> {
+        let account = self
+            .account
+            .as_ref()
+            .ok_or(AcmeError::AccountNotInitialized)?;
 
-        // Check if certificate files already exist (from manual upload)
+        // Get the stored order
+        let stored_order = self
+            .pending_orders
+            .write()
+            .await
+            .remove(order_id)
+            .ok_or_else(|| AcmeError::OrderNotFound(order_id.to_string()))?;
+
+        let domain = &stored_order.domain;
+
+        // Restore the order from URL
+        let mut order = account
+            .order(stored_order.order_url.clone())
+            .await
+            .map_err(|e| AcmeError::ChallengeFailed(format!("Failed to restore order: {}", e)))?;
+
+        // Get the authorization and challenge again to set ready
+        let mut authorizations = order.authorizations();
+        if let Some(authz_result) = authorizations.next().await {
+            let mut authz_handle = authz_result
+                .map_err(|e| AcmeError::ChallengeFailed(format!("Failed to get authz: {}", e)))?;
+
+            let acme_challenge_type = match stored_order.challenge_type {
+                AcmeChallengeType::Http01 => ChallengeType::Http01,
+                AcmeChallengeType::Dns01 => ChallengeType::Dns01,
+            };
+
+            if let Some(mut challenge_handle) = authz_handle.challenge(acme_challenge_type) {
+                // Tell ACME server we're ready for the challenge
+                challenge_handle.set_ready().await.map_err(|e| {
+                    AcmeError::ChallengeFailed(format!("Failed to set challenge ready: {}", e))
+                })?;
+            }
+        }
+
+        // Wait for the order to be ready using polling
+        let retry_policy = instant_acme::RetryPolicy::new()
+            .timeout(std::time::Duration::from_secs(60))
+            .initial_delay(std::time::Duration::from_secs(2));
+
+        let status = order.poll_ready(&retry_policy).await.map_err(|e| {
+            AcmeError::ChallengeFailed(format!("Challenge verification failed: {}", e))
+        })?;
+
+        match status {
+            OrderStatus::Ready => {
+                info!("Order {} is ready for finalization", order_id);
+            }
+            OrderStatus::Invalid => {
+                return Err(AcmeError::ChallengeFailed(
+                    "Order became invalid - challenge verification failed".to_string(),
+                ));
+            }
+            other => {
+                return Err(AcmeError::ChallengeFailed(format!(
+                    "Unexpected order status: {:?}",
+                    other
+                )));
+            }
+        }
+
+        // Finalize the order - this generates the CSR and gets the certificate
+        // Returns the private key PEM
+        let private_key_pem = order.finalize().await.map_err(|e| {
+            AcmeError::FinalizationFailed(format!("Failed to finalize order: {}", e))
+        })?;
+
+        // Get the certificate
+        let cert_chain_pem = order.poll_certificate(&retry_policy).await.map_err(|e| {
+            AcmeError::FinalizationFailed(format!("Failed to get certificate: {}", e))
+        })?;
+
+        // Save certificate and key to files
         let cert_path = format!("{}/{}.crt", self.config.cert_dir, domain);
         let key_path = format!("{}/{}.key", self.config.cert_dir, domain);
 
-        if self.certificate_exists(domain).await {
-            // Load existing certificate
-            return Self::load_certificate_from_files(&cert_path, &key_path).await;
-        }
+        fs::write(&cert_path, &cert_chain_pem).await?;
+        fs::write(&key_path, &private_key_pem).await?;
 
-        // Full ACME not implemented yet
-        Err(AcmeError::NotImplemented(
-            "Automatic Let's Encrypt certificate provisioning is not yet implemented. \
-            Please upload your certificate manually via POST /api/domains."
-                .to_string(),
-        ))
+        info!("Certificate saved to {} and {}", cert_path, key_path);
+
+        // Parse and return the certificate
+        Self::load_certificate_from_files(&cert_path, &key_path).await
     }
 
     /// Load certificate from PEM files
@@ -231,7 +525,7 @@ impl AcmeClient {
     }
 
     /// Validate domain name
-    fn validate_domain(domain: &str) -> Result<(), AcmeError> {
+    fn validate_domain(domain: &str, challenge_type: AcmeChallengeType) -> Result<(), AcmeError> {
         if domain.is_empty() {
             return Err(AcmeError::InvalidDomain(
                 "Domain cannot be empty".to_string(),
@@ -250,10 +544,10 @@ impl AcmeClient {
             ));
         }
 
-        // Check for wildcard (not supported with HTTP-01)
-        if domain.starts_with('*') {
+        // Wildcard domains require DNS-01
+        if domain.starts_with('*') && challenge_type == AcmeChallengeType::Http01 {
             return Err(AcmeError::InvalidDomain(
-                "Wildcard domains require DNS-01 challenge (not yet supported)".to_string(),
+                "Wildcard domains require DNS-01 challenge".to_string(),
             ));
         }
 
@@ -271,6 +565,18 @@ impl AcmeClient {
         let key_path = format!("{}/{}.key", self.config.cert_dir, domain);
 
         fs::metadata(&cert_path).await.is_ok() && fs::metadata(&key_path).await.is_ok()
+    }
+
+    /// Get certificate paths for a domain
+    pub fn get_cert_paths(&self, domain: &str) -> (String, String) {
+        let cert_path = format!("{}/{}.crt", self.config.cert_dir, domain);
+        let key_path = format!("{}/{}.key", self.config.cert_dir, domain);
+        (cert_path, key_path)
+    }
+
+    /// Check if using staging environment
+    pub fn is_staging(&self) -> bool {
+        self.config.use_staging
     }
 }
 
@@ -293,13 +599,18 @@ mod tests {
 
     #[test]
     fn test_validate_domain() {
-        assert!(AcmeClient::validate_domain("example.com").is_ok());
-        assert!(AcmeClient::validate_domain("sub.example.com").is_ok());
-        assert!(AcmeClient::validate_domain("").is_err());
-        assert!(AcmeClient::validate_domain("invalid domain.com").is_err());
-        assert!(AcmeClient::validate_domain(".example.com").is_err());
-        assert!(AcmeClient::validate_domain("example.com.").is_err());
-        assert!(AcmeClient::validate_domain("*.example.com").is_err());
+        assert!(AcmeClient::validate_domain("example.com", AcmeChallengeType::Http01).is_ok());
+        assert!(AcmeClient::validate_domain("sub.example.com", AcmeChallengeType::Http01).is_ok());
+        assert!(AcmeClient::validate_domain("", AcmeChallengeType::Http01).is_err());
+        assert!(
+            AcmeClient::validate_domain("invalid domain.com", AcmeChallengeType::Http01).is_err()
+        );
+        assert!(AcmeClient::validate_domain(".example.com", AcmeChallengeType::Http01).is_err());
+        assert!(AcmeClient::validate_domain("example.com.", AcmeChallengeType::Http01).is_err());
+
+        // Wildcard requires DNS-01
+        assert!(AcmeClient::validate_domain("*.example.com", AcmeChallengeType::Http01).is_err());
+        assert!(AcmeClient::validate_domain("*.example.com", AcmeChallengeType::Dns01).is_ok());
     }
 
     #[tokio::test]
@@ -316,5 +627,11 @@ mod tests {
         };
         let client = AcmeClient::new(config);
         assert!(!client.certificate_exists("example.com").await);
+    }
+
+    #[test]
+    fn test_challenge_type_display() {
+        assert_eq!(AcmeChallengeType::Http01.to_string(), "http-01");
+        assert_eq!(AcmeChallengeType::Dns01.to_string(), "dns-01");
     }
 }

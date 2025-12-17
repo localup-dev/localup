@@ -28,6 +28,7 @@ localup-transport-quic = { path = "../localup-transport-quic" }
 localup-transport-websocket = { path = "../localup-transport-websocket" }
 localup-transport-h2 = { path = "../localup-transport-h2" }
 localup-relay-db = { path = "../localup-relay-db" }
+localup-cert = { path = "../localup-cert" }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

@@ -30,7 +30,8 @@ async fn create_test_db() -> DatabaseConnection {
 fn create_test_server(db: DatabaseConnection) -> ApiServer {
     let localup_manager = Arc::new(TunnelConnectionManager::new());
     let config = ApiServerConfig {
-        bind_addr: "127.0.0.1:0".parse().unwrap(), // Random port
+        http_addr: Some("127.0.0.1:0".parse().unwrap()), // Random port for HTTP
+        https_addr: None,
         enable_cors: true,
         cors_origins: None,
         jwt_secret: "test-secret".to_string(),

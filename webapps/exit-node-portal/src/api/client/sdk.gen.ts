@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { AuthConfigData, AuthConfigResponses, CompleteChallengeData, CompleteChallengeErrors, CompleteChallengeResponses, CreateAuthTokenData, CreateAuthTokenErrors, CreateAuthTokenResponses, DeleteAuthTokenData, DeleteAuthTokenErrors, DeleteAuthTokenResponses, DeleteCustomDomainData, DeleteCustomDomainErrors, DeleteCustomDomainResponses, DeleteTunnelData, DeleteTunnelErrors, DeleteTunnelResponses, GetAuthTokenData, GetAuthTokenErrors, GetAuthTokenResponses, GetCurrentUserData, GetCurrentUserErrors, GetCurrentUserResponses, GetCustomDomainData, GetCustomDomainErrors, GetCustomDomainResponses, GetLocalupMetricsData, GetLocalupMetricsErrors, GetLocalupMetricsResponses, GetRequestData, GetRequestErrors, GetRequestResponses, GetTunnelData, GetTunnelErrors, GetTunnelResponses, HealthCheckData, HealthCheckResponses, InitiateChallengeData, InitiateChallengeErrors, InitiateChallengeResponses, ListAuthTokensData, ListAuthTokensErrors, ListAuthTokensResponses, ListCustomDomainsData, ListCustomDomainsErrors, ListCustomDomainsResponses, ListRequestsData, ListRequestsErrors, ListRequestsResponses, ListTcpConnectionsData, ListTcpConnectionsErrors, ListTcpConnectionsResponses, ListTunnelsData, ListTunnelsErrors, ListTunnelsResponses, ListUserTeamsData, ListUserTeamsErrors, ListUserTeamsResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, RegisterData, RegisterErrors, RegisterResponses, ReplayRequestData, ReplayRequestErrors, ReplayRequestResponses, UpdateAuthTokenData, UpdateAuthTokenErrors, UpdateAuthTokenResponses, UploadCustomDomainData, UploadCustomDomainErrors, UploadCustomDomainResponses } from './types.gen';
+import type { AuthConfigData, AuthConfigResponses, CancelChallengeData, CancelChallengeErrors, CancelChallengeResponses, CompleteChallengeData, CompleteChallengeErrors, CompleteChallengeResponses, CreateAuthTokenData, CreateAuthTokenErrors, CreateAuthTokenResponses, DeleteAuthTokenData, DeleteAuthTokenErrors, DeleteAuthTokenResponses, DeleteCustomDomainData, DeleteCustomDomainErrors, DeleteCustomDomainResponses, DeleteTunnelData, DeleteTunnelErrors, DeleteTunnelResponses, GetAuthTokenData, GetAuthTokenErrors, GetAuthTokenResponses, GetCurrentUserData, GetCurrentUserErrors, GetCurrentUserResponses, GetCustomDomainData, GetCustomDomainErrors, GetCustomDomainResponses, GetDomainByIdData, GetDomainByIdErrors, GetDomainByIdResponses, GetDomainChallengesData, GetDomainChallengesErrors, GetDomainChallengesResponses, GetLocalupMetricsData, GetLocalupMetricsErrors, GetLocalupMetricsResponses, GetRequestData, GetRequestErrors, GetRequestResponses, GetTunnelData, GetTunnelErrors, GetTunnelResponses, HealthCheckData, HealthCheckResponses, InitiateChallengeData, InitiateChallengeErrors, InitiateChallengeResponses, ListAuthTokensData, ListAuthTokensErrors, ListAuthTokensResponses, ListCustomDomainsData, ListCustomDomainsErrors, ListCustomDomainsResponses, ListRequestsData, ListRequestsErrors, ListRequestsResponses, ListTcpConnectionsData, ListTcpConnectionsErrors, ListTcpConnectionsResponses, ListTunnelsData, ListTunnelsErrors, ListTunnelsResponses, ListUserTeamsData, ListUserTeamsErrors, ListUserTeamsResponses, LoginData, LoginErrors, LoginResponses, LogoutData, LogoutErrors, LogoutResponses, ProtocolDiscoveryData, ProtocolDiscoveryResponses, RegisterData, RegisterErrors, RegisterResponses, ReplayRequestData, ReplayRequestErrors, ReplayRequestResponses, RequestAcmeCertificateData, RequestAcmeCertificateErrors, RequestAcmeCertificateResponses, RestartChallengeData, RestartChallengeErrors, RestartChallengeResponses, ServeAcmeChallengeData, ServeAcmeChallengeErrors, ServeAcmeChallengeResponses, UpdateAuthTokenData, UpdateAuthTokenErrors, UpdateAuthTokenResponses, UploadCustomDomainData, UploadCustomDomainErrors, UploadCustomDomainResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -16,6 +16,32 @@ export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends 
      * used to access values that aren't defined as part of the SDK function.
      */
     meta?: Record<string, unknown>;
+};
+
+/**
+ * Serve ACME HTTP-01 challenge response
+ *
+ * This endpoint serves the key authorization for ACME HTTP-01 challenges.
+ * Let's Encrypt will request this URL to verify domain ownership.
+ */
+export const serveAcmeChallenge = <ThrowOnError extends boolean = false>(options: Options<ServeAcmeChallengeData, ThrowOnError>) => {
+    return (options.client ?? client).get<ServeAcmeChallengeResponses, ServeAcmeChallengeErrors, ThrowOnError>({
+        url: '/.well-known/acme-challenge/{token}',
+        ...options
+    });
+};
+
+/**
+ * Get available transport protocols (well-known endpoint)
+ *
+ * This endpoint is used by clients to discover which transport protocols
+ * are available on this relay (QUIC, WebSocket, HTTP/2).
+ */
+export const protocolDiscovery = <ThrowOnError extends boolean = false>(options?: Options<ProtocolDiscoveryData, ThrowOnError>) => {
+    return (options?.client ?? client).get<ProtocolDiscoveryResponses, unknown, ThrowOnError>({
+        url: '/.well-known/localup-protocols',
+        ...options
+    });
 };
 
 /**
@@ -159,6 +185,16 @@ export const uploadCustomDomain = <ThrowOnError extends boolean = false>(options
 };
 
 /**
+ * Get a custom domain by ID
+ */
+export const getDomainById = <ThrowOnError extends boolean = false>(options: Options<GetDomainByIdData, ThrowOnError>) => {
+    return (options.client ?? client).get<GetDomainByIdResponses, GetDomainByIdErrors, ThrowOnError>({
+        url: '/api/domains/by-id/{id}',
+        ...options
+    });
+};
+
+/**
  * Complete/verify ACME challenge
  */
 export const completeChallenge = <ThrowOnError extends boolean = false>(options: Options<CompleteChallengeData, ThrowOnError>) => {
@@ -202,6 +238,55 @@ export const deleteCustomDomain = <ThrowOnError extends boolean = false>(options
 export const getCustomDomain = <ThrowOnError extends boolean = false>(options: Options<GetCustomDomainData, ThrowOnError>) => {
     return (options.client ?? client).get<GetCustomDomainResponses, GetCustomDomainErrors, ThrowOnError>({
         url: '/api/domains/{domain}',
+        ...options
+    });
+};
+
+/**
+ * Request Let's Encrypt certificate for a domain
+ *
+ * This initiates the ACME HTTP-01 challenge flow and provisions a certificate.
+ * The domain must resolve to this server for the challenge to succeed.
+ */
+export const requestAcmeCertificate = <ThrowOnError extends boolean = false>(options: Options<RequestAcmeCertificateData, ThrowOnError>) => {
+    return (options.client ?? client).post<RequestAcmeCertificateResponses, RequestAcmeCertificateErrors, ThrowOnError>({
+        url: '/api/domains/{domain}/certificate',
+        ...options
+    });
+};
+
+/**
+ * Cancel a pending ACME challenge
+ */
+export const cancelChallenge = <ThrowOnError extends boolean = false>(options: Options<CancelChallengeData, ThrowOnError>) => {
+    return (options.client ?? client).post<CancelChallengeResponses, CancelChallengeErrors, ThrowOnError>({
+        url: '/api/domains/{domain}/challenge/cancel',
+        ...options
+    });
+};
+
+/**
+ * Restart ACME challenge for a domain (cancel existing and start new)
+ */
+export const restartChallenge = <ThrowOnError extends boolean = false>(options: Options<RestartChallengeData, ThrowOnError>) => {
+    return (options.client ?? client).post<RestartChallengeResponses, RestartChallengeErrors, ThrowOnError>({
+        url: '/api/domains/{domain}/challenge/restart',
+        ...options,
+        headers: {
+            'Content-Type': 'application/json',
+            ...options.headers
+        }
+    });
+};
+
+/**
+ * Get pending challenges for a domain
+ *
+ * Returns any pending ACME challenges for the specified domain.
+ */
+export const getDomainChallenges = <ThrowOnError extends boolean = false>(options: Options<GetDomainChallengesData, ThrowOnError>) => {
+    return (options.client ?? client).get<GetDomainChallengesResponses, GetDomainChallengesErrors, ThrowOnError>({
+        url: '/api/domains/{domain}/challenges',
         ...options
     });
 };

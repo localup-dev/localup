@@ -829,6 +829,7 @@ pub async fn upload_custom_domain(
     // Save to database
     let domain_model = custom_domain::ActiveModel {
         domain: Set(req.domain.clone()),
+        id: Set(Some(uuid::Uuid::new_v4().to_string())),
         cert_path: Set(Some(cert_path.to_string_lossy().to_string())),
         key_path: Set(Some(key_path.to_string_lossy().to_string())),
         status: Set(localup_relay_db::entities::custom_domain::DomainStatus::Active),
@@ -894,6 +895,7 @@ pub async fn list_custom_domains(
     let domains = domains
         .into_iter()
         .map(|d| crate::models::CustomDomain {
+            id: d.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             domain: d.domain,
             status: match d.status {
                 localup_relay_db::entities::custom_domain::DomainStatus::Pending => {
@@ -964,6 +966,9 @@ pub async fn get_custom_domain(
         })?;
 
     Ok(Json(crate::models::CustomDomain {
+        id: domain_model
+            .id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
         domain: domain_model.domain,
         status: match domain_model.status {
             localup_relay_db::entities::custom_domain::DomainStatus::Pending => {
@@ -1066,11 +1071,12 @@ pub async fn delete_custom_domain(
     request_body = InitiateChallengeRequest,
     responses(
         (status = 200, description = "Challenge initiated", body = InitiateChallengeResponse),
-        (status = 501, description = "ACME not yet implemented", body = ErrorResponse)
+        (status = 503, description = "ACME not configured", body = ErrorResponse)
     ),
     tag = "domains"
 )]
 pub async fn initiate_challenge(
+    State(state): State<Arc<AppState>>,
     Json(req): Json<InitiateChallengeRequest>,
 ) -> Result<Json<InitiateChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
     info!(
@@ -1078,50 +1084,196 @@ pub async fn initiate_challenge(
         req.challenge_type, req.domain
     );
 
-    // For now, return a mock response showing what the user needs to do
-    // In the future, this will call the ACME client
-    let challenge_id = uuid::Uuid::new_v4().to_string();
-    let expires_at = Utc::now() + chrono::Duration::hours(1);
+    // Check if we have an ACME client configured
+    let acme_client = state.acme_client.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "ACME client not configured. Use --acme-email flag or set ACME_EMAIL environment variable to enable Let's Encrypt.".to_string(),
+                code: Some("ACME_NOT_CONFIGURED".to_string()),
+            }),
+        )
+    })?;
 
-    let challenge = if req.challenge_type == "dns-01" {
-        ChallengeInfo::Dns01 {
-            domain: req.domain.clone(),
-            record_name: format!("_acme-challenge.{}", req.domain),
-            record_value: format!("mock-dns-token-{}", &challenge_id[..8]),
-            instructions: vec![
-                "1. Add a TXT record to your DNS:".to_string(),
-                format!("   Name: _acme-challenge.{}", req.domain),
-                format!("   Value: mock-dns-token-{}", &challenge_id[..8]),
-                "2. Wait for DNS propagation (can take up to 48 hours)".to_string(),
-                "3. Call POST /api/domains/challenge/complete with the challenge_id".to_string(),
-            ],
-        }
+    // Determine challenge type
+    let challenge_type = if req.challenge_type == "dns-01" {
+        localup_cert::AcmeChallengeType::Dns01
     } else {
-        // Default to HTTP-01
-        let token = format!("mock-http-token-{}", &challenge_id[..8]);
-        ChallengeInfo::Http01 {
-            domain: req.domain.clone(),
-            token: token.clone(),
-            key_authorization: format!("{}.mock-key-auth", token),
-            file_path: format!("http://{}/.well-known/acme-challenge/{}", req.domain, token),
-            instructions: vec![
-                "1. Create the directory: .well-known/acme-challenge/".to_string(),
-                format!("2. Create a file named: {}", token),
-                format!("3. File content: {}.mock-key-auth", token),
-                format!(
-                    "4. Ensure it's accessible at: http://{}/.well-known/acme-challenge/{}",
-                    req.domain, token
-                ),
-                "5. Call POST /api/domains/challenge/complete with the challenge_id".to_string(),
-            ],
-        }
+        localup_cert::AcmeChallengeType::Http01
     };
+
+    // Initiate the ACME order
+    let client = acme_client.read().await;
+    let challenge_state = client
+        .initiate_order(&req.domain, challenge_type)
+        .await
+        .map_err(|e| {
+            error!("ACME order initiation failed: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Failed to initiate certificate request: {}", e),
+                    code: Some("ACME_INIT_FAILED".to_string()),
+                }),
+            )
+        })?;
+    drop(client);
+
+    // Store challenge for HTTP-01 serving
+    if let Some(ref http01) = challenge_state.http01 {
+        let mut challenges = state.acme_challenges.write().await;
+        challenges.insert(http01.token.clone(), http01.key_authorization.clone());
+        info!("Stored ACME HTTP-01 challenge for token: {}", http01.token);
+    }
+
+    // Build response and database model based on challenge type
+    let (challenge, token_or_record_name, key_auth_or_record_value, db_challenge_type) =
+        match challenge_type {
+            localup_cert::AcmeChallengeType::Http01 => {
+                let http01 = challenge_state.http01.ok_or_else(|| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "HTTP-01 challenge data not available".to_string(),
+                            code: Some("CHALLENGE_DATA_MISSING".to_string()),
+                        }),
+                    )
+                })?;
+                let challenge_info = ChallengeInfo::Http01 {
+                    domain: req.domain.clone(),
+                    token: http01.token.clone(),
+                    key_authorization: http01.key_authorization.clone(),
+                    file_path: format!("http://{}{}", req.domain, http01.url_path),
+                    instructions: vec![
+                        "1. Ensure your domain DNS points to this server".to_string(),
+                        "2. The challenge response is automatically served by this relay"
+                            .to_string(),
+                        format!("3. Verify URL: http://{}{}", req.domain, http01.url_path),
+                        "4. Call POST /api/domains/challenge/complete to complete verification"
+                            .to_string(),
+                    ],
+                };
+                (
+                    challenge_info,
+                    Some(http01.token.clone()),
+                    Some(http01.key_authorization.clone()),
+                    localup_relay_db::entities::domain_challenge::ChallengeType::Http01,
+                )
+            }
+            localup_cert::AcmeChallengeType::Dns01 => {
+                let dns01 = challenge_state.dns01.ok_or_else(|| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "DNS-01 challenge data not available".to_string(),
+                            code: Some("CHALLENGE_DATA_MISSING".to_string()),
+                        }),
+                    )
+                })?;
+                let challenge_info = ChallengeInfo::Dns01 {
+                    domain: req.domain.clone(),
+                    record_name: dns01.record_name.clone(),
+                    record_value: dns01.record_value.clone(),
+                    instructions: vec![
+                        "1. Add a TXT record to your DNS:".to_string(),
+                        format!("   Name: {}", dns01.record_name),
+                        format!("   Type: {}", dns01.record_type),
+                        format!("   Value: {}", dns01.record_value),
+                        "2. Wait for DNS propagation (can take up to 48 hours)".to_string(),
+                        "3. Call POST /api/domains/challenge/complete with the challenge_id"
+                            .to_string(),
+                    ],
+                };
+                (
+                    challenge_info,
+                    Some(dns01.record_name.clone()),
+                    Some(dns01.record_value.clone()),
+                    localup_relay_db::entities::domain_challenge::ChallengeType::Dns01,
+                )
+            }
+        };
+
+    // Persist custom domain with pending status
+    use localup_relay_db::entities::{custom_domain, domain_challenge};
+    use sea_orm::sea_query::OnConflict;
+    use sea_orm::ActiveValue::Set;
+
+    let domain_id = uuid::Uuid::new_v4().to_string();
+    let domain_model = custom_domain::ActiveModel {
+        domain: Set(req.domain.clone()),
+        id: Set(Some(domain_id)),
+        cert_path: Set(None),
+        key_path: Set(None),
+        status: Set(custom_domain::DomainStatus::Pending),
+        provisioned_at: Set(chrono::Utc::now()),
+        expires_at: Set(Some(challenge_state.expires_at)),
+        auto_renew: Set(true),
+        error_message: Set(None),
+    };
+
+    use sea_orm::EntityTrait;
+    // Insert or update custom domain to pending status
+    custom_domain::Entity::insert(domain_model)
+        .on_conflict(
+            OnConflict::column(custom_domain::Column::Domain)
+                .update_columns([
+                    custom_domain::Column::Status,
+                    custom_domain::Column::ExpiresAt,
+                    custom_domain::Column::ErrorMessage,
+                ])
+                .to_owned(),
+        )
+        .exec(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Failed to persist custom domain: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to save domain: {}", e),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    // Persist challenge details
+    let challenge_model = domain_challenge::ActiveModel {
+        id: Set(challenge_state.order_id.clone()),
+        domain: Set(req.domain.clone()),
+        challenge_type: Set(db_challenge_type),
+        status: Set(domain_challenge::ChallengeStatus::Pending),
+        token_or_record_name: Set(token_or_record_name),
+        key_auth_or_record_value: Set(key_auth_or_record_value),
+        order_url: Set(Some(challenge_state.order_id.clone())),
+        created_at: Set(chrono::Utc::now()),
+        expires_at: Set(challenge_state.expires_at),
+        error_message: Set(None),
+    };
+
+    domain_challenge::Entity::insert(challenge_model)
+        .exec(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Failed to persist challenge: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to save challenge: {}", e),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    info!(
+        "Domain {} and challenge {} persisted to database",
+        req.domain, challenge_state.order_id
+    );
 
     Ok(Json(InitiateChallengeResponse {
         domain: req.domain,
         challenge,
-        challenge_id,
-        expires_at,
+        challenge_id: challenge_state.order_id,
+        expires_at: challenge_state.expires_at,
     }))
 }
 
@@ -1132,7 +1284,7 @@ pub async fn initiate_challenge(
     request_body = CompleteChallengeRequest,
     responses(
         (status = 200, description = "Challenge completed, certificate issued", body = UploadCustomDomainResponse),
-        (status = 501, description = "ACME not yet implemented", body = ErrorResponse)
+        (status = 503, description = "ACME not configured", body = ErrorResponse)
     ),
     tag = "domains"
 )]
@@ -1140,31 +1292,37 @@ pub async fn complete_challenge(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CompleteChallengeRequest>,
 ) -> Result<Json<UploadCustomDomainResponse>, (StatusCode, Json<ErrorResponse>)> {
-    info!("Completing ACME challenge for domain: {}", req.domain);
+    info!(
+        "Completing ACME challenge {} for domain: {}",
+        req.challenge_id, req.domain
+    );
 
     // Check if we have an ACME client configured
     let acme_client = state.acme_client.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
-                error: "ACME client not configured. Set ACME_EMAIL environment variable to enable Let's Encrypt.".to_string(),
+                error: "ACME client not configured. Use --acme-email flag or set ACME_EMAIL environment variable to enable Let's Encrypt.".to_string(),
                 code: Some("ACME_NOT_CONFIGURED".to_string()),
             }),
         )
     })?;
 
-    // Complete the ACME order
+    // Complete the ACME order using the challenge_id (order_id)
     let client = acme_client.read().await;
-    let _cert = client.complete_order(&req.domain).await.map_err(|e| {
-        error!("ACME order completion failed: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to complete ACME challenge: {}", e),
-                code: Some("ACME_COMPLETE_FAILED".to_string()),
-            }),
-        )
-    })?;
+    let _cert = client
+        .complete_order(&req.challenge_id)
+        .await
+        .map_err(|e| {
+            error!("ACME order completion failed: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to complete ACME challenge: {}", e),
+                    code: Some("ACME_COMPLETE_FAILED".to_string()),
+                }),
+            )
+        })?;
     drop(client);
 
     // Get certificate paths
@@ -1177,9 +1335,11 @@ pub async fn complete_challenge(
     // Calculate expiration (Let's Encrypt certs are valid for 90 days)
     let expires_at = Utc::now() + chrono::Duration::days(90);
 
-    // Save to database
+    // Save to database (keep existing id if updating)
+    use sea_orm::ActiveValue::NotSet;
     let domain_model = custom_domain::ActiveModel {
         domain: Set(req.domain.clone()),
+        id: NotSet, // Preserve existing ID on update
         cert_path: Set(Some(cert_path)),
         key_path: Set(Some(key_path)),
         status: Set(localup_relay_db::entities::custom_domain::DomainStatus::Active),
@@ -1218,6 +1378,17 @@ pub async fn complete_challenge(
             )
         })?;
 
+    // Update challenge status in database to completed
+    use localup_relay_db::entities::domain_challenge;
+    if let Ok(Some(challenge)) = domain_challenge::Entity::find_by_id(&req.challenge_id)
+        .one(&state.db)
+        .await
+    {
+        let mut challenge_active: domain_challenge::ActiveModel = challenge.into();
+        challenge_active.status = Set(domain_challenge::ChallengeStatus::Completed);
+        let _ = challenge_active.update(&state.db).await;
+    }
+
     // Remove challenge from memory
     let mut challenges = state.acme_challenges.write().await;
     challenges.retain(|_, v| !v.contains(&req.domain));
@@ -1229,6 +1400,771 @@ pub async fn complete_challenge(
         status: CustomDomainStatus::Active,
         message: "Let's Encrypt certificate issued successfully".to_string(),
     }))
+}
+
+/// Get pending challenges for a domain
+///
+/// Returns any pending ACME challenges for the specified domain.
+#[utoipa::path(
+    get,
+    path = "/api/domains/{domain}/challenges",
+    params(
+        ("domain" = String, Path, description = "Domain name")
+    ),
+    responses(
+        (status = 200, description = "List of pending challenges", body = Vec<InitiateChallengeResponse>),
+        (status = 404, description = "No challenges found")
+    ),
+    tag = "domains"
+)]
+pub async fn get_domain_challenges(
+    State(state): State<Arc<AppState>>,
+    Path(domain): Path<String>,
+) -> Result<Json<Vec<InitiateChallengeResponse>>, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::domain_challenge;
+    use sea_orm::{ColumnTrait, QueryFilter};
+
+    let challenges = domain_challenge::Entity::find()
+        .filter(domain_challenge::Column::Domain.eq(&domain))
+        .filter(domain_challenge::Column::Status.eq(domain_challenge::ChallengeStatus::Pending))
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    let responses: Vec<InitiateChallengeResponse> = challenges
+        .into_iter()
+        .map(|c| {
+            let challenge = match c.challenge_type {
+                domain_challenge::ChallengeType::Http01 => ChallengeInfo::Http01 {
+                    domain: c.domain.clone(),
+                    token: c.token_or_record_name.clone().unwrap_or_default(),
+                    key_authorization: c.key_auth_or_record_value.clone().unwrap_or_default(),
+                    file_path: format!(
+                        "http://{}/.well-known/acme-challenge/{}",
+                        c.domain,
+                        c.token_or_record_name.as_deref().unwrap_or("")
+                    ),
+                    instructions: vec![
+                        "1. Ensure your domain DNS points to this server".to_string(),
+                        "2. The challenge response is automatically served by this relay"
+                            .to_string(),
+                    ],
+                },
+                domain_challenge::ChallengeType::Dns01 => ChallengeInfo::Dns01 {
+                    domain: c.domain.clone(),
+                    record_name: c.token_or_record_name.clone().unwrap_or_default(),
+                    record_value: c.key_auth_or_record_value.clone().unwrap_or_default(),
+                    instructions: vec![
+                        "1. Add a TXT record to your DNS".to_string(),
+                        "2. Wait for DNS propagation".to_string(),
+                    ],
+                },
+            };
+
+            InitiateChallengeResponse {
+                domain: c.domain,
+                challenge,
+                challenge_id: c.id,
+                expires_at: c.expires_at,
+            }
+        })
+        .collect();
+
+    Ok(Json(responses))
+}
+
+/// Get a custom domain by ID
+#[utoipa::path(
+    get,
+    path = "/api/domains/by-id/{id}",
+    params(
+        ("id" = String, Path, description = "Domain ID")
+    ),
+    responses(
+        (status = 200, description = "Domain found", body = CustomDomain),
+        (status = 404, description = "Domain not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn get_domain_by_id(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::CustomDomain>, (StatusCode, Json<ErrorResponse>)> {
+    let domain_model = custom_domain::Entity::find()
+        .filter(custom_domain::Column::Id.eq(&id))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                    code: Some("DB_QUERY_FAILED".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Domain not found with ID: {}", id),
+                    code: Some("DOMAIN_NOT_FOUND".to_string()),
+                }),
+            )
+        })?;
+
+    Ok(Json(crate::models::CustomDomain {
+        id: domain_model
+            .id
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        domain: domain_model.domain,
+        status: match domain_model.status {
+            localup_relay_db::entities::custom_domain::DomainStatus::Pending => {
+                CustomDomainStatus::Pending
+            }
+            localup_relay_db::entities::custom_domain::DomainStatus::Active => {
+                CustomDomainStatus::Active
+            }
+            localup_relay_db::entities::custom_domain::DomainStatus::Expired => {
+                CustomDomainStatus::Expired
+            }
+            localup_relay_db::entities::custom_domain::DomainStatus::Failed => {
+                CustomDomainStatus::Failed
+            }
+        },
+        provisioned_at: domain_model.provisioned_at,
+        expires_at: domain_model.expires_at,
+        auto_renew: domain_model.auto_renew,
+        error_message: domain_model.error_message,
+    }))
+}
+
+/// Get certificate details for a domain
+#[utoipa::path(
+    get,
+    path = "/api/domains/{domain}/certificate-details",
+    params(
+        ("domain" = String, Path, description = "Domain name")
+    ),
+    responses(
+        (status = 200, description = "Certificate details", body = CertificateDetails),
+        (status = 404, description = "Domain or certificate not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn get_certificate_details(
+    State(state): State<Arc<AppState>>,
+    Path(domain): Path<String>,
+) -> Result<Json<CertificateDetails>, (StatusCode, Json<ErrorResponse>)> {
+    use x509_parser::prelude::*;
+
+    // Find the domain
+    let domain_model = custom_domain::Entity::find()
+        .filter(custom_domain::Column::Domain.eq(&domain))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                    code: Some("DB_QUERY_FAILED".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Domain not found: {}", domain),
+                    code: Some("DOMAIN_NOT_FOUND".to_string()),
+                }),
+            )
+        })?;
+
+    // Get cert path
+    let cert_path = domain_model.cert_path.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Certificate not found for this domain".to_string(),
+                code: Some("CERT_NOT_FOUND".to_string()),
+            }),
+        )
+    })?;
+
+    // Read certificate file
+    let cert_pem = tokio::fs::read_to_string(&cert_path).await.map_err(|e| {
+        error!("Failed to read certificate file: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to read certificate: {}", e),
+                code: Some("CERT_READ_FAILED".to_string()),
+            }),
+        )
+    })?;
+
+    // Parse PEM
+    let (_, pem) = parse_x509_pem(cert_pem.as_bytes()).map_err(|e| {
+        error!("Failed to parse PEM: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to parse certificate PEM".to_string(),
+                code: Some("CERT_PARSE_FAILED".to_string()),
+            }),
+        )
+    })?;
+
+    // Parse X.509 certificate
+    let (_, cert) = X509Certificate::from_der(&pem.contents).map_err(|e| {
+        error!("Failed to parse X.509: {:?}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to parse X.509 certificate".to_string(),
+                code: Some("CERT_PARSE_FAILED".to_string()),
+            }),
+        )
+    })?;
+
+    // Extract subject
+    let subject = cert.subject().to_string();
+
+    // Extract issuer
+    let issuer = cert.issuer().to_string();
+
+    // Extract serial number
+    let serial_number = cert
+        .serial
+        .to_bytes_be()
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(":");
+
+    // Extract validity dates
+    let not_before =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(cert.validity().not_before.timestamp(), 0)
+            .unwrap_or_default();
+
+    let not_after =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(cert.validity().not_after.timestamp(), 0)
+            .unwrap_or_default();
+
+    // Extract SANs
+    let san = cert
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .map(|san| {
+            san.value
+                .general_names
+                .iter()
+                .filter_map(|name| match name {
+                    x509_parser::extensions::GeneralName::DNSName(dns) => Some(dns.to_string()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    // Extract signature algorithm
+    let signature_algorithm = cert.signature_algorithm.algorithm.to_string();
+
+    // Extract public key algorithm
+    let public_key_algorithm = cert.public_key().algorithm.algorithm.to_string();
+
+    // Calculate SHA-256 fingerprint
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(&pem.contents);
+    let fingerprint = hasher.finalize();
+    let fingerprint_sha256 = fingerprint
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(":");
+
+    Ok(Json(CertificateDetails {
+        domain,
+        subject,
+        issuer,
+        serial_number,
+        not_before,
+        not_after,
+        san,
+        signature_algorithm,
+        public_key_algorithm,
+        fingerprint_sha256,
+        pem: cert_pem,
+    }))
+}
+
+/// Cancel a pending ACME challenge
+#[utoipa::path(
+    post,
+    path = "/api/domains/{domain}/challenge/cancel",
+    params(
+        ("domain" = String, Path, description = "Domain name")
+    ),
+    responses(
+        (status = 200, description = "Challenge cancelled"),
+        (status = 404, description = "No pending challenge found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn cancel_challenge(
+    State(state): State<Arc<AppState>>,
+    Path(domain): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::domain_challenge;
+
+    // Find pending challenges for this domain
+    let challenges = domain_challenge::Entity::find()
+        .filter(domain_challenge::Column::Domain.eq(&domain))
+        .filter(domain_challenge::Column::Status.eq(domain_challenge::ChallengeStatus::Pending))
+        .all(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    if challenges.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No pending challenges found for domain: {}", domain),
+                code: Some("NO_PENDING_CHALLENGE".to_string()),
+            }),
+        ));
+    }
+
+    // Delete all pending challenges for this domain
+    for challenge in &challenges {
+        // Remove from in-memory challenge store if HTTP-01
+        if challenge.challenge_type == domain_challenge::ChallengeType::Http01 {
+            if let Some(token) = &challenge.token_or_record_name {
+                let mut acme_challenges = state.acme_challenges.write().await;
+                acme_challenges.remove(token);
+            }
+        }
+    }
+
+    // Delete from database
+    domain_challenge::Entity::delete_many()
+        .filter(domain_challenge::Column::Domain.eq(&domain))
+        .filter(domain_challenge::Column::Status.eq(domain_challenge::ChallengeStatus::Pending))
+        .exec(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to delete challenges: {}", e),
+                    code: Some("DB_DELETE_FAILED".to_string()),
+                }),
+            )
+        })?;
+
+    // Update domain status to failed
+    use sea_orm::ActiveValue::NotSet;
+    let domain_model = custom_domain::ActiveModel {
+        domain: Set(domain.clone()),
+        id: NotSet,
+        cert_path: NotSet,
+        key_path: NotSet,
+        status: Set(localup_relay_db::entities::custom_domain::DomainStatus::Failed),
+        provisioned_at: NotSet,
+        expires_at: NotSet,
+        auto_renew: NotSet,
+        error_message: Set(Some("Challenge cancelled by user".to_string())),
+    };
+    domain_model.update(&state.db).await.ok();
+
+    info!(
+        "Cancelled {} challenge(s) for domain: {}",
+        challenges.len(),
+        domain
+    );
+
+    Ok(Json(serde_json::json!({
+        "message": format!("Cancelled {} challenge(s) for domain {}", challenges.len(), domain),
+        "cancelled_count": challenges.len()
+    })))
+}
+
+/// Restart ACME challenge for a domain (cancel existing and start new)
+#[utoipa::path(
+    post,
+    path = "/api/domains/{domain}/challenge/restart",
+    params(
+        ("domain" = String, Path, description = "Domain name")
+    ),
+    request_body = InitiateChallengeRequest,
+    responses(
+        (status = 200, description = "New challenge initiated", body = InitiateChallengeResponse),
+        (status = 503, description = "ACME not configured", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn restart_challenge(
+    State(state): State<Arc<AppState>>,
+    Path(domain): Path<String>,
+    Json(req): Json<InitiateChallengeRequest>,
+) -> Result<Json<InitiateChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::domain_challenge;
+
+    info!("Restarting challenge for domain: {}", domain);
+
+    // First, cancel any existing challenges
+    let existing_challenges = domain_challenge::Entity::find()
+        .filter(domain_challenge::Column::Domain.eq(&domain))
+        .filter(domain_challenge::Column::Status.eq(domain_challenge::ChallengeStatus::Pending))
+        .all(&state.db)
+        .await
+        .unwrap_or_default();
+
+    // Remove from in-memory store
+    for challenge in &existing_challenges {
+        if challenge.challenge_type == domain_challenge::ChallengeType::Http01 {
+            if let Some(token) = &challenge.token_or_record_name {
+                let mut acme_challenges = state.acme_challenges.write().await;
+                acme_challenges.remove(token);
+            }
+        }
+    }
+
+    // Delete existing pending challenges
+    domain_challenge::Entity::delete_many()
+        .filter(domain_challenge::Column::Domain.eq(&domain))
+        .filter(domain_challenge::Column::Status.eq(domain_challenge::ChallengeStatus::Pending))
+        .exec(&state.db)
+        .await
+        .ok();
+
+    // Now initiate a new challenge using the existing initiate_challenge logic
+    let new_req = InitiateChallengeRequest {
+        domain: domain.clone(),
+        challenge_type: req.challenge_type,
+    };
+
+    // Call the existing initiate_challenge handler
+    initiate_challenge(State(state), Json(new_req)).await
+}
+
+/// Pre-validate a challenge before submitting to Let's Encrypt
+///
+/// This endpoint simulates what Let's Encrypt will do when validating your challenge:
+/// - For HTTP-01: Makes an HTTP request to http://{domain}/.well-known/acme-challenge/{token}
+/// - For DNS-01: Performs a DNS TXT lookup for _acme-challenge.{domain}
+///
+/// Use this to verify your setup is correct before submitting the challenge.
+#[utoipa::path(
+    post,
+    path = "/api/domains/challenge/pre-validate",
+    request_body = PreValidateChallengeRequest,
+    responses(
+        (status = 200, description = "Pre-validation result", body = PreValidateChallengeResponse),
+        (status = 404, description = "Challenge not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "domains"
+)]
+pub async fn pre_validate_challenge(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PreValidateChallengeRequest>,
+) -> Result<Json<PreValidateChallengeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::domain_challenge;
+
+    info!(
+        "Pre-validating challenge {} for domain: {}",
+        req.challenge_id, req.domain
+    );
+
+    // Find the challenge
+    let challenge = domain_challenge::Entity::find_by_id(&req.challenge_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Database error: {}", e),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Challenge not found: {}", req.challenge_id),
+                    code: Some("CHALLENGE_NOT_FOUND".to_string()),
+                }),
+            )
+        })?;
+
+    // Validate that the challenge belongs to the requested domain
+    if challenge.domain != req.domain {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Challenge does not belong to the specified domain".to_string(),
+                code: Some("DOMAIN_MISMATCH".to_string()),
+            }),
+        ));
+    }
+
+    // Perform the appropriate validation based on challenge type
+    let response = match challenge.challenge_type {
+        domain_challenge::ChallengeType::Http01 => {
+            pre_validate_http01_challenge(&req.domain, &challenge).await
+        }
+        domain_challenge::ChallengeType::Dns01 => {
+            pre_validate_dns01_challenge(&req.domain, &challenge).await
+        }
+    };
+
+    Ok(Json(response))
+}
+
+/// Pre-validate HTTP-01 challenge by making HTTP request like Let's Encrypt does
+async fn pre_validate_http01_challenge(
+    domain: &str,
+    challenge: &localup_relay_db::entities::domain_challenge::Model,
+) -> PreValidateChallengeResponse {
+    let token = challenge.token_or_record_name.as_deref().unwrap_or("");
+    let expected_key_auth = challenge.key_auth_or_record_value.as_deref().unwrap_or("");
+
+    let check_url = format!("http://{}/.well-known/acme-challenge/{}", domain, token);
+
+    info!("Pre-validating HTTP-01 challenge at: {}", check_url);
+
+    // Create HTTP client with timeout (Let's Encrypt uses about 10 seconds)
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return PreValidateChallengeResponse {
+                ready: false,
+                challenge_type: "http-01".to_string(),
+                checked: check_url,
+                expected: expected_key_auth.to_string(),
+                found: None,
+                error: Some(format!("Failed to create HTTP client: {}", e)),
+                details: None,
+            };
+        }
+    };
+
+    // Make the request
+    match client.get(&check_url).send().await {
+        Ok(response) => {
+            let status = response.status();
+            if !status.is_success() {
+                return PreValidateChallengeResponse {
+                    ready: false,
+                    challenge_type: "http-01".to_string(),
+                    checked: check_url,
+                    expected: expected_key_auth.to_string(),
+                    found: None,
+                    error: Some(format!("HTTP request returned status: {}", status)),
+                    details: Some(format!(
+                        "Let's Encrypt expects HTTP 200. Make sure your domain {} points to this server and port 80 is accessible.",
+                        domain
+                    )),
+                };
+            }
+
+            // Read the response body
+            match response.text().await {
+                Ok(body) => {
+                    let body_trimmed = body.trim();
+                    let ready = body_trimmed == expected_key_auth;
+
+                    PreValidateChallengeResponse {
+                        ready,
+                        challenge_type: "http-01".to_string(),
+                        checked: check_url,
+                        expected: expected_key_auth.to_string(),
+                        found: Some(body_trimmed.to_string()),
+                        error: if ready {
+                            None
+                        } else {
+                            Some("Response does not match expected key authorization".to_string())
+                        },
+                        details: if ready {
+                            Some("✅ HTTP-01 challenge is properly configured. You can now submit the challenge to Let's Encrypt.".to_string())
+                        } else {
+                            Some("The server returned a response, but it doesn't match the expected key authorization. Make sure the challenge token is being served correctly.".to_string())
+                        },
+                    }
+                }
+                Err(e) => PreValidateChallengeResponse {
+                    ready: false,
+                    challenge_type: "http-01".to_string(),
+                    checked: check_url,
+                    expected: expected_key_auth.to_string(),
+                    found: None,
+                    error: Some(format!("Failed to read response body: {}", e)),
+                    details: None,
+                },
+            }
+        }
+        Err(e) => {
+            let error_details = if e.is_connect() {
+                format!(
+                    "Connection failed. Make sure:\n1. Domain {} has DNS pointing to this server\n2. Port 80 is open and accessible\n3. No firewall blocking HTTP traffic",
+                    domain
+                )
+            } else if e.is_timeout() {
+                format!(
+                    "Request timed out. Make sure:\n1. The server is responding on port 80\n2. Network latency is not too high\n3. Domain {} resolves correctly",
+                    domain
+                )
+            } else {
+                format!("HTTP request failed: {}", e)
+            };
+
+            PreValidateChallengeResponse {
+                ready: false,
+                challenge_type: "http-01".to_string(),
+                checked: check_url,
+                expected: expected_key_auth.to_string(),
+                found: None,
+                error: Some(format!("HTTP request failed: {}", e)),
+                details: Some(error_details),
+            }
+        }
+    }
+}
+
+/// Pre-validate DNS-01 challenge by performing DNS TXT lookup like Let's Encrypt does
+async fn pre_validate_dns01_challenge(
+    domain: &str,
+    challenge: &localup_relay_db::entities::domain_challenge::Model,
+) -> PreValidateChallengeResponse {
+    let default_record_name = format!("_acme-challenge.{}", domain);
+    let record_name = challenge
+        .token_or_record_name
+        .as_deref()
+        .unwrap_or(&default_record_name);
+    let expected_value = challenge.key_auth_or_record_value.as_deref().unwrap_or("");
+
+    info!("Pre-validating DNS-01 challenge for: {}", record_name);
+
+    // Create DNS resolver
+    let resolver = match hickory_resolver::TokioAsyncResolver::tokio_from_system_conf() {
+        Ok(r) => r,
+        Err(e) => {
+            return PreValidateChallengeResponse {
+                ready: false,
+                challenge_type: "dns-01".to_string(),
+                checked: format!("TXT {}", record_name),
+                expected: expected_value.to_string(),
+                found: None,
+                error: Some(format!("Failed to create DNS resolver: {}", e)),
+                details: None,
+            };
+        }
+    };
+
+    // Perform TXT lookup
+    match resolver.txt_lookup(record_name).await {
+        Ok(response) => {
+            let txt_records: Vec<String> = response
+                .iter()
+                .map(|txt| {
+                    txt.iter()
+                        .map(|data| String::from_utf8_lossy(data).to_string())
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .collect();
+
+            let found_str = txt_records.join(", ");
+            let ready = txt_records.iter().any(|r| r == expected_value);
+
+            PreValidateChallengeResponse {
+                ready,
+                challenge_type: "dns-01".to_string(),
+                checked: format!("TXT {}", record_name),
+                expected: expected_value.to_string(),
+                found: Some(found_str.clone()),
+                error: if ready {
+                    None
+                } else if txt_records.is_empty() {
+                    Some("No TXT records found".to_string())
+                } else {
+                    Some("TXT record value does not match expected value".to_string())
+                },
+                details: if ready {
+                    Some("✅ DNS-01 challenge is properly configured. You can now submit the challenge to Let's Encrypt.".to_string())
+                } else if txt_records.is_empty() {
+                    Some(format!(
+                        "No TXT records found for {}. Add the TXT record and wait for DNS propagation (can take minutes to hours).",
+                        record_name
+                    ))
+                } else {
+                    Some(format!(
+                        "Found TXT record(s) but value doesn't match. Found: [{}]. Expected: {}",
+                        found_str, expected_value
+                    ))
+                },
+            }
+        }
+        Err(e) => {
+            let error_str = e.to_string();
+            let is_nxdomain = error_str.contains("no records found")
+                || error_str.contains("NXDOMAIN")
+                || error_str.contains("NoRecordsFound");
+
+            PreValidateChallengeResponse {
+                ready: false,
+                challenge_type: "dns-01".to_string(),
+                checked: format!("TXT {}", record_name),
+                expected: expected_value.to_string(),
+                found: None,
+                error: Some(format!("DNS lookup failed: {}", e)),
+                details: Some(if is_nxdomain {
+                    format!(
+                        "No TXT record found for {}. Please add the following TXT record to your DNS:\n\nName: {}\nType: TXT\nValue: {}\n\nNote: DNS propagation can take minutes to hours.",
+                        record_name, record_name, expected_value
+                    )
+                } else {
+                    "DNS lookup failed. This could be due to:\n1. DNS propagation not complete\n2. Network issues\n3. Invalid domain name\n\nTry again in a few minutes.".to_string()
+                }),
+            }
+        }
+    }
 }
 
 /// Serve ACME HTTP-01 challenge response
@@ -1290,47 +2226,53 @@ pub async fn request_acme_certificate(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
-                error: "ACME client not configured. Set ACME_EMAIL environment variable to enable Let's Encrypt.".to_string(),
+                error: "ACME client not configured. Use --acme-email flag or set ACME_EMAIL environment variable to enable Let's Encrypt.".to_string(),
                 code: Some("ACME_NOT_CONFIGURED".to_string()),
             }),
         )
     })?;
 
-    // Initiate the ACME order
+    // Initiate the ACME order with HTTP-01 challenge (default for this endpoint)
     let client = acme_client.read().await;
-    let challenge_state = client.initiate_order(&domain).await.map_err(|e| {
-        error!("ACME order initiation failed: {}", e);
+    let challenge_state = client
+        .initiate_order(&domain, localup_cert::AcmeChallengeType::Http01)
+        .await
+        .map_err(|e| {
+            error!("ACME order initiation failed: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Failed to initiate certificate request: {}", e),
+                    code: Some("ACME_INIT_FAILED".to_string()),
+                }),
+            )
+        })?;
+    drop(client);
+
+    // Get HTTP-01 challenge details
+    let http01 = challenge_state.http01.ok_or_else(|| {
         (
-            StatusCode::BAD_REQUEST,
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Failed to initiate certificate request: {}", e),
-                code: Some("ACME_INIT_FAILED".to_string()),
+                error: "HTTP-01 challenge data not available".to_string(),
+                code: Some("CHALLENGE_DATA_MISSING".to_string()),
             }),
         )
     })?;
 
     // Store the challenge for serving
-    if let (Some(token), Some(key_auth)) =
-        (&challenge_state.token, &challenge_state.key_authorization)
     {
         let mut challenges = state.acme_challenges.write().await;
-        challenges.insert(token.clone(), key_auth.clone());
-        info!("Stored ACME challenge for token: {}", token);
+        challenges.insert(http01.token.clone(), http01.key_authorization.clone());
+        info!("Stored ACME challenge for token: {}", http01.token);
     }
 
     // Create the challenge info for response
     let challenge = ChallengeInfo::Http01 {
         domain: domain.clone(),
-        token: challenge_state.token.clone().unwrap_or_default(),
-        key_authorization: challenge_state
-            .key_authorization
-            .clone()
-            .unwrap_or_default(),
-        file_path: format!(
-            "http://{}/.well-known/acme-challenge/{}",
-            domain,
-            challenge_state.token.as_ref().unwrap_or(&String::new())
-        ),
+        token: http01.token.clone(),
+        key_authorization: http01.key_authorization.clone(),
+        file_path: format!("http://{}{}", domain, http01.url_path),
         instructions: vec![
             "1. Ensure your domain DNS points to this server".to_string(),
             "2. The challenge response is automatically served at the URL above".to_string(),
@@ -1341,7 +2283,7 @@ pub async fn request_acme_certificate(
     Ok(Json(InitiateChallengeResponse {
         domain,
         challenge,
-        challenge_id: challenge_state.challenge_id,
+        challenge_id: challenge_state.order_id,
         expires_at: challenge_state.expires_at,
     }))
 }

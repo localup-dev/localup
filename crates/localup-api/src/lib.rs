@@ -76,6 +76,12 @@ pub struct AppState {
         handlers::delete_custom_domain,
         handlers::initiate_challenge,
         handlers::complete_challenge,
+        handlers::get_domain_challenges,
+        handlers::get_domain_by_id,
+        handlers::get_certificate_details,
+        handlers::cancel_challenge,
+        handlers::restart_challenge,
+        handlers::pre_validate_challenge,
         handlers::serve_acme_challenge,
         handlers::request_acme_certificate,
         handlers::auth_config,
@@ -111,6 +117,7 @@ pub struct AppState {
             models::ErrorResponse,
             models::CustomDomainStatus,
             models::CustomDomain,
+            models::CertificateDetails,
             models::UploadCustomDomainRequest,
             models::UploadCustomDomainResponse,
             models::CustomDomainList,
@@ -118,6 +125,8 @@ pub struct AppState {
             models::ChallengeInfo,
             models::InitiateChallengeResponse,
             models::CompleteChallengeRequest,
+            models::PreValidateChallengeRequest,
+            models::PreValidateChallengeResponse,
             models::RegisterRequest,
             models::RegisterResponse,
             models::LoginRequest,
@@ -155,17 +164,19 @@ struct ApiDoc;
 
 /// API server configuration
 pub struct ApiServerConfig {
-    /// Address to bind the API server
-    pub bind_addr: SocketAddr,
+    /// Address to bind the HTTP API server (None to disable HTTP)
+    pub http_addr: Option<SocketAddr>,
+    /// Address to bind the HTTPS API server (None to disable HTTPS)
+    pub https_addr: Option<SocketAddr>,
     /// Enable CORS (for development)
     pub enable_cors: bool,
     /// Allowed CORS origins (if None, allows all)
     pub cors_origins: Option<Vec<String>>,
     /// JWT secret for signing auth tokens (required)
     pub jwt_secret: String,
-    /// TLS certificate path for HTTPS (enables HTTPS if provided)
+    /// TLS certificate path for HTTPS (required if https_addr is set)
     pub tls_cert_path: Option<String>,
-    /// TLS private key path for HTTPS (required if tls_cert_path is set)
+    /// TLS private key path for HTTPS (required if https_addr is set)
     pub tls_key_path: Option<String>,
 }
 
@@ -183,7 +194,7 @@ impl ApiServer {
         db: DatabaseConnection,
         allow_signup: bool,
     ) -> Self {
-        let is_https = config.tls_cert_path.is_some() && config.tls_key_path.is_some();
+        let is_https = config.https_addr.is_some();
         let state = Arc::new(AppState {
             localup_manager,
             db,
@@ -207,7 +218,7 @@ impl ApiServer {
         allow_signup: bool,
         protocol_discovery: localup_proto::ProtocolDiscoveryResponse,
     ) -> Self {
-        let is_https = config.tls_cert_path.is_some() && config.tls_key_path.is_some();
+        let is_https = config.https_addr.is_some();
         let state = Arc::new(AppState {
             localup_manager,
             db,
@@ -232,7 +243,7 @@ impl ApiServer {
         protocol_discovery: Option<localup_proto::ProtocolDiscoveryResponse>,
         relay_config: models::RelayConfig,
     ) -> Self {
-        let is_https = config.tls_cert_path.is_some() && config.tls_key_path.is_some();
+        let is_https = config.https_addr.is_some();
         let state = Arc::new(AppState {
             localup_manager,
             db,
@@ -258,7 +269,7 @@ impl ApiServer {
         relay_config: Option<models::RelayConfig>,
         acme_client: AcmeClient,
     ) -> Self {
-        let is_https = config.tls_cert_path.is_some() && config.tls_key_path.is_some();
+        let is_https = config.https_addr.is_some();
         let state = Arc::new(AppState {
             localup_manager,
             db,
@@ -335,10 +346,36 @@ impl ApiServer {
                 "/api/domains/challenge/complete",
                 post(handlers::complete_challenge),
             )
+            // Get pending challenges for a domain
+            .route(
+                "/api/domains/{domain}/challenges",
+                get(handlers::get_domain_challenges),
+            )
+            // Get domain by ID (for URL routing)
+            .route("/api/domains/by-id/{id}", get(handlers::get_domain_by_id))
+            // Cancel/restart challenge
+            .route(
+                "/api/domains/{domain}/challenge/cancel",
+                post(handlers::cancel_challenge),
+            )
+            .route(
+                "/api/domains/{domain}/challenge/restart",
+                post(handlers::restart_challenge),
+            )
+            // Pre-validate challenge before submitting to Let's Encrypt
+            .route(
+                "/api/domains/challenge/pre-validate",
+                post(handlers::pre_validate_challenge),
+            )
             // ACME certificate request (Let's Encrypt)
             .route(
                 "/api/domains/{domain}/certificate",
                 post(handlers::request_acme_certificate),
+            )
+            // Get certificate details
+            .route(
+                "/api/domains/{domain}/certificate-details",
+                get(handlers::get_certificate_details),
             )
             // Auth token management routes (require session token authentication)
             .route(
@@ -412,51 +449,77 @@ impl ApiServer {
     pub async fn start(self) -> Result<(), anyhow::Error> {
         let router = self.build_router();
 
-        // Check if TLS is configured
-        let use_tls = self.config.tls_cert_path.is_some() && self.config.tls_key_path.is_some();
-        let protocol = if use_tls { "https" } else { "http" };
+        // Validate configuration
+        if self.config.http_addr.is_none() && self.config.https_addr.is_none() {
+            return Err(anyhow::anyhow!(
+                "At least one of http_addr or https_addr must be configured"
+            ));
+        }
 
-        info!(
-            "Starting API server on {}://{}",
-            protocol, self.config.bind_addr
-        );
-        info!(
-            "OpenAPI spec: {}://{}/api/openapi.json",
-            protocol, self.config.bind_addr
-        );
-        info!(
-            "Swagger UI: {}://{}/swagger-ui",
-            protocol, self.config.bind_addr
-        );
+        if self.config.https_addr.is_some()
+            && (self.config.tls_cert_path.is_none() || self.config.tls_key_path.is_none())
+        {
+            return Err(anyhow::anyhow!(
+                "HTTPS server requires both tls_cert_path and tls_key_path"
+            ));
+        }
 
-        if use_tls {
-            let cert_path = self.config.tls_cert_path.as_ref().unwrap();
-            let key_path = self.config.tls_key_path.as_ref().unwrap();
+        let mut handles: Vec<tokio::task::JoinHandle<Result<(), anyhow::Error>>> = Vec::new();
 
-            // Load TLS configuration
-            let tls_config = RustlsConfig::from_pem_file(cert_path, key_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to load TLS certificates: {}", e))?;
+        // Start HTTP server if configured
+        if let Some(http_addr) = self.config.http_addr {
+            info!("Starting HTTP API server on http://{}", http_addr);
+            info!("OpenAPI spec: http://{}/api/openapi.json", http_addr);
+            info!("Swagger UI: http://{}/swagger-ui", http_addr);
 
-            // Serve with TLS using axum-server
-            axum_server::bind_rustls(self.config.bind_addr, tls_config)
-                .serve(router.into_make_service())
-                .await
-                .map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
-        } else {
-            // Plain HTTP
-            let listener = tokio::net::TcpListener::bind(self.config.bind_addr).await?;
+            let http_router = router.clone();
+            handles.push(tokio::spawn(async move {
+                let listener = tokio::net::TcpListener::bind(http_addr).await?;
+                axum::serve(listener, http_router)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("HTTP server error: {}", e))?;
+                Ok(())
+            }));
+        }
 
-            axum::serve(listener, router)
-                .await
-                .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+        // Start HTTPS server if configured
+        if let Some(https_addr) = self.config.https_addr {
+            let cert_path = self.config.tls_cert_path.clone().unwrap();
+            let key_path = self.config.tls_key_path.clone().unwrap();
+
+            info!("Starting HTTPS API server on https://{}", https_addr);
+            if self.config.http_addr.is_none() {
+                info!("OpenAPI spec: https://{}/api/openapi.json", https_addr);
+                info!("Swagger UI: https://{}/swagger-ui", https_addr);
+            }
+
+            let https_router = router;
+            handles.push(tokio::spawn(async move {
+                // Load TLS configuration
+                let tls_config = RustlsConfig::from_pem_file(&cert_path, &key_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to load TLS certificates: {}", e))?;
+
+                // Serve with TLS using axum-server
+                axum_server::bind_rustls(https_addr, tls_config)
+                    .serve(https_router.into_make_service())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("HTTPS server error: {}", e))?;
+                Ok(())
+            }));
+        }
+
+        // Wait for any server to complete (or fail)
+        if !handles.is_empty() {
+            let (result, _index, _remaining) = futures::future::select_all(handles).await;
+            result??;
         }
 
         Ok(())
     }
 }
 
-/// Convenience function to create and start an API server
+/// Convenience function to create and start an API server (HTTP only)
 pub async fn run_api_server(
     bind_addr: SocketAddr,
     localup_manager: Arc<TunnelConnectionManager>,
@@ -465,7 +528,8 @@ pub async fn run_api_server(
     jwt_secret: String,
 ) -> Result<(), anyhow::Error> {
     let config = ApiServerConfig {
-        bind_addr,
+        http_addr: Some(bind_addr),
+        https_addr: None,
         enable_cors: true,
         cors_origins: Some(vec!["http://localhost:3000".to_string()]),
         jwt_secret,

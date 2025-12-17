@@ -12,6 +12,7 @@ use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use localup_auth::{JwtClaims, JwtValidator};
+use localup_cert::{AcmeClient, AcmeConfig};
 use localup_control::{
     AgentRegistry, PortAllocator as PortAllocatorTrait, TunnelConnectionManager, TunnelHandler,
 };
@@ -135,6 +136,20 @@ struct ServerArgs {
     /// By default, QUIC with TLS 1.3 encryption is used (zero-config with auto-generated certs).
     #[arg(long)]
     insecure: bool,
+
+    /// ACME contact email for Let's Encrypt certificate provisioning
+    /// Required for automatic SSL certificate generation via Let's Encrypt
+    #[arg(long, env = "ACME_EMAIL")]
+    acme_email: Option<String>,
+
+    /// Use Let's Encrypt staging environment (for testing)
+    /// Staging certificates are not trusted by browsers but have higher rate limits
+    #[arg(long)]
+    acme_staging: bool,
+
+    /// Directory to store ACME certificates
+    #[arg(long, default_value = "/opt/localup/certs/acme")]
+    acme_cert_dir: String,
 }
 
 fn generate_token(
@@ -487,6 +502,11 @@ async fn main() -> Result<()> {
         let api_localup_manager = localup_manager.clone();
         let api_db = db.clone();
 
+        // Clone ACME config values for the async block
+        let acme_email = args.acme_email.clone();
+        let acme_staging = args.acme_staging;
+        let acme_cert_dir = args.acme_cert_dir.clone();
+
         info!("Starting API server on {}", api_addr);
         info!("OpenAPI spec: http://{}/api/openapi.json", api_addr);
         info!("Swagger UI: http://{}/swagger-ui", api_addr);
@@ -508,7 +528,39 @@ async fn main() -> Result<()> {
                 tls_key_path: None,
             };
 
-            let server = ApiServer::new(config, api_localup_manager, api_db, true); // allow_signup = true
+            // Create server with or without ACME client
+            let server = if let Some(email) = acme_email {
+                info!("ACME enabled with email: {}", email);
+                if acme_staging {
+                    info!("Using Let's Encrypt STAGING environment");
+                }
+
+                let acme_config = AcmeConfig {
+                    contact_email: email,
+                    use_staging: acme_staging,
+                    cert_dir: acme_cert_dir,
+                    http01_callback: None,
+                };
+
+                let mut acme_client = AcmeClient::new(acme_config);
+                if let Err(e) = acme_client.init().await {
+                    error!("Failed to initialize ACME client: {}", e);
+                }
+
+                ApiServer::with_acme_client(
+                    config,
+                    api_localup_manager,
+                    api_db,
+                    true,
+                    None,
+                    None,
+                    acme_client,
+                )
+            } else {
+                info!("ACME disabled (no --acme-email provided)");
+                ApiServer::new(config, api_localup_manager, api_db, true) // allow_signup = true
+            };
+
             if let Err(e) = server.start().await {
                 error!("API server error: {}", e);
             }

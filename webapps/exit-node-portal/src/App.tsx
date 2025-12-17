@@ -10,6 +10,8 @@ import AuthTokens from './pages/AuthTokens';
 import Tunnels from './pages/Tunnels';
 import TunnelDetail from './pages/TunnelDetail';
 import Domains from './pages/Domains';
+import AddDomain from './pages/AddDomain';
+import DomainDetail from './pages/DomainDetail';
 import { client } from './api/client/client.gen';
 
 // Configure OpenAPI client with credentials and base URL
@@ -53,6 +55,8 @@ function App() {
               <Route path="/tunnels" element={<Layout><Tunnels /></Layout>} />
               <Route path="/tunnels/:tunnelId" element={<Layout><TunnelDetail /></Layout>} />
               <Route path="/domains" element={<Layout><Domains /></Layout>} />
+              <Route path="/domains/add" element={<Layout><AddDomain /></Layout>} />
+              <Route path="/domains/:id" element={<Layout><DomainDetail /></Layout>} />
               <Route path="/" element={<Navigate to="/dashboard" />} />
             </Routes>
             <Toaster richColors position="bottom-right" />

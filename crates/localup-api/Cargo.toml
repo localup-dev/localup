@@ -26,6 +26,7 @@ utoipa-swagger-ui = { workspace = true }
 
 # Async
 tokio = { workspace = true }
+futures = { workspace = true }
 
 # TLS
 rustls = { workspace = true }
@@ -52,6 +53,13 @@ mime_guess = "2.0"
 
 # Cryptography
 sha2 = "0.10"
+x509-parser = "0.16"
+
+# HTTP client for pre-validation
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+
+# DNS resolver for pre-validation
+hickory-resolver = "0.24"
 
 [dev-dependencies]
 tokio = { workspace = true }

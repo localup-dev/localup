@@ -13,6 +13,7 @@ localup-server-tls = { path = "../localup-server-tls" }
 localup-server-https = { path = "../localup-server-https" }
 localup-router = { path = "../localup-router" }
 localup-auth = { path = "../localup-auth" }
+localup-cert = { path = "../localup-cert" }
 localup-api = { path = "../localup-api" }
 localup-relay-db = { path = "../localup-relay-db" }
 localup-transport = { path = "../localup-transport" }

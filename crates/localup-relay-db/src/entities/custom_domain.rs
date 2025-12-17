@@ -31,6 +31,10 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub domain: String,
 
+    /// Unique ID for URL routing
+    #[sea_orm(column_type = "String(StringLen::N(36))", nullable)]
+    pub id: Option<String>,
+
     /// Path to certificate file
     pub cert_path: Option<String>,
 

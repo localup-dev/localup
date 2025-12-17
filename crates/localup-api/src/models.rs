@@ -292,6 +292,8 @@ pub enum CustomDomainStatus {
 /// Custom domain information
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CustomDomain {
+    /// Unique ID for URL routing
+    pub id: String,
     /// Domain name
     pub domain: String,
     /// Certificate status
@@ -306,6 +308,33 @@ pub struct CustomDomain {
     /// Error message if provisioning failed
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+}
+
+/// Certificate details
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct CertificateDetails {
+    /// Domain name
+    pub domain: String,
+    /// Certificate subject (CN)
+    pub subject: String,
+    /// Certificate issuer
+    pub issuer: String,
+    /// Serial number (hex)
+    pub serial_number: String,
+    /// Not valid before
+    pub not_before: DateTime<Utc>,
+    /// Not valid after
+    pub not_after: DateTime<Utc>,
+    /// Subject Alternative Names (SANs)
+    pub san: Vec<String>,
+    /// Signature algorithm
+    pub signature_algorithm: String,
+    /// Public key algorithm
+    pub public_key_algorithm: String,
+    /// Certificate fingerprint (SHA-256)
+    pub fingerprint_sha256: String,
+    /// Certificate in PEM format
+    pub pem: String,
 }
 
 /// Request to upload a custom domain certificate
@@ -411,6 +440,37 @@ pub struct CompleteChallengeRequest {
     pub domain: String,
     /// Challenge ID from initiate response
     pub challenge_id: String,
+}
+
+/// Request to pre-validate a challenge (check setup before submitting to ACME)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PreValidateChallengeRequest {
+    /// Domain name
+    pub domain: String,
+    /// Challenge ID from initiate response
+    pub challenge_id: String,
+}
+
+/// Response from pre-validation check
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct PreValidateChallengeResponse {
+    /// Whether the challenge is ready to be submitted
+    pub ready: bool,
+    /// Challenge type (http-01 or dns-01)
+    pub challenge_type: String,
+    /// What was checked
+    pub checked: String,
+    /// What was expected
+    pub expected: String,
+    /// What was found (if any)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub found: Option<String>,
+    /// Error message if not ready
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Additional details or suggestions
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<String>,
 }
 
 // ============================================================================
