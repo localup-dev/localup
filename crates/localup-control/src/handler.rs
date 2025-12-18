@@ -366,11 +366,12 @@ impl TunnelHandler {
             .downcast::<localup_transport_quic::QuicConnection>()
         {
             self.connection_manager
-                .register_with_auth(
+                .register_with_auth_and_token(
                     localup_id.clone(),
                     endpoints.clone(),
                     quic_conn,
                     config.http_auth.clone(),
+                    Some(auth_token.clone()),
                 )
                 .await;
             debug!(

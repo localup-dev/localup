@@ -155,6 +155,55 @@ impl TcpServer {
         let host = host.unwrap();
         debug!("Routing HTTP request for host: {}", host);
 
+        // Parse request path from request line
+        let request_path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/");
+
+        // Handle ACME HTTP-01 challenges BEFORE route lookup
+        // This allows responding to challenges for domains that don't have tunnels yet
+        if request_path.starts_with("/.well-known/acme-challenge/") {
+            let token = request_path
+                .strip_prefix("/.well-known/acme-challenge/")
+                .unwrap_or("");
+
+            if !token.is_empty() {
+                if let Some(ref db_conn) = db {
+                    match Self::lookup_acme_challenge(db_conn, &host, token).await {
+                        Ok(Some(key_auth)) => {
+                            info!(
+                                "ACME HTTP-01 challenge response for domain {} token {}",
+                                host, token
+                            );
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                                key_auth.len(),
+                                key_auth
+                            );
+                            client_socket.write_all(response.as_bytes()).await?;
+                            return Ok(());
+                        }
+                        Ok(None) => {
+                            debug!(
+                                "ACME challenge not found for domain {} token {}, continuing to route lookup",
+                                host, token
+                            );
+                            // Don't return - fall through to normal routing
+                            // The tunnel might handle the challenge itself
+                        }
+                        Err(e) => {
+                            error!("Database error looking up ACME challenge: {}", e);
+                            // Don't return - fall through to normal routing
+                        }
+                    }
+                }
+                // If no database or challenge not found, continue to route lookup
+                // This allows the tunnel to handle the challenge if it wants to
+            }
+        }
+
         // Look up route
         let route_key = RouteKey::HttpHost(host.to_string());
         let target = registry.lookup(&route_key);
@@ -501,6 +550,30 @@ impl TcpServer {
             }
         }
         None
+    }
+
+    /// Look up an ACME HTTP-01 challenge from the database
+    /// Returns the key authorization if found, None if not found
+    async fn lookup_acme_challenge(
+        db: &DatabaseConnection,
+        domain: &str,
+        token: &str,
+    ) -> Result<Option<String>, sea_orm::DbErr> {
+        use localup_relay_db::entities::domain_challenge::{
+            self, ChallengeStatus, ChallengeType, Entity as DomainChallenge,
+        };
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+        // Look up pending HTTP-01 challenge by domain and token
+        let challenge = DomainChallenge::find()
+            .filter(domain_challenge::Column::Domain.eq(domain))
+            .filter(domain_challenge::Column::TokenOrRecordName.eq(token))
+            .filter(domain_challenge::Column::ChallengeType.eq(ChallengeType::Http01))
+            .filter(domain_challenge::Column::Status.eq(ChallengeStatus::Pending))
+            .one(db)
+            .await?;
+
+        Ok(challenge.and_then(|c| c.key_auth_or_record_value))
     }
 }
 

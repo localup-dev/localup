@@ -22,6 +22,8 @@ pub struct TunnelConnection {
     pub tcp_data_callback: Option<TcpDataCallback>,
     /// HTTP authentication configuration for this tunnel
     pub http_auth: HttpAuthConfig,
+    /// The auth token used to create this tunnel (for /_localup/token endpoint)
+    pub auth_token: Option<String>,
 }
 
 /// Manages all active tunnel connections
@@ -43,8 +45,14 @@ impl TunnelConnectionManager {
         endpoints: Vec<Endpoint>,
         connection: Arc<QuicConnection>,
     ) {
-        self.register_with_auth(localup_id, endpoints, connection, HttpAuthConfig::None)
-            .await;
+        self.register_with_auth_and_token(
+            localup_id,
+            endpoints,
+            connection,
+            HttpAuthConfig::None,
+            None,
+        )
+        .await;
     }
 
     /// Register a new tunnel connection with HTTP authentication configuration
@@ -55,12 +63,26 @@ impl TunnelConnectionManager {
         connection: Arc<QuicConnection>,
         http_auth: HttpAuthConfig,
     ) {
+        self.register_with_auth_and_token(localup_id, endpoints, connection, http_auth, None)
+            .await;
+    }
+
+    /// Register a new tunnel connection with HTTP authentication and auth token
+    pub async fn register_with_auth_and_token(
+        &self,
+        localup_id: String,
+        endpoints: Vec<Endpoint>,
+        connection: Arc<QuicConnection>,
+        http_auth: HttpAuthConfig,
+        auth_token: Option<String>,
+    ) {
         let localup_conn = TunnelConnection {
             localup_id: localup_id.clone(),
             endpoints,
             connection,
             tcp_data_callback: None,
             http_auth,
+            auth_token,
         };
 
         self.connections
@@ -132,6 +154,15 @@ impl TunnelConnectionManager {
             .await
             .get(localup_id)
             .map(|conn| conn.http_auth.clone())
+    }
+
+    /// Get the auth token for a tunnel (used for /_localup/token endpoint)
+    pub async fn get_auth_token(&self, localup_id: &str) -> Option<String> {
+        self.connections
+            .read()
+            .await
+            .get(localup_id)
+            .and_then(|conn| conn.auth_token.clone())
     }
 }
 
