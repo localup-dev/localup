@@ -501,8 +501,6 @@ impl HttpsServer {
         request_bytes: &[u8],
         db: Option<DatabaseConnection>,
     ) -> Result<(), HttpsServerError> {
-        debug!("Transparent HTTPS streaming for tunnel: {}", localup_id);
-
         // Record start time and generate request ID for database capture
         let request_start = chrono::Utc::now();
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -523,14 +521,19 @@ impl HttpsServer {
             None
         };
 
+        // Check if this is a WebSocket upgrade request
+        let is_websocket = headers.iter().any(|(name, value)| {
+            name.to_lowercase() == "upgrade" && value.to_lowercase() == "websocket"
+        });
+
         // Check HTTP authentication if configured for this tunnel
         if let Some(authenticator) = localup_manager.get_http_authenticator(localup_id).await {
             if authenticator.requires_auth() {
                 // Parse headers from request
-                let headers = localup_http_auth::parse_headers_from_request(request_bytes);
+                let auth_headers = localup_http_auth::parse_headers_from_request(request_bytes);
 
                 // Authenticate
-                match authenticator.authenticate(&headers) {
+                match authenticator.authenticate(&auth_headers) {
                     localup_http_auth::AuthResult::Authenticated => {
                         debug!("HTTP auth successful for tunnel: {}", localup_id);
                     }
@@ -562,7 +565,7 @@ impl HttpsServer {
         // Generate stream ID
         let stream_id = rand::random::<u32>();
 
-        // Open a new QUIC stream for transparent proxying
+        // Open a new QUIC stream
         let stream = match connection.open_stream().await {
             Ok(s) => s,
             Err(e) => {
@@ -574,71 +577,233 @@ impl HttpsServer {
             }
         };
 
-        // Split stream for bidirectional communication
-        let (mut quic_send, quic_recv) = stream.split();
+        // Use transparent streaming for WebSocket upgrades
+        if is_websocket {
+            debug!(
+                "WebSocket upgrade detected, using transparent streaming for tunnel: {}",
+                localup_id
+            );
 
-        // Send initial HTTP request data through tunnel (transparent)
-        // We already extracted the host for routing, now send ALL raw bytes
-        let connect_msg = TunnelMessage::HttpStreamConnect {
+            let (mut quic_send, quic_recv) = stream.split();
+
+            let connect_msg = TunnelMessage::HttpStreamConnect {
+                stream_id,
+                host: localup_id.to_string(),
+                initial_data: request_bytes.to_vec(),
+            };
+
+            if let Err(e) = quic_send.send_message(&connect_msg).await {
+                error!("Failed to send WebSocket stream connect: {}", e);
+                let response =
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 12\r\n\r\nTunnel error";
+                tls_stream.write_all(response).await?;
+                return Ok(());
+            }
+
+            // Bidirectional streaming for WebSocket
+            let response_capture =
+                Self::proxy_transparent_stream(tls_stream, quic_send, quic_recv, stream_id).await?;
+
+            // Save to database
+            if let Some(ref db_conn) = db {
+                use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
+
+                let response_end = chrono::Utc::now();
+                let latency_ms = (response_end - request_start).num_milliseconds() as i32;
+
+                let captured_request = localup_relay_db::entities::captured_request::ActiveModel {
+                    id: Set(request_id.clone()),
+                    localup_id: Set(localup_id.to_string()),
+                    method: Set(method.clone()),
+                    path: Set(uri.clone()),
+                    host: Set(host),
+                    headers: Set(serde_json::to_string(&headers).unwrap_or_default()),
+                    body: Set(body.as_ref().map(|b| BASE64.encode(b))),
+                    status: Set(response_capture.status.map(|s| s as i32)),
+                    response_headers: Set(response_capture
+                        .headers
+                        .as_ref()
+                        .map(|h| serde_json::to_string(h).unwrap_or_default())),
+                    response_body: Set(response_capture.body.as_ref().map(|b| BASE64.encode(b))),
+                    created_at: Set(request_start),
+                    responded_at: Set(Some(response_end)),
+                    latency_ms: Set(Some(latency_ms)),
+                };
+
+                use sea_orm::EntityTrait;
+                if let Err(e) =
+                    localup_relay_db::entities::prelude::CapturedRequest::insert(captured_request)
+                        .exec(db_conn)
+                        .await
+                {
+                    warn!(
+                        "Failed to save captured WebSocket request {}: {}",
+                        request_id, e
+                    );
+                }
+            }
+
+            return Ok(());
+        }
+
+        // Regular HTTP request - use HttpRequest/HttpResponse for metrics support
+        debug!(
+            "HTTPS request for tunnel: {} {} {}",
+            localup_id, method, uri
+        );
+
+        let (mut quic_send, mut quic_recv) = stream.split();
+
+        // Clone for database capture
+        let method_clone = method.clone();
+        let uri_clone = uri.clone();
+        let headers_clone = headers.clone();
+        let body_clone = body.clone();
+
+        // Send HTTP request through tunnel
+        let http_request = TunnelMessage::HttpRequest {
             stream_id,
-            host: localup_id.to_string(), // Use localup_id as host identifier
-            initial_data: request_bytes.to_vec(),
+            method,
+            uri,
+            headers,
+            body,
         };
 
-        if let Err(e) = quic_send.send_message(&connect_msg).await {
-            error!("Failed to send HTTPS stream connect: {}", e);
-            let response = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 12\r\n\r\nTunnel error";
+        if let Err(e) = quic_send.send_message(&http_request).await {
+            error!("Failed to send HTTPS request to tunnel: {}", e);
+            let response =
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 23\r\n\r\nTunnel send error\n";
             tls_stream.write_all(response).await?;
             return Ok(());
         }
 
-        debug!(
-            "HTTPS transparent stream established (stream {})",
-            stream_id
-        );
+        debug!("HTTPS request sent to tunnel client (stream {})", stream_id);
 
-        // Now enter bidirectional streaming loop and capture response
-        let response_capture =
-            Self::proxy_transparent_stream(tls_stream, quic_send, quic_recv, stream_id).await?;
+        // Wait for response from tunnel (with timeout)
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(30), quic_recv.recv_message())
+                .await;
 
-        // Save captured request/response to database
-        if let Some(ref db_conn) = db {
-            use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
+        match response {
+            Ok(Ok(Some(TunnelMessage::HttpResponse {
+                stream_id: _,
+                status,
+                headers: resp_headers,
+                body: resp_body,
+            }))) => {
+                // Clone values for database capture
+                let resp_headers_clone = resp_headers.clone();
+                let resp_body_clone = resp_body.clone();
 
-            let response_end = chrono::Utc::now();
-            let latency_ms = (response_end - request_start).num_milliseconds() as i32;
+                // Build HTTP response
+                let status_text = match status {
+                    200 => "OK",
+                    201 => "Created",
+                    204 => "No Content",
+                    301 => "Moved Permanently",
+                    302 => "Found",
+                    304 => "Not Modified",
+                    400 => "Bad Request",
+                    401 => "Unauthorized",
+                    403 => "Forbidden",
+                    404 => "Not Found",
+                    500 => "Internal Server Error",
+                    502 => "Bad Gateway",
+                    503 => "Service Unavailable",
+                    _ => "Unknown",
+                };
 
-            let captured_request = localup_relay_db::entities::captured_request::ActiveModel {
-                id: Set(request_id.clone()),
-                localup_id: Set(localup_id.to_string()),
-                method: Set(method.clone()),
-                path: Set(uri.clone()),
-                host: Set(host),
-                headers: Set(serde_json::to_string(&headers).unwrap_or_default()),
-                body: Set(body.as_ref().map(|b| BASE64.encode(b))),
-                status: Set(response_capture.status.map(|s| s as i32)),
-                response_headers: Set(response_capture
-                    .headers
-                    .as_ref()
-                    .map(|h| serde_json::to_string(h).unwrap_or_default())),
-                response_body: Set(response_capture.body.as_ref().map(|b| BASE64.encode(b))),
-                created_at: Set(request_start),
-                responded_at: Set(Some(response_end)),
-                latency_ms: Set(Some(latency_ms)),
-            };
+                let response_line = format!("HTTP/1.1 {} {}\r\n", status, status_text);
+                tls_stream.write_all(response_line.as_bytes()).await?;
 
-            use sea_orm::EntityTrait;
-            if let Err(e) =
-                localup_relay_db::entities::prelude::CapturedRequest::insert(captured_request)
+                // Forward response headers (skip Content-Length, we'll add our own)
+                for (name, value) in resp_headers {
+                    if name.to_lowercase() == "content-length" {
+                        continue;
+                    }
+                    let header_line = format!("{}: {}\r\n", name, value);
+                    tls_stream.write_all(header_line.as_bytes()).await?;
+                }
+
+                // Write body with correct Content-Length
+                if let Some(ref body) = resp_body {
+                    let content_length = format!("Content-Length: {}\r\n", body.len());
+                    tls_stream.write_all(content_length.as_bytes()).await?;
+                    tls_stream.write_all(b"\r\n").await?;
+                    tls_stream.write_all(body).await?;
+                } else {
+                    tls_stream.write_all(b"Content-Length: 0\r\n\r\n").await?;
+                }
+
+                debug!(
+                    "HTTPS response forwarded to client: {} {}",
+                    status, status_text
+                );
+
+                // Capture request/response to database
+                if let Some(ref db_conn) = db {
+                    use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
+
+                    let response_end = chrono::Utc::now();
+                    let latency_ms = (response_end - request_start).num_milliseconds() as i32;
+
+                    let captured_request =
+                        localup_relay_db::entities::captured_request::ActiveModel {
+                            id: Set(request_id.clone()),
+                            localup_id: Set(localup_id.to_string()),
+                            method: Set(method_clone),
+                            path: Set(uri_clone),
+                            host: Set(host),
+                            headers: Set(serde_json::to_string(&headers_clone).unwrap_or_default()),
+                            body: Set(body_clone.as_ref().map(|b| BASE64.encode(b))),
+                            status: Set(Some(status as i32)),
+                            response_headers: Set(Some(
+                                serde_json::to_string(&resp_headers_clone).unwrap_or_default(),
+                            )),
+                            response_body: Set(resp_body_clone.as_ref().map(|b| BASE64.encode(b))),
+                            created_at: Set(request_start),
+                            responded_at: Set(Some(response_end)),
+                            latency_ms: Set(Some(latency_ms)),
+                        };
+
+                    use sea_orm::EntityTrait;
+                    if let Err(e) = localup_relay_db::entities::prelude::CapturedRequest::insert(
+                        captured_request,
+                    )
                     .exec(db_conn)
                     .await
-            {
-                warn!(
-                    "Failed to save captured HTTPS request {}: {}",
-                    request_id, e
-                );
-            } else {
-                debug!("Captured HTTPS request {} to database", request_id);
+                    {
+                        warn!(
+                            "Failed to save captured HTTPS request {}: {}",
+                            request_id, e
+                        );
+                    } else {
+                        debug!("Captured HTTPS request {} to database", request_id);
+                    }
+                }
+            }
+            Ok(Ok(Some(other))) => {
+                error!("Unexpected tunnel response: {:?}", other);
+                let response =
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 19\r\n\r\nUnexpected response";
+                tls_stream.write_all(response).await?;
+            }
+            Ok(Ok(None)) => {
+                error!("Tunnel closed without response");
+                let response =
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 13\r\n\r\nTunnel closed";
+                tls_stream.write_all(response).await?;
+            }
+            Ok(Err(e)) => {
+                error!("Failed to read tunnel response: {}", e);
+                let response =
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 12\r\n\r\nTunnel error";
+                tls_stream.write_all(response).await?;
+            }
+            Err(_) => {
+                error!("Tunnel response timeout");
+                let response = b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 7\r\n\r\nTimeout";
+                tls_stream.write_all(response).await?;
             }
         }
 

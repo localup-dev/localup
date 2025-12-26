@@ -515,7 +515,8 @@ async fn main() -> Result<()> {
             use localup_api::{ApiServer, ApiServerConfig};
 
             let config = ApiServerConfig {
-                bind_addr: api_addr,
+                http_addr: Some(api_addr),
+                https_addr: None,
                 enable_cors: true,
                 cors_origins: Some(vec![
                     "http://localhost:5173".to_string(),

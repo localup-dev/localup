@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { handleApiMetrics, handleApiStats, handleApiTcpConnections } from './api/generated/sdk.gen';
 import type { HttpMetric, MetricsStats, TcpMetric } from './api/generated/types.gen';
 
@@ -18,192 +18,20 @@ interface TcpStats {
   total_bytes_received: number;
 }
 
+// SSE Event types from the backend
+type MetricsEvent =
+  | { type: 'request'; metric: HttpMetric }
+  | { type: 'response'; id: string; status: number; headers: [string, string][]; body: unknown; duration_ms: number }
+  | { type: 'error'; id: string; error: string; duration_ms: number }
+  | { type: 'tcp_connection'; metric: TcpMetric }
+  | { type: 'tcp_update'; id: string; bytes_received: number; bytes_sent: number }
+  | { type: 'tcp_closed'; id: string; bytes_received: number; bytes_sent: number; duration_ms: number; error?: string }
+  | { type: 'stats'; stats: MetricsStats };
+
 const ITEMS_PER_PAGE = 20;
 
-// Quick Connect Component
-function QuickConnect({ tunnelInfo }: { tunnelInfo: TunnelEndpoint[] }) {
-  const [token, setToken] = useState('');
-  const [relayAddr, setRelayAddr] = useState('tunnel.kfs.es:4443');
-  const [localPort, setLocalPort] = useState('3000');
-  const [subdomain, setSubdomain] = useState('myapp');
-  const [protocol, setProtocol] = useState<'http' | 'tcp'>('http');
-  const [copied, setCopied] = useState<string | null>(null);
-
-  // Detect relay address from tunnel info
-  useEffect(() => {
-    if (tunnelInfo.length > 0) {
-      const endpoint = tunnelInfo[0];
-      if (endpoint.protocol.Tcp) {
-        setProtocol('tcp');
-      } else {
-        setProtocol('http');
-      }
-    }
-  }, [tunnelInfo]);
-
-  const copyToClipboard = useCallback((text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopied(id);
-    setTimeout(() => setCopied(null), 2000);
-  }, []);
-
-  const httpCommand = `localup --relay=${relayAddr} --port=${localPort} --token=$TOKEN --subdomain="${subdomain}"`;
-  const tcpCommand = `localup --port=${localPort} --relay=${relayAddr} --protocol=tcp --token=$TOKEN`;
-  const setTokenCommand = `localup config set-token "${token || 'YOUR_JWT_TOKEN'}"`;
-  const exportTokenCommand = `export TOKEN="${token || 'YOUR_JWT_TOKEN'}"`;
-
-  return (
-    <div className="card-dark p-6 mb-8">
-      <h2 className="text-xl font-semibold text-dark-text-primary mb-4">Quick Connect</h2>
-      <p className="text-dark-text-secondary text-sm mb-6">
-        Configure your tunnel connection settings and copy the commands below.
-      </p>
-
-      {/* Configuration Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-        <div>
-          <label className="block text-sm font-medium text-dark-text-secondary mb-2">Relay Address</label>
-          <input
-            type="text"
-            value={relayAddr}
-            onChange={(e) => setRelayAddr(e.target.value)}
-            placeholder="tunnel.kfs.es:4443"
-            className="w-full px-3 py-2 bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-accent-blue"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-dark-text-secondary mb-2">Local Port</label>
-          <input
-            type="text"
-            value={localPort}
-            onChange={(e) => setLocalPort(e.target.value)}
-            placeholder="3000"
-            className="w-full px-3 py-2 bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-accent-blue"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-dark-text-secondary mb-2">Subdomain (HTTP)</label>
-          <input
-            type="text"
-            value={subdomain}
-            onChange={(e) => setSubdomain(e.target.value)}
-            placeholder="myapp"
-            className="w-full px-3 py-2 bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-accent-blue"
-          />
-        </div>
-        <div>
-          <label className="block text-sm font-medium text-dark-text-secondary mb-2">Protocol</label>
-          <select
-            value={protocol}
-            onChange={(e) => setProtocol(e.target.value as 'http' | 'tcp')}
-            className="w-full px-3 py-2 bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-accent-blue"
-          >
-            <option value="http">HTTP/HTTPS</option>
-            <option value="tcp">TCP</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Token Input */}
-      <div className="mb-6">
-        <label className="block text-sm font-medium text-dark-text-secondary mb-2">
-          JWT Token
-          <span className="text-dark-text-muted ml-2">(paste your token here)</span>
-        </label>
-        <textarea
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-          rows={2}
-          className="w-full px-3 py-2 bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent-blue resize-none"
-        />
-      </div>
-
-      {/* Commands */}
-      <div className="space-y-4">
-        {/* Step 1: Set Token */}
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-medium text-dark-text-primary">Step 1: Set your token</h3>
-          </div>
-          <div className="relative">
-            <code className="block w-full px-4 py-3 pr-24 bg-dark-surface-light border border-dark-border rounded-lg text-sm font-mono text-accent-blue overflow-x-auto">
-              {setTokenCommand}
-            </code>
-            <button
-              onClick={() => copyToClipboard(setTokenCommand, 'set-token')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-dark-surface hover:bg-dark-border text-dark-text-secondary hover:text-dark-text-primary rounded text-xs transition-colors"
-            >
-              {copied === 'set-token' ? 'Copied!' : 'Copy'}
-            </button>
-          </div>
-          <p className="text-xs text-dark-text-muted mt-1">Or export as environment variable:</p>
-          <div className="relative mt-1">
-            <code className="block w-full px-4 py-2 pr-24 bg-dark-surface-light border border-dark-border rounded-lg text-sm font-mono text-dark-text-secondary overflow-x-auto">
-              {exportTokenCommand}
-            </code>
-            <button
-              onClick={() => copyToClipboard(exportTokenCommand, 'export-token')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-dark-surface hover:bg-dark-border text-dark-text-secondary hover:text-dark-text-primary rounded text-xs transition-colors"
-            >
-              {copied === 'export-token' ? 'Copied!' : 'Copy'}
-            </button>
-          </div>
-        </div>
-
-        {/* Step 2: Connect */}
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-medium text-dark-text-primary">
-              Step 2: Connect ({protocol === 'http' ? 'HTTP Relay' : 'TCP Relay'})
-            </h3>
-          </div>
-          <div className="relative">
-            <code className="block w-full px-4 py-3 pr-24 bg-dark-surface-light border border-dark-border rounded-lg text-sm font-mono text-accent-green overflow-x-auto">
-              {protocol === 'http' ? httpCommand : tcpCommand}
-            </code>
-            <button
-              onClick={() => copyToClipboard(protocol === 'http' ? httpCommand : tcpCommand, 'connect')}
-              className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 bg-dark-surface hover:bg-dark-border text-dark-text-secondary hover:text-dark-text-primary rounded text-xs transition-colors"
-            >
-              {copied === 'connect' ? 'Copied!' : 'Copy'}
-            </button>
-          </div>
-        </div>
-
-        {/* Full Command with Token */}
-        {token && (
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-dark-text-primary">Full command (with token embedded)</h3>
-            </div>
-            <div className="relative">
-              <code className="block w-full px-4 py-3 pr-24 bg-dark-surface-light border border-dark-border rounded-lg text-sm font-mono text-accent-purple overflow-x-auto whitespace-pre-wrap break-all">
-                {protocol === 'http'
-                  ? `localup --relay=${relayAddr} --port=${localPort} --token="${token}" --subdomain="${subdomain}"`
-                  : `localup --port=${localPort} --relay=${relayAddr} --protocol=tcp --token="${token}"`}
-              </code>
-              <button
-                onClick={() => copyToClipboard(
-                  protocol === 'http'
-                    ? `localup --relay=${relayAddr} --port=${localPort} --token="${token}" --subdomain="${subdomain}"`
-                    : `localup --port=${localPort} --relay=${relayAddr} --protocol=tcp --token="${token}"`,
-                  'full'
-                )}
-                className="absolute right-2 top-2 px-3 py-1.5 bg-dark-surface hover:bg-dark-border text-dark-text-secondary hover:text-dark-text-primary rounded text-xs transition-colors"
-              >
-                {copied === 'full' ? 'Copied!' : 'Copy'}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function App() {
-  const [viewMode, setViewMode] = useState<ViewMode | null>(null); // null until we detect protocol
+  const [viewMode, setViewMode] = useState<ViewMode | null>(null);
   const [httpMetrics, setHttpMetrics] = useState<HttpMetric[]>([]);
   const [tcpMetrics, setTcpMetrics] = useState<TcpMetric[]>([]);
   const [stats, setStats] = useState<MetricsStats | null>(null);
@@ -211,9 +39,12 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [tunnelInfo, setTunnelInfo] = useState<TunnelEndpoint[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
+  const [connected, setConnected] = useState(false);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
+  // Initial data fetch
   useEffect(() => {
-    const fetchData = async () => {
+    const fetchInitialData = async () => {
       try {
         setLoading(true);
 
@@ -224,7 +55,7 @@ function App() {
           setTunnelInfo(info);
 
           // Auto-detect initial view mode based on tunnel protocol
-          if (viewMode === null && info.length > 0) {
+          if (info.length > 0) {
             const firstEndpoint = info[0];
             if (firstEndpoint.protocol.Tcp) {
               setViewMode('tcp');
@@ -234,29 +65,128 @@ function App() {
           }
         }
 
-        // Only fetch metrics if viewMode is set
-        if (viewMode === 'http') {
-          const [metricsRes, statsRes] = await Promise.all([
-            handleApiMetrics(),
-            handleApiStats()
-          ]);
-          if (metricsRes.data) setHttpMetrics(metricsRes.data);
-          if (statsRes.data) setStats(statsRes.data);
-        } else if (viewMode === 'tcp') {
-          const tcpRes = await handleApiTcpConnections();
-          if (tcpRes.data) setTcpMetrics(tcpRes.data);
-        }
+        // Fetch initial metrics data
+        const [metricsRes, statsRes, tcpRes] = await Promise.all([
+          handleApiMetrics(),
+          handleApiStats(),
+          handleApiTcpConnections()
+        ]);
+        if (metricsRes.data) setHttpMetrics(metricsRes.data);
+        if (statsRes.data) setStats(statsRes.data);
+        if (tcpRes.data) setTcpMetrics(tcpRes.data);
       } catch (error) {
-        console.error('Failed to fetch data:', error);
+        console.error('Failed to fetch initial data:', error);
       } finally {
         setLoading(false);
       }
     };
 
-    fetchData();
-    const interval = setInterval(fetchData, 2000);
-    return () => clearInterval(interval);
-  }, [viewMode]);
+    fetchInitialData();
+  }, []);
+
+  // SSE connection for real-time updates
+  useEffect(() => {
+    const connectSSE = () => {
+      const eventSource = new EventSource('/api/metrics/stream');
+      eventSourceRef.current = eventSource;
+
+      eventSource.onopen = () => {
+        setConnected(true);
+        console.log('SSE connected');
+      };
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data: MetricsEvent = JSON.parse(event.data);
+
+          switch (data.type) {
+            case 'request':
+              setHttpMetrics(prev => [data.metric, ...prev]);
+              break;
+
+            case 'response':
+              setHttpMetrics(prev =>
+                prev.map(m =>
+                  m.id === data.id
+                    ? {
+                        ...m,
+                        response_status: data.status,
+                        response_headers: data.headers,
+                        response_body: data.body as HttpMetric['response_body'],
+                        duration_ms: data.duration_ms,
+                      }
+                    : m
+                )
+              );
+              break;
+
+            case 'error':
+              setHttpMetrics(prev =>
+                prev.map(m =>
+                  m.id === data.id
+                    ? { ...m, error: data.error, duration_ms: data.duration_ms }
+                    : m
+                )
+              );
+              break;
+
+            case 'tcp_connection':
+              setTcpMetrics(prev => [data.metric, ...prev]);
+              break;
+
+            case 'tcp_update':
+              setTcpMetrics(prev =>
+                prev.map(m =>
+                  m.id === data.id
+                    ? { ...m, bytes_received: data.bytes_received, bytes_sent: data.bytes_sent }
+                    : m
+                )
+              );
+              break;
+
+            case 'tcp_closed':
+              setTcpMetrics(prev =>
+                prev.map(m =>
+                  m.id === data.id
+                    ? {
+                        ...m,
+                        state: data.error ? 'error' : 'closed',
+                        bytes_received: data.bytes_received,
+                        bytes_sent: data.bytes_sent,
+                        duration_ms: data.duration_ms,
+                        error: data.error,
+                        closed_at: Date.now(),
+                      }
+                    : m
+                )
+              );
+              break;
+
+            case 'stats':
+              setStats(data.stats);
+              break;
+          }
+        } catch (error) {
+          console.error('Failed to parse SSE event:', error);
+        }
+      };
+
+      eventSource.onerror = () => {
+        setConnected(false);
+        eventSource.close();
+        // Reconnect after 2 seconds
+        setTimeout(connectSSE, 2000);
+      };
+    };
+
+    connectSSE();
+
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
 
   // Reset to page 1 when switching modes
   useEffect(() => {
@@ -291,6 +221,10 @@ function App() {
     };
   };
 
+  const copyToClipboard = useCallback((text: string) => {
+    navigator.clipboard.writeText(text);
+  }, []);
+
   // Pagination
   const currentItems = viewMode === 'http' ? httpMetrics : tcpMetrics;
   const totalPages = Math.ceil(currentItems.length / ITEMS_PER_PAGE);
@@ -304,108 +238,75 @@ function App() {
 
   const tcpStats = viewMode === 'tcp' ? getTcpStats() : null;
 
+  // Get protocol info for display
+  const getProtocolInfo = (endpoint: TunnelEndpoint) => {
+    if (endpoint.protocol.Tcp) return { type: 'TCP', port: endpoint.protocol.Tcp.port };
+    if (endpoint.protocol.Http) return { type: 'HTTP', subdomain: endpoint.protocol.Http.subdomain };
+    if (endpoint.protocol.Https) return { type: 'HTTPS', subdomain: endpoint.protocol.Https.subdomain };
+    return { type: 'Unknown' };
+  };
+
   return (
     <div className="min-h-screen bg-dark-bg">
-      {/* Header */}
+      {/* Compact Header with Tunnel Info */}
       <header className="bg-dark-surface border-b border-dark-border">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <div className="flex items-center justify-between flex-wrap gap-4">
-            <div>
-              <h1 className="text-3xl font-bold text-dark-text-primary">Tunnels</h1>
-              <p className="text-dark-text-secondary mt-1">Manage and monitor your tunnels</p>
-              {tunnelInfo.length > 0 && (
-                <div className="mt-3 flex items-center gap-4 text-sm">
-                  {tunnelInfo.map((endpoint, i) => (
-                    <div key={i} className="flex items-center gap-2">
-                      <span className="text-dark-text-secondary">🌐</span>
-                      <span className="text-dark-text-primary font-medium">
-                        {endpoint.protocol.Tcp && `localhost`}
-                        {endpoint.protocol.Http && `localhost`}
-                        {endpoint.protocol.Https && `localhost`}
-                      </span>
-                      <span className="text-dark-text-muted">🛡️</span>
-                      <span className="text-dark-text-primary font-medium">
-                        {endpoint.protocol.Tcp && `TCP`}
-                        {endpoint.protocol.Http && `HTTP`}
-                        {endpoint.protocol.Https && `HTTPS`}
-                      </span>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+          {tunnelInfo.length > 0 ? (
+            <div className="flex items-center gap-4 flex-wrap">
+              {/* Status indicator */}
+              <div className="flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-full ${connected ? 'bg-accent-green animate-pulse' : 'bg-yellow-500'}`}></span>
+                <span className={`font-medium text-sm ${connected ? 'text-accent-green' : 'text-yellow-500'}`}>
+                  {connected ? 'Live' : 'Reconnecting...'}
+                </span>
+              </div>
+
+              {/* Protocol badge */}
+              {tunnelInfo.map((endpoint, i) => {
+                const protocolInfo = getProtocolInfo(endpoint);
+                return (
+                  <div key={i} className="flex items-center gap-3 flex-1">
+                    <span className="px-2 py-1 bg-accent-blue/10 text-accent-blue text-xs font-medium rounded">
+                      {protocolInfo.type}
+                    </span>
+                    <span className="text-xs text-dark-text-muted">:{endpoint.port}</span>
+
+                    {/* URL with actions */}
+                    <div className="flex items-center gap-2 flex-1">
+                      <code className="flex-1 text-sm font-mono text-dark-text-primary bg-dark-bg px-3 py-1.5 rounded border border-dark-border truncate">
+                        {endpoint.public_url}
+                      </code>
+                      <button
+                        onClick={() => copyToClipboard(endpoint.public_url)}
+                        className="px-2 py-1.5 bg-dark-bg hover:bg-dark-border text-dark-text-secondary hover:text-dark-text-primary rounded text-xs transition-colors"
+                        title="Copy URL"
+                      >
+                        Copy
+                      </button>
+                      <a
+                        href={endpoint.public_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-2 py-1.5 bg-accent-blue hover:bg-accent-blue-light text-white rounded text-xs transition-colors"
+                      >
+                        Open
+                      </a>
                     </div>
-                  ))}
-                </div>
-              )}
+                  </div>
+                );
+              })}
             </div>
-            <button className="px-6 py-2.5 bg-accent-blue hover:bg-accent-blue-light text-white rounded-lg font-medium transition-all shadow-glow-blue">
-              + New Tunnel
-            </button>
-          </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 bg-dark-text-muted rounded-full"></span>
+              <span className="text-dark-text-muted font-medium text-sm">Connecting...</span>
+            </div>
+          )}
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Quick Connect Section */}
-        <QuickConnect tunnelInfo={tunnelInfo} />
-
-        {/* Tunnel List Section */}
-        <div className="mb-8">
-          <div className="card-dark p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-xl font-semibold text-dark-text-primary">All Tunnels</h2>
-            </div>
-            {tunnelInfo.length > 0 ? (
-              <div className="space-y-3">
-                {tunnelInfo.map((endpoint, i) => (
-                  <div key={i} className="card-dark-hover p-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-4">
-                        <div className="w-10 h-10 bg-accent-blue/10 rounded-lg flex items-center justify-center">
-                          <span className="text-accent-blue text-xl">📊</span>
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <h3 className="text-lg font-semibold text-dark-text-primary">Test</h3>
-                            <span className="status-badge-green">● connected</span>
-                          </div>
-                          <div className="flex items-center gap-2 mt-1 text-sm text-dark-text-secondary">
-                            <span>🌐 localhost</span>
-                            <span>•</span>
-                            <span>🛡️ {endpoint.protocol.Tcp && 'TCP'}{endpoint.protocol.Http && 'HTTP'}{endpoint.protocol.Https && 'HTTPS'}</span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <button className="p-2 hover:bg-dark-surface-light rounded-lg transition-colors">
-                          <span className="text-dark-text-secondary">☐</span>
-                        </button>
-                        <button className="p-2 hover:bg-dark-surface-light rounded-lg transition-colors">
-                          <span className="text-dark-text-secondary">🗑️</span>
-                        </button>
-                      </div>
-                    </div>
-                    <div className="mt-4 pt-4 border-t border-dark-border">
-                      <div className="flex items-center gap-2 text-sm">
-                        <span className="text-dark-text-secondary">Public Endpoints:</span>
-                      </div>
-                      <div className="flex items-center gap-2 mt-2">
-                        <span className="text-accent-blue">🔗</span>
-                        <code className="text-sm font-mono text-dark-text-primary bg-dark-surface-light px-3 py-1.5 rounded-lg border border-dark-border">
-                          {endpoint.public_url}
-                        </code>
-                        <button className="text-accent-blue hover:text-accent-blue-light transition-colors">
-                          <span className="text-sm">🔗</span>
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-center py-12 text-dark-text-secondary">
-                No tunnels configured yet
-              </div>
-            )}
-          </div>
-        </div>
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
 
         {/* Tabs */}
         <div className="flex gap-2 mb-6 border-b border-dark-border">
@@ -417,20 +318,7 @@ function App() {
                 : 'text-dark-text-secondary hover:text-dark-text-primary'
             }`}
           >
-            📊 Overview
-            {viewMode === 'http' && (
-              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent-blue"></div>
-            )}
-          </button>
-          <button
-            onClick={() => setViewMode('http')}
-            className={`px-6 py-3 font-medium transition-colors relative ${
-              viewMode === 'http'
-                ? 'text-accent-blue'
-                : 'text-dark-text-secondary hover:text-dark-text-primary'
-            }`}
-          >
-            📈 Metrics
+            HTTP Traffic
             {viewMode === 'http' && (
               <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent-blue"></div>
             )}
@@ -443,7 +331,7 @@ function App() {
                 : 'text-dark-text-secondary hover:text-dark-text-primary'
             }`}
           >
-            📡 Traffic
+            TCP Connections
             {viewMode === 'tcp' && (
               <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent-blue"></div>
             )}

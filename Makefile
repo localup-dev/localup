@@ -56,7 +56,7 @@ KEY_FILE ?= localhost-key.pem
 
 # Build debug version
 build:
-	cargo build
+	cargo build  -p localup-cli --bin=localup
 
 # Build release version
 build-release:
@@ -120,7 +120,7 @@ relay-https: build gen-cert-if-needed
 		--tls-key $(KEY_FILE) \
 		--domain $(DOMAIN) \
 		--jwt-secret "$(JWT_SECRET)" \
-		--api-addr $(API_ADDR) \
+		--api-http-addr $(API_ADDR) \
 		--admin-email "$(ADMIN_EMAIL)" \
 		--admin-password "$(ADMIN_PASSWORD)" \
 		--database-url "$(DATABASE_URL)" \
@@ -149,7 +149,7 @@ relay-http: build
 		--http-addr $(HTTP_ADDR) \
 		--domain $(DOMAIN) \
 		--jwt-secret "$(JWT_SECRET)" \
-		--api-addr $(API_ADDR) \
+		--api-http-addr $(API_ADDR) \
 		--admin-email "$(ADMIN_EMAIL)" \
 		--admin-password "$(ADMIN_PASSWORD)" \
 		--database-url "$(DATABASE_URL)" \
