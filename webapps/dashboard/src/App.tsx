@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { handleApiMetrics, handleApiStats, handleApiTcpConnections } from './api/generated/sdk.gen';
 import type { HttpMetric, MetricsStats, TcpMetric } from './api/generated/types.gen';
 
@@ -28,7 +28,12 @@ type MetricsEvent =
   | { type: 'tcp_closed'; id: string; bytes_received: number; bytes_sent: number; duration_ms: number; error?: string }
   | { type: 'stats'; stats: MetricsStats };
 
-const ITEMS_PER_PAGE = 20;
+// Filter types
+type StatusFilter = 'all' | '2xx' | '3xx' | '4xx' | '5xx' | 'error';
+type MethodFilter = 'all' | 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS';
+
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+const DEFAULT_PAGE_SIZE = 20;
 
 function App() {
   const [viewMode, setViewMode] = useState<ViewMode | null>(null);
@@ -41,6 +46,13 @@ function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const [connected, setConnected] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
+
+  // Filter state
+  const [methodFilter, setMethodFilter] = useState<MethodFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [uriSearch, setUriSearch] = useState('');
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [showFilters, setShowFilters] = useState(false);
 
   // Initial data fetch
   useEffect(() => {
@@ -188,11 +200,27 @@ function App() {
     };
   }, []);
 
-  // Reset to page 1 when switching modes
+  // Reset to page 1 when switching modes or filters change
   useEffect(() => {
     setCurrentPage(1);
     setSelectedItem(null);
   }, [viewMode]);
+
+  // Reset page when filters change
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [methodFilter, statusFilter, uriSearch, pageSize]);
+
+  // Clear filters function
+  const clearFilters = useCallback(() => {
+    setMethodFilter('all');
+    setStatusFilter('all');
+    setUriSearch('');
+    setCurrentPage(1);
+  }, []);
+
+  // Check if any filters are active
+  const hasActiveFilters = methodFilter !== 'all' || statusFilter !== 'all' || uriSearch !== '';
 
   const formatBytes = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
@@ -204,6 +232,24 @@ function App() {
     if (!ms) return 'N/A';
     if (ms < 1000) return `${ms.toFixed(0)}ms`;
     return `${(ms / 1000).toFixed(2)}s`;
+  };
+
+  const timeAgo = (timestamp: number | string) => {
+    const now = Date.now();
+    const time = typeof timestamp === 'string' ? new Date(timestamp).getTime() : timestamp;
+    const diff = now - time;
+
+    const seconds = Math.floor(diff / 1000);
+    if (seconds < 60) return `${seconds}s ago`;
+
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m ago`;
+
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+
+    const days = Math.floor(hours / 24);
+    return `${days}d ago`;
   };
 
   const getTcpStats = (): TcpStats => {
@@ -225,15 +271,53 @@ function App() {
     navigator.clipboard.writeText(text);
   }, []);
 
+  // Filter HTTP metrics
+  const filteredHttpMetrics = useMemo(() => {
+    return httpMetrics.filter((metric) => {
+      // Method filter
+      if (methodFilter !== 'all' && metric.method !== methodFilter) {
+        return false;
+      }
+
+      // Status filter
+      if (statusFilter !== 'all') {
+        const status = metric.response_status;
+        if (statusFilter === 'error') {
+          if (status && status >= 100 && status < 600) return false;
+        } else if (statusFilter === '2xx') {
+          if (!status || status < 200 || status >= 300) return false;
+        } else if (statusFilter === '3xx') {
+          if (!status || status < 300 || status >= 400) return false;
+        } else if (statusFilter === '4xx') {
+          if (!status || status < 400 || status >= 500) return false;
+        } else if (statusFilter === '5xx') {
+          if (!status || status < 500 || status >= 600) return false;
+        }
+      }
+
+      // URI search filter
+      if (uriSearch) {
+        const searchLower = uriSearch.toLowerCase();
+        if (!metric.uri.toLowerCase().includes(searchLower)) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [httpMetrics, methodFilter, statusFilter, uriSearch]);
+
   // Pagination
-  const currentItems = viewMode === 'http' ? httpMetrics : tcpMetrics;
-  const totalPages = Math.ceil(currentItems.length / ITEMS_PER_PAGE);
-  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
-  const endIndex = startIndex + ITEMS_PER_PAGE;
+  const currentItems = viewMode === 'http' ? filteredHttpMetrics : tcpMetrics;
+  const totalItems = viewMode === 'http' ? httpMetrics.length : tcpMetrics.length;
+  const filteredCount = currentItems.length;
+  const totalPages = Math.ceil(filteredCount / pageSize);
+  const startIndex = (currentPage - 1) * pageSize;
+  const endIndex = startIndex + pageSize;
   const paginatedItems = currentItems.slice(startIndex, endIndex);
 
   const goToPage = (page: number) => {
-    setCurrentPage(Math.max(1, Math.min(page, totalPages)));
+    setCurrentPage(Math.max(1, Math.min(page, totalPages || 1)));
   };
 
   const tcpStats = viewMode === 'tcp' ? getTcpStats() : null;
@@ -245,6 +329,10 @@ function App() {
     if (endpoint.protocol.Https) return { type: 'HTTPS', subdomain: endpoint.protocol.Https.subdomain };
     return { type: 'Unknown' };
   };
+
+  // Determine if tunnel is TCP-based or HTTP-based
+  const isTcpTunnel = tunnelInfo.length > 0 && tunnelInfo.some(e => e.protocol.Tcp);
+  const isHttpTunnel = tunnelInfo.length > 0 && tunnelInfo.some(e => e.protocol.Http || e.protocol.Https);
 
   return (
     <div className="min-h-screen bg-dark-bg">
@@ -308,37 +396,41 @@ function App() {
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
 
-        {/* Tabs */}
+        {/* Tabs - only show relevant tab based on tunnel protocol */}
         <div className="flex gap-2 mb-6 border-b border-dark-border">
-          <button
-            onClick={() => setViewMode('http')}
-            className={`px-6 py-3 font-medium transition-colors relative ${
-              viewMode === 'http'
-                ? 'text-accent-blue'
-                : 'text-dark-text-secondary hover:text-dark-text-primary'
-            }`}
-          >
-            HTTP Traffic
-            {viewMode === 'http' && (
-              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent-blue"></div>
-            )}
-          </button>
-          <button
-            onClick={() => setViewMode('tcp')}
-            className={`px-6 py-3 font-medium transition-colors relative ${
-              viewMode === 'tcp'
-                ? 'text-accent-blue'
-                : 'text-dark-text-secondary hover:text-dark-text-primary'
-            }`}
-          >
-            TCP Connections
-            {viewMode === 'tcp' && (
-              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent-blue"></div>
-            )}
-          </button>
+          {(isHttpTunnel || (!isTcpTunnel && !isHttpTunnel)) && (
+            <button
+              onClick={() => setViewMode('http')}
+              className={`px-6 py-3 font-medium transition-colors relative ${
+                viewMode === 'http'
+                  ? 'text-accent-blue'
+                  : 'text-dark-text-secondary hover:text-dark-text-primary'
+              }`}
+            >
+              HTTP Traffic
+              {viewMode === 'http' && (
+                <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent-blue"></div>
+              )}
+            </button>
+          )}
+          {(isTcpTunnel || (!isTcpTunnel && !isHttpTunnel)) && (
+            <button
+              onClick={() => setViewMode('tcp')}
+              className={`px-6 py-3 font-medium transition-colors relative ${
+                viewMode === 'tcp'
+                  ? 'text-accent-blue'
+                  : 'text-dark-text-secondary hover:text-dark-text-primary'
+              }`}
+            >
+              TCP Connections
+              {viewMode === 'tcp' && (
+                <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-accent-blue"></div>
+              )}
+            </button>
+          )}
         </div>
 
-        {/* Stats Section */}
+        {/* Stats Section - uses server-side computed stats from SSE */}
         {viewMode === 'http' && stats ? (
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
             <div className="card-dark p-6">
@@ -455,20 +547,119 @@ function App() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* List Panel */}
           <div className="card-dark">
-            <div className="p-4 border-b border-dark-border flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-dark-text-primary">
-                {viewMode === 'http' ? 'HTTP Requests' : 'TCP Connections'}
-              </h2>
-              <span className="text-sm text-dark-text-secondary">
-                {currentItems.length} total
-              </span>
+            <div className="p-4 border-b border-dark-border">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-lg font-semibold text-dark-text-primary">
+                  {viewMode === 'http' ? 'HTTP Requests' : 'TCP Connections'}
+                </h2>
+                <div className="flex items-center gap-2">
+                  {viewMode === 'http' && (
+                    <button
+                      onClick={() => setShowFilters(!showFilters)}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                        showFilters || hasActiveFilters
+                          ? 'bg-accent-blue text-white'
+                          : 'bg-dark-surface-light text-dark-text-secondary hover:text-dark-text-primary border border-dark-border'
+                      }`}
+                    >
+                      Filters {hasActiveFilters && `(${filteredCount !== totalItems ? filteredCount : ''})`}
+                    </button>
+                  )}
+                  <span className="text-sm text-dark-text-secondary">
+                    {hasActiveFilters && viewMode === 'http' ? `${filteredCount} of ${totalItems}` : `${filteredCount} total`}
+                  </span>
+                </div>
+              </div>
+
+              {/* Filter Bar - HTTP only */}
+              {viewMode === 'http' && showFilters && (
+                <div className="space-y-3 pt-3 border-t border-dark-border">
+                  {/* URI Search */}
+                  <div>
+                    <input
+                      type="text"
+                      placeholder="Search URI path..."
+                      value={uriSearch}
+                      onChange={(e) => setUriSearch(e.target.value)}
+                      className="w-full px-3 py-2 text-sm bg-dark-bg border border-dark-border rounded-lg text-dark-text-primary placeholder-dark-text-muted focus:outline-none focus:border-accent-blue transition-colors"
+                    />
+                  </div>
+
+                  {/* Method Filter */}
+                  <div className="flex flex-wrap gap-1.5">
+                    <span className="text-xs text-dark-text-muted mr-1 self-center">Method:</span>
+                    {(['all', 'GET', 'POST', 'PUT', 'DELETE', 'PATCH'] as MethodFilter[]).map((method) => (
+                      <button
+                        key={method}
+                        onClick={() => setMethodFilter(method)}
+                        className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                          methodFilter === method
+                            ? 'bg-accent-blue text-white'
+                            : 'bg-dark-surface-light text-dark-text-secondary hover:text-dark-text-primary border border-dark-border'
+                        }`}
+                      >
+                        {method === 'all' ? 'All' : method}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Status Filter */}
+                  <div className="flex flex-wrap gap-1.5">
+                    <span className="text-xs text-dark-text-muted mr-1 self-center">Status:</span>
+                    {([
+                      { value: 'all', label: 'All', color: '' },
+                      { value: '2xx', label: '2xx', color: 'text-accent-green' },
+                      { value: '3xx', label: '3xx', color: 'text-accent-blue' },
+                      { value: '4xx', label: '4xx', color: 'text-yellow-500' },
+                      { value: '5xx', label: '5xx', color: 'text-accent-red' },
+                      { value: 'error', label: 'Error', color: 'text-accent-red' },
+                    ] as { value: StatusFilter; label: string; color: string }[]).map(({ value, label, color }) => (
+                      <button
+                        key={value}
+                        onClick={() => setStatusFilter(value)}
+                        className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                          statusFilter === value
+                            ? 'bg-accent-blue text-white'
+                            : `bg-dark-surface-light ${color || 'text-dark-text-secondary'} hover:text-dark-text-primary border border-dark-border`
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Clear Filters */}
+                  {hasActiveFilters && (
+                    <div className="flex justify-end">
+                      <button
+                        onClick={clearFilters}
+                        className="px-3 py-1 text-xs text-accent-red hover:text-accent-red-light transition-colors"
+                      >
+                        Clear all filters
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
             <div className="divide-y divide-dark-border max-h-[600px] overflow-y-auto scrollbar-dark">
               {loading ? (
                 <div className="p-8 text-center text-dark-text-secondary">Loading...</div>
               ) : paginatedItems.length === 0 ? (
-                <div className="p-8 text-center text-dark-text-secondary">
-                  No {viewMode === 'http' ? 'HTTP requests' : 'TCP connections'} yet
+                <div className="p-8 text-center">
+                  <p className="text-dark-text-secondary">
+                    {hasActiveFilters && viewMode === 'http'
+                      ? 'No requests match the current filters'
+                      : `No ${viewMode === 'http' ? 'HTTP requests' : 'TCP connections'} yet`}
+                  </p>
+                  {hasActiveFilters && viewMode === 'http' && (
+                    <button
+                      onClick={clearFilters}
+                      className="mt-2 px-4 py-2 text-sm text-accent-blue hover:text-accent-blue-light transition-colors"
+                    >
+                      Clear filters
+                    </button>
+                  )}
                 </div>
               ) : viewMode === 'http' ? (
                 (paginatedItems as HttpMetric[]).map((metric) => (
@@ -497,7 +688,7 @@ function App() {
                       </span>
                     </div>
                     <div className="mt-1 text-xs text-dark-text-secondary">
-                      {formatDuration(metric.duration_ms)} • {new Date(metric.timestamp).toLocaleTimeString()}
+                      {formatDuration(metric.duration_ms)} • {new Date(metric.timestamp).toLocaleTimeString()} ({timeAgo(metric.timestamp)})
                     </div>
                   </button>
                 ))
@@ -528,34 +719,106 @@ function App() {
                     <div className="mt-1 text-xs text-dark-text-secondary">
                       ↓ {formatBytes(metric.bytes_received)} • ↑ {formatBytes(metric.bytes_sent)}
                       {metric.duration_ms && ` • ${formatDuration(metric.duration_ms)}`}
+                      {' • '}{new Date(metric.timestamp).toLocaleTimeString()} ({timeAgo(metric.timestamp)})
                     </div>
                   </button>
                 ))
               )}
             </div>
 
-            {/* Pagination */}
-            {totalPages > 1 && (
-              <div className="p-4 border-t border-dark-border flex items-center justify-between">
-                <button
-                  onClick={() => goToPage(currentPage - 1)}
-                  disabled={currentPage === 1}
-                  className="px-4 py-2 text-sm bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary hover:bg-dark-surface disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  Previous
-                </button>
-                <span className="text-sm text-dark-text-secondary">
-                  Page {currentPage} of {totalPages}
-                </span>
-                <button
-                  onClick={() => goToPage(currentPage + 1)}
-                  disabled={currentPage === totalPages}
-                  className="px-4 py-2 text-sm bg-dark-surface-light border border-dark-border rounded-lg text-dark-text-primary hover:bg-dark-surface disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  Next
-                </button>
+            {/* Enhanced Pagination */}
+            <div className="p-4 border-t border-dark-border">
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                {/* Page Size Selector */}
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-dark-text-muted">Show:</span>
+                  <select
+                    value={pageSize}
+                    onChange={(e) => setPageSize(Number(e.target.value))}
+                    className="px-2 py-1 text-xs bg-dark-bg border border-dark-border rounded text-dark-text-primary focus:outline-none focus:border-accent-blue cursor-pointer"
+                  >
+                    {PAGE_SIZE_OPTIONS.map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-dark-text-muted">per page</span>
+                </div>
+
+                {/* Pagination Controls */}
+                {totalPages > 0 && (
+                  <div className="flex items-center gap-2">
+                    {/* First Page */}
+                    <button
+                      onClick={() => goToPage(1)}
+                      disabled={currentPage === 1}
+                      className="px-2 py-1 text-xs bg-dark-surface-light border border-dark-border rounded text-dark-text-secondary hover:text-dark-text-primary disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      title="First page"
+                    >
+                      &laquo;
+                    </button>
+
+                    {/* Previous */}
+                    <button
+                      onClick={() => goToPage(currentPage - 1)}
+                      disabled={currentPage === 1}
+                      className="px-3 py-1 text-xs bg-dark-surface-light border border-dark-border rounded text-dark-text-secondary hover:text-dark-text-primary disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Prev
+                    </button>
+
+                    {/* Page Info */}
+                    <div className="flex items-center gap-1 px-2">
+                      <span className="text-xs text-dark-text-muted">Page</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={totalPages}
+                        value={currentPage}
+                        onChange={(e) => {
+                          const page = parseInt(e.target.value, 10);
+                          if (!isNaN(page)) goToPage(page);
+                        }}
+                        className="w-12 px-2 py-1 text-xs text-center bg-dark-bg border border-dark-border rounded text-dark-text-primary focus:outline-none focus:border-accent-blue"
+                      />
+                      <span className="text-xs text-dark-text-muted">of {totalPages}</span>
+                    </div>
+
+                    {/* Next */}
+                    <button
+                      onClick={() => goToPage(currentPage + 1)}
+                      disabled={currentPage === totalPages || totalPages === 0}
+                      className="px-3 py-1 text-xs bg-dark-surface-light border border-dark-border rounded text-dark-text-secondary hover:text-dark-text-primary disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Next
+                    </button>
+
+                    {/* Last Page */}
+                    <button
+                      onClick={() => goToPage(totalPages)}
+                      disabled={currentPage === totalPages || totalPages === 0}
+                      className="px-2 py-1 text-xs bg-dark-surface-light border border-dark-border rounded text-dark-text-secondary hover:text-dark-text-primary disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      title="Last page"
+                    >
+                      &raquo;
+                    </button>
+                  </div>
+                )}
+
+                {/* Items Info */}
+                <div className="text-xs text-dark-text-muted">
+                  {filteredCount > 0 ? (
+                    <>
+                      Showing {startIndex + 1}-{Math.min(endIndex, filteredCount)} of {filteredCount}
+                      {hasActiveFilters && viewMode === 'http' && ` (filtered from ${totalItems})`}
+                    </>
+                  ) : (
+                    'No items to display'
+                  )}
+                </div>
               </div>
-            )}
+            </div>
           </div>
 
           {/* Detail Panel */}
@@ -660,12 +923,16 @@ function App() {
                   )}
                   <div>
                     <h3 className="text-sm font-medium text-dark-text-secondary">Timestamp</h3>
-                    <p className="mt-1 text-sm text-dark-text-primary">{new Date(selectedItem.timestamp).toLocaleString()}</p>
+                    <p className="mt-1 text-sm text-dark-text-primary">
+                      {new Date(selectedItem.timestamp).toLocaleString()} ({timeAgo(selectedItem.timestamp)})
+                    </p>
                   </div>
                   {selectedItem.closed_at && (
                     <div>
                       <h3 className="text-sm font-medium text-dark-text-secondary">Closed At</h3>
-                      <p className="mt-1 text-sm text-dark-text-primary">{new Date(selectedItem.closed_at).toLocaleString()}</p>
+                      <p className="mt-1 text-sm text-dark-text-primary">
+                        {new Date(selectedItem.closed_at).toLocaleString()} ({timeAgo(selectedItem.closed_at)})
+                      </p>
                     </div>
                   )}
                 </div>

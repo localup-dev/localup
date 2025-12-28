@@ -483,74 +483,9 @@ impl MetricsStore {
         self.metrics.read().await.len()
     }
 
-    /// Get metrics summary statistics
+    /// Get metrics summary statistics (uses cached stats for O(1) performance)
     pub async fn get_stats(&self) -> MetricsStats {
-        let metrics = self.metrics.read().await;
-
-        let total_requests = metrics.len();
-        let successful_requests = metrics
-            .iter()
-            .filter(|m| m.response_status.map(|s| s < 400).unwrap_or(false))
-            .count();
-
-        let failed_requests = metrics
-            .iter()
-            .filter(|m| m.response_status.map(|s| s >= 400).unwrap_or(false) || m.error.is_some())
-            .count();
-
-        let avg_duration = if !metrics.is_empty() {
-            let total: u64 = metrics.iter().filter_map(|m| m.duration_ms).sum();
-            let count = metrics.iter().filter(|m| m.duration_ms.is_some()).count();
-            if count > 0 {
-                Some(total / count as u64)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        // Method counts
-        let mut methods: HashMap<String, usize> = HashMap::new();
-        for metric in metrics.iter() {
-            *methods.entry(metric.method.clone()).or_insert(0) += 1;
-        }
-
-        // Status code counts
-        let mut status_codes: HashMap<u16, usize> = HashMap::new();
-        for metric in metrics.iter() {
-            if let Some(status) = metric.response_status {
-                *status_codes.entry(status).or_insert(0) += 1;
-            }
-        }
-
-        drop(metrics);
-
-        // Calculate percentiles from histogram
-        let histogram = self.duration_histogram.read().await;
-        let percentiles = if !histogram.is_empty() {
-            Some(DurationPercentiles {
-                min: histogram.min(),
-                p50: histogram.value_at_quantile(0.50),
-                p90: histogram.value_at_quantile(0.90),
-                p95: histogram.value_at_quantile(0.95),
-                p99: histogram.value_at_quantile(0.99),
-                p999: histogram.value_at_quantile(0.999),
-                max: histogram.max(),
-            })
-        } else {
-            None
-        };
-
-        MetricsStats {
-            total_requests,
-            successful_requests,
-            failed_requests,
-            avg_duration_ms: avg_duration,
-            percentiles,
-            methods,
-            status_codes,
-        }
+        self.cached_stats.read().await.clone()
     }
 
     /// Get metrics from database (if attached), otherwise falls back to in-memory

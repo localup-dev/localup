@@ -1,3 +1,4 @@
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -7,6 +8,33 @@ import {
 } from '../api/client/@tanstack/react-query.gen';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
+import { Skeleton } from '../components/ui/skeleton';
+
+// Filter types
+type StatusFilter = 'all' | '2xx' | '3xx' | '4xx' | '5xx';
+type MethodFilter = 'all' | 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS';
+type ViewMode = 'list' | 'list-detail';
+
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+const DEFAULT_PAGE_SIZE = 20;
+const DEBOUNCE_MS = 500;
+
+// Custom hook for debounced value
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
 
 const getStatusVariant = (status: string): 'default' | 'secondary' | 'destructive' | 'outline' | 'success' => {
   switch (status.toLowerCase()) {
@@ -87,6 +115,32 @@ export default function TunnelDetail() {
   const { tunnelId } = useParams<{ tunnelId: string }>();
   const navigate = useNavigate();
 
+  // View mode state
+  const [viewMode, setViewMode] = useState<ViewMode>('list-detail');
+
+  // Filter and pagination state
+  const [methodFilter, setMethodFilter] = useState<MethodFilter>('all');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [pathSearch, setPathSearch] = useState('');
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [showFilters, setShowFilters] = useState(false);
+
+  // TCP filter state
+  const [clientAddrSearch, setClientAddrSearch] = useState('');
+  const [tcpCurrentPage, setTcpCurrentPage] = useState(1);
+  const [tcpPageSize, setTcpPageSize] = useState(DEFAULT_PAGE_SIZE);
+
+  // Selected item for detail view (keeps filter/page context)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [selectedRequest, setSelectedRequest] = useState<any | null>(null);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [selectedTcpConnection, setSelectedTcpConnection] = useState<any | null>(null);
+
+  // Debounced search values (only triggers API call after user stops typing)
+  const debouncedPathSearch = useDebounce(pathSearch, DEBOUNCE_MS);
+  const debouncedClientAddrSearch = useDebounce(clientAddrSearch, DEBOUNCE_MS);
+
   // Fetch tunnel by ID
   const { data: tunnel, isLoading, error } = useQuery({
     ...getTunnelOptions({
@@ -100,28 +154,108 @@ export default function TunnelDetail() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const isTcp = tunnel?.endpoints.some((e: any) => e.protocol.type === 'tcp');
 
-  // Fetch requests or TCP connections based on tunnel type
-  const { data: requestsData } = useQuery({
+  // Build query params for HTTP requests
+  const getStatusRange = useCallback(() => {
+    switch (statusFilter) {
+      case '2xx': return { status_min: 200, status_max: 299 };
+      case '3xx': return { status_min: 300, status_max: 399 };
+      case '4xx': return { status_min: 400, status_max: 499 };
+      case '5xx': return { status_min: 500, status_max: 599 };
+      default: return {};
+    }
+  }, [statusFilter]);
+
+  // Fetch requests with filters and pagination (uses debounced path search)
+  const { data: requestsData, isLoading: requestsLoading } = useQuery({
     ...listRequestsOptions({
       query: {
         localup_id: tunnelId || undefined,
-        limit: 50,
+        method: methodFilter !== 'all' ? methodFilter : undefined,
+        path: debouncedPathSearch || undefined,
+        ...getStatusRange(),
+        offset: (currentPage - 1) * pageSize,
+        limit: pageSize,
       },
     }),
     enabled: !!tunnelId && !isTcp,
+    refetchInterval: 5000, // Poll every 5 seconds for real-time feel
   });
   const requests = requestsData?.requests || [];
+  const totalRequests = requestsData?.total || 0;
+  const totalPages = Math.ceil(totalRequests / pageSize);
 
-  const { data: tcpConnectionsData } = useQuery({
+  // Fetch TCP connections with filters and pagination (uses debounced client addr search)
+  const { data: tcpConnectionsData, isLoading: tcpLoading } = useQuery({
     ...listTcpConnectionsOptions({
       query: {
         localup_id: tunnelId || undefined,
-        limit: 100,
+        client_addr: debouncedClientAddrSearch || undefined,
+        offset: (tcpCurrentPage - 1) * tcpPageSize,
+        limit: tcpPageSize,
       },
     }),
     enabled: !!tunnelId && !!isTcp,
+    refetchInterval: 5000, // Poll every 5 seconds for real-time feel
   });
   const tcpConnections = tcpConnectionsData?.connections || [];
+  const totalTcpConnections = tcpConnectionsData?.total || 0;
+  const totalTcpPages = Math.ceil(totalTcpConnections / tcpPageSize);
+
+  // Check if filters are active
+  const hasActiveFilters = methodFilter !== 'all' || statusFilter !== 'all' || pathSearch !== '';
+  const hasTcpFilters = clientAddrSearch !== '';
+
+  // Check if search is pending (user is typing)
+  const isSearchPending = pathSearch !== debouncedPathSearch;
+  const isTcpSearchPending = clientAddrSearch !== debouncedClientAddrSearch;
+
+  // Reset page when debounced search value changes
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedPathSearch]);
+
+  useEffect(() => {
+    setTcpCurrentPage(1);
+  }, [debouncedClientAddrSearch]);
+
+  // Clear filters
+  const clearFilters = useCallback(() => {
+    setMethodFilter('all');
+    setStatusFilter('all');
+    setPathSearch('');
+    setCurrentPage(1);
+  }, []);
+
+  const clearTcpFilters = useCallback(() => {
+    setClientAddrSearch('');
+    setTcpCurrentPage(1);
+  }, []);
+
+  // Reset page when filters change
+  const handleMethodChange = (method: MethodFilter) => {
+    setMethodFilter(method);
+    setCurrentPage(1);
+  };
+
+  const handleStatusChange = (status: StatusFilter) => {
+    setStatusFilter(status);
+    setCurrentPage(1);
+  };
+
+  const handlePathSearchChange = (value: string) => {
+    setPathSearch(value);
+    // Page reset is handled by useEffect when debouncedPathSearch changes
+  };
+
+  const handlePageSizeChange = (size: number) => {
+    setPageSize(size);
+    setCurrentPage(1);
+  };
+
+  const handleTcpPageSizeChange = (size: number) => {
+    setTcpPageSize(size);
+    setTcpCurrentPage(1);
+  };
 
   if (isLoading) {
     return (
@@ -158,93 +292,76 @@ export default function TunnelDetail() {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
+      {/* Compact Header with Endpoints */}
       <div className="border-b bg-card/50 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-6 py-6">
-          <div className="flex items-start justify-between">
-            <div className="flex items-start gap-4">
-              <button
-                onClick={() => navigate('/tunnels')}
-                className="mt-1 text-muted-foreground hover:text-foreground transition"
-                aria-label="Back to tunnels"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                </svg>
-              </button>
-              <div>
-                <h1 className="text-3xl font-bold text-foreground font-mono">{tunnel.id}</h1>
-                <p className="text-muted-foreground mt-2">
-                  Connected {formatRelativeTime(tunnel.connected_at)} • {formatDate(tunnel.connected_at)}
-                </p>
-              </div>
-            </div>
-            <Badge variant={getStatusVariant(tunnel.status)} className="mt-1">
+        <div className="max-w-7xl mx-auto px-4 py-3">
+          {/* Top row: Back button, ID, Status */}
+          <div className="flex items-center gap-3 mb-2">
+            <button
+              onClick={() => navigate('/tunnels')}
+              className="text-muted-foreground hover:text-foreground transition"
+              aria-label="Back to tunnels"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+            <h1 className="text-lg font-semibold text-foreground font-mono truncate flex-1">{tunnel.id}</h1>
+            <Badge variant={getStatusVariant(tunnel.status)} className="shrink-0">
               {tunnel.status}
             </Badge>
+          </div>
+
+          {/* Bottom row: Connection time + Endpoints */}
+          <div className="flex items-center gap-4 flex-wrap">
+            <span
+              className="text-xs text-muted-foreground cursor-default"
+              title={formatDate(tunnel.connected_at)}
+            >
+              {formatRelativeTime(tunnel.connected_at)}
+            </span>
+            <div className="h-3 w-px bg-border" />
+            {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+            {tunnel.endpoints.map((endpoint: any, i: number) => (
+              <div key={i} className="flex items-center gap-2">
+                <Badge
+                  variant="outline"
+                  className={`${getProtocolBadgeColor(endpoint.protocol.type)} text-[10px] px-1.5 py-0`}
+                >
+                  {endpoint.protocol.type.toUpperCase()}
+                </Badge>
+                <a
+                  href={endpoint.public_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-primary hover:text-primary/80 font-mono"
+                >
+                  {endpoint.public_url}
+                </a>
+                <button
+                  onClick={() => navigator.clipboard.writeText(endpoint.public_url)}
+                  className="text-muted-foreground hover:text-foreground transition"
+                  aria-label="Copy URL"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                    />
+                  </svg>
+                </button>
+              </div>
+            ))}
           </div>
         </div>
       </div>
 
-      {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-6 py-8 space-y-6">
-        {/* Endpoints Card */}
-        <Card>
-          <CardHeader>
-            <CardTitle>Endpoints</CardTitle>
-            <CardDescription>Public URLs and routing information</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-            {tunnel.endpoints.map((endpoint: any, i: number) => (
-              <div
-                key={i}
-                className="flex items-center justify-between p-4 bg-muted/50 rounded-lg border hover:border-primary/50 transition"
-              >
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-3 mb-2">
-                    <Badge
-                      variant="outline"
-                      className={getProtocolBadgeColor(endpoint.protocol.type)}
-                    >
-                      {endpoint.protocol.type.toUpperCase()}
-                    </Badge>
-                    <span className="text-sm text-muted-foreground">
-                      Port {endpoint.local_port || endpoint.protocol.port || 'N/A'}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <a
-                      href={endpoint.public_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-primary hover:text-primary/80 font-mono text-sm truncate"
-                    >
-                      {endpoint.public_url}
-                    </a>
-                    <button
-                      onClick={() => navigator.clipboard.writeText(endpoint.public_url)}
-                      className="text-muted-foreground hover:text-foreground transition"
-                      aria-label="Copy URL"
-                    >
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
-                        />
-                      </svg>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-
-        {/* Real-time Traffic Card */}
-        <Card>
+      {/* Main Content - Flex layout for list + detail */}
+      <div className="max-w-7xl mx-auto px-4 py-4 flex gap-4">
+        {/* Left: Traffic List */}
+        <Card className={`${viewMode === 'list-detail' && (selectedRequest || selectedTcpConnection) ? 'flex-1' : 'w-full'} transition-all`}>
           <CardHeader>
             <div className="flex items-center justify-between">
               <div>
@@ -267,148 +384,601 @@ export default function TunnelDetail() {
                 </CardTitle>
                 <CardDescription>
                   {isTcp
-                    ? `${tcpConnections.length} connection${tcpConnections.length !== 1 ? 's' : ''} captured`
-                    : `${requests.length} request${requests.length !== 1 ? 's' : ''} captured`}
+                    ? `${totalTcpConnections} connection${totalTcpConnections !== 1 ? 's' : ''} total${hasTcpFilters ? ` (showing ${tcpConnections.length})` : ''}`
+                    : `${totalRequests} request${totalRequests !== 1 ? 's' : ''} total${hasActiveFilters ? ` (showing ${requests.length})` : ''}`}
                 </CardDescription>
               </div>
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-chart-2 rounded-full animate-pulse"></div>
-                <span className="text-xs text-muted-foreground">Live</span>
+              <div className="flex items-center gap-3">
+                {/* View mode toggle */}
+                <div className="flex items-center border border-border rounded-md overflow-hidden">
+                  <button
+                    onClick={() => setViewMode('list')}
+                    className={`px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                      viewMode === 'list'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted text-muted-foreground hover:text-foreground'
+                    }`}
+                    title="List only"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={() => setViewMode('list-detail')}
+                    className={`px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                      viewMode === 'list-detail'
+                        ? 'bg-primary text-primary-foreground'
+                        : 'bg-muted text-muted-foreground hover:text-foreground'
+                    }`}
+                    title="List + Detail"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h7M4 10h7M4 14h7M4 18h7M14 6h6v12h-6z" />
+                    </svg>
+                  </button>
+                </div>
+
+                {/* Filter toggle button */}
+                <button
+                  onClick={() => setShowFilters(!showFilters)}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                    showFilters || (isTcp ? hasTcpFilters : hasActiveFilters)
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  Filters {(isTcp ? hasTcpFilters : hasActiveFilters) && '•'}
+                </button>
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-chart-2 rounded-full animate-pulse"></div>
+                  <span className="text-xs text-muted-foreground">Live</span>
+                </div>
               </div>
             </div>
+
+            {/* Filter Panel */}
+            {showFilters && (
+              <div className="mt-4 pt-4 border-t space-y-4">
+                {isTcp ? (
+                  /* TCP Filters */
+                  <div className="space-y-3">
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1.5 block">Client Address</label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          placeholder="Search by client address..."
+                          value={clientAddrSearch}
+                          onChange={(e) => setClientAddrSearch(e.target.value)}
+                          className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-primary pr-8"
+                        />
+                        {isTcpSearchPending && (
+                          <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                            <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    {hasTcpFilters && (
+                      <div className="flex justify-end">
+                        <button
+                          onClick={clearTcpFilters}
+                          className="text-xs text-destructive hover:text-destructive/80 transition-colors"
+                        >
+                          Clear filters
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  /* HTTP Filters */
+                  <div className="space-y-3">
+                    {/* Path Search */}
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1.5 block">Path</label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          placeholder="Search by path..."
+                          value={pathSearch}
+                          onChange={(e) => handlePathSearchChange(e.target.value)}
+                          className="w-full px-3 py-2 text-sm bg-muted border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-primary pr-8"
+                        />
+                        {isSearchPending && (
+                          <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                            <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin"></div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Method Filter */}
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1.5 block">Method</label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(['all', 'GET', 'POST', 'PUT', 'DELETE', 'PATCH'] as MethodFilter[]).map((method) => (
+                          <button
+                            key={method}
+                            onClick={() => handleMethodChange(method)}
+                            className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                              methodFilter === method
+                                ? 'bg-primary text-primary-foreground'
+                                : 'bg-muted text-muted-foreground hover:text-foreground border border-border'
+                            }`}
+                          >
+                            {method === 'all' ? 'All' : method}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Status Filter */}
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1.5 block">Status Code</label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {([
+                          { value: 'all', label: 'All' },
+                          { value: '2xx', label: '2xx Success' },
+                          { value: '3xx', label: '3xx Redirect' },
+                          { value: '4xx', label: '4xx Client Error' },
+                          { value: '5xx', label: '5xx Server Error' },
+                        ] as { value: StatusFilter; label: string }[]).map(({ value, label }) => (
+                          <button
+                            key={value}
+                            onClick={() => handleStatusChange(value)}
+                            className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                              statusFilter === value
+                                ? 'bg-primary text-primary-foreground'
+                                : 'bg-muted text-muted-foreground hover:text-foreground border border-border'
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Clear Filters */}
+                    {hasActiveFilters && (
+                      <div className="flex justify-end">
+                        <button
+                          onClick={clearFilters}
+                          className="text-xs text-destructive hover:text-destructive/80 transition-colors"
+                        >
+                          Clear all filters
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </CardHeader>
           <CardContent>
-            <div className="space-y-3 max-h-[600px] overflow-y-auto">
+            <div className="space-y-1 max-h-[calc(100vh-280px)] min-h-[300px] overflow-y-auto">
               {isTcp ? (
                 // TCP Connections View
-                tcpConnections.length === 0 ? (
+                tcpLoading ? (
+                  <div className="space-y-1">
+                    {Array.from({ length: 8 }).map((_, i) => (
+                      <div key={i} className="px-3 py-2 rounded-md bg-muted/30">
+                        <div className="flex items-center gap-2">
+                          <Skeleton className="w-1.5 h-1.5 rounded-full" />
+                          <Skeleton className="h-3 w-24" />
+                          <Skeleton className="h-3 w-3" />
+                          <Skeleton className="h-3 w-12" />
+                          <Skeleton className="h-3 w-16 ml-auto" />
+                          <Skeleton className="h-3 w-16" />
+                          <Skeleton className="h-3 w-10" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : tcpConnections.length === 0 ? (
                   <div className="py-12 text-center">
                     <div className="text-4xl opacity-20 mb-3">🔌</div>
-                    <div className="text-muted-foreground">No TCP connections captured yet</div>
+                    <div className="text-muted-foreground">
+                      {hasTcpFilters ? 'No connections match your filters' : 'No TCP connections captured yet'}
+                    </div>
                     <div className="text-xs text-muted-foreground/60 mt-2">
-                      Connections will appear here in real-time
+                      {hasTcpFilters ? (
+                        <button onClick={clearTcpFilters} className="text-primary hover:underline">
+                          Clear filters
+                        </button>
+                      ) : (
+                        'Connections will appear here in real-time'
+                      )}
                     </div>
                   </div>
                 ) : (
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   tcpConnections.map((conn: any) => (
-                    <div
+                    <button
                       key={conn.id}
-                      className="p-4 bg-muted/50 rounded-lg border hover:border-primary/50 transition"
+                      onClick={() => setSelectedTcpConnection(conn)}
+                      className={`w-full text-left px-3 py-2 rounded-md border transition hover:bg-muted/80 ${
+                        selectedTcpConnection?.id === conn.id
+                          ? 'bg-muted border-primary'
+                          : 'bg-muted/30 border-transparent hover:border-border'
+                      }`}
                     >
-                      <div className="flex items-start justify-between mb-3">
-                        <div className="flex items-center gap-3">
-                          <div className="w-2 h-2 bg-chart-1 rounded-full"></div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <span className="text-sm font-mono text-foreground">
-                                {conn.client_addr}
-                              </span>
-                              <span className="text-muted-foreground">→</span>
-                              <span className="text-sm font-mono text-primary">
-                                :{conn.target_port}
-                              </span>
-                            </div>
-                            <div className="text-xs text-muted-foreground mt-1">
-                              {formatDate(conn.connected_at)}
-                            </div>
-                          </div>
-                        </div>
+                      <div className="flex items-center gap-2">
+                        <div className="w-1.5 h-1.5 bg-chart-1 rounded-full shrink-0"></div>
+                        <span className="text-xs font-mono text-foreground truncate">
+                          {conn.client_addr}
+                        </span>
+                        <span className="text-muted-foreground text-xs">→</span>
+                        <span className="text-xs font-mono text-primary">
+                          :{conn.target_port}
+                        </span>
+                        <span className="text-[10px] text-chart-2 font-mono ml-auto">
+                          ↓{formatBytes(conn.bytes_received)}
+                        </span>
+                        <span className="text-[10px] text-chart-1 font-mono">
+                          ↑{formatBytes(conn.bytes_sent)}
+                        </span>
                         {conn.duration_ms && (
-                          <Badge variant="outline">
+                          <span className="text-[10px] text-muted-foreground shrink-0">
                             {conn.duration_ms}ms
-                          </Badge>
+                          </span>
                         )}
                       </div>
-
-                      <div className="grid grid-cols-2 gap-4 mt-3 pt-3 border-t">
-                        <div>
-                          <div className="text-xs text-muted-foreground mb-1">Received</div>
-                          <div className="text-sm text-chart-2 font-mono">
-                            📥 {formatBytes(conn.bytes_received)}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-xs text-muted-foreground mb-1">Sent</div>
-                          <div className="text-sm text-chart-1 font-mono">
-                            📤 {formatBytes(conn.bytes_sent)}
-                          </div>
-                        </div>
-                      </div>
-
-                      {conn.disconnect_reason && (
-                        <div className="mt-3 pt-3 border-t">
-                          <div className="text-xs text-muted-foreground mb-1">Disconnect Reason</div>
-                          <div className="text-xs text-muted-foreground font-mono">
-                            {conn.disconnect_reason}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    </button>
                   ))
                 )
               ) : (
                 // HTTP Requests View
-                requests.length === 0 ? (
+                requestsLoading ? (
+                  <div className="space-y-1">
+                    {Array.from({ length: 10 }).map((_, i) => (
+                      <div key={i} className="px-3 py-2 rounded-md bg-muted/30">
+                        <div className="flex items-center gap-2">
+                          <Skeleton className="h-4 w-10 rounded" />
+                          <Skeleton className="h-3 flex-1 max-w-[200px]" />
+                          <Skeleton className="h-4 w-8 rounded ml-auto" />
+                          <Skeleton className="h-3 w-10" />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : requests.length === 0 ? (
                   <div className="py-12 text-center">
                     <div className="text-4xl opacity-20 mb-3">📡</div>
-                    <div className="text-muted-foreground">No HTTP requests captured yet</div>
+                    <div className="text-muted-foreground">
+                      {hasActiveFilters ? 'No requests match your filters' : 'No HTTP requests captured yet'}
+                    </div>
                     <div className="text-xs text-muted-foreground/60 mt-2">
-                      Requests will appear here in real-time
+                      {hasActiveFilters ? (
+                        <button onClick={clearFilters} className="text-primary hover:underline">
+                          Clear filters
+                        </button>
+                      ) : (
+                        'Requests will appear here in real-time'
+                      )}
                     </div>
                   </div>
                 ) : (
                   // eslint-disable-next-line @typescript-eslint/no-explicit-any
                   requests.map((request: any) => (
-                    <div
+                    <button
                       key={request.id}
-                      className="p-4 bg-muted/50 rounded-lg border hover:border-primary/50 transition"
+                      onClick={() => setSelectedRequest(request)}
+                      className={`w-full text-left px-3 py-2 rounded-md border transition hover:bg-muted/80 ${
+                        selectedRequest?.id === request.id
+                          ? 'bg-muted border-primary'
+                          : 'bg-muted/30 border-transparent hover:border-border'
+                      }`}
                     >
-                      <div className="flex items-start justify-between mb-3">
-                        <div className="flex items-center gap-3 flex-1 min-w-0">
-                          <Badge
-                            variant="outline"
-                            className="bg-chart-1/20 text-chart-1 border-chart-1/50 shrink-0"
-                          >
-                            {request.method}
+                      <div className="flex items-center gap-2">
+                        <Badge
+                          variant="outline"
+                          className="bg-chart-1/20 text-chart-1 border-chart-1/50 shrink-0 text-[10px] px-1.5 py-0"
+                        >
+                          {request.method}
+                        </Badge>
+                        <span className="text-xs font-mono text-foreground truncate flex-1">
+                          {request.path}
+                        </span>
+                        {request.status && (
+                          <Badge variant={getStatusCodeBadgeVariant(request.status)} className="text-[10px] px-1.5 py-0">
+                            {request.status}
                           </Badge>
-                          <span className="text-sm font-mono text-foreground truncate">
-                            {request.path}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0 ml-3">
-                          {request.status && (
-                            <Badge variant={getStatusCodeBadgeVariant(request.status)}>
-                              {request.status}
-                            </Badge>
-                          )}
-                          {request.duration_ms !== undefined && request.duration_ms !== null && (
-                            <Badge variant="outline">
-                              {request.duration_ms}ms
-                            </Badge>
-                          )}
-                        </div>
+                        )}
+                        <span className="text-[10px] text-muted-foreground shrink-0">
+                          {request.duration_ms !== undefined && request.duration_ms !== null ? `${request.duration_ms}ms` : ''}
+                        </span>
                       </div>
-
-                      <div className="text-xs text-muted-foreground">
-                        {request.timestamp ? formatDate(request.timestamp) : 'Unknown time'}
-                      </div>
-
-                      {request.response_body && (
-                        <div className="mt-3 pt-3 border-t">
-                          <div className="text-xs text-muted-foreground mb-2">Response Preview</div>
-                          <div className="text-xs text-muted-foreground font-mono bg-muted p-2 rounded max-h-24 overflow-auto">
-                            {decodeBase64Preview(request.response_body)}
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    </button>
                   ))
                 )
               )}
             </div>
+
+            {/* Pagination */}
+            {((isTcp && totalTcpPages > 0) || (!isTcp && totalPages > 0)) && (
+              <div className="mt-4 pt-4 border-t">
+                <div className="flex items-center justify-between flex-wrap gap-3">
+                  {/* Page Size Selector */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">Show:</span>
+                    <select
+                      value={isTcp ? tcpPageSize : pageSize}
+                      onChange={(e) => isTcp ? handleTcpPageSizeChange(Number(e.target.value)) : handlePageSizeChange(Number(e.target.value))}
+                      className="px-2 py-1 text-xs bg-muted border border-border rounded focus:outline-none focus:ring-2 focus:ring-primary cursor-pointer"
+                    >
+                      {PAGE_SIZE_OPTIONS.map((size) => (
+                        <option key={size} value={size}>
+                          {size}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-xs text-muted-foreground">per page</span>
+                  </div>
+
+                  {/* Pagination Controls */}
+                  <div className="flex items-center gap-2">
+                    {/* First Page */}
+                    <button
+                      onClick={() => isTcp ? setTcpCurrentPage(1) : setCurrentPage(1)}
+                      disabled={(isTcp ? tcpCurrentPage : currentPage) === 1}
+                      className="px-2 py-1 text-xs bg-muted border border-border rounded text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      title="First page"
+                    >
+                      «
+                    </button>
+
+                    {/* Previous */}
+                    <button
+                      onClick={() => isTcp ? setTcpCurrentPage(p => Math.max(1, p - 1)) : setCurrentPage(p => Math.max(1, p - 1))}
+                      disabled={(isTcp ? tcpCurrentPage : currentPage) === 1}
+                      className="px-3 py-1 text-xs bg-muted border border-border rounded text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Prev
+                    </button>
+
+                    {/* Page Info */}
+                    <div className="flex items-center gap-1 px-2">
+                      <span className="text-xs text-muted-foreground">Page</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={isTcp ? totalTcpPages : totalPages}
+                        value={isTcp ? tcpCurrentPage : currentPage}
+                        onChange={(e) => {
+                          const page = parseInt(e.target.value, 10);
+                          const maxPages = isTcp ? totalTcpPages : totalPages;
+                          if (!isNaN(page) && page >= 1 && page <= maxPages) {
+                            isTcp ? setTcpCurrentPage(page) : setCurrentPage(page);
+                          }
+                        }}
+                        className="w-12 px-2 py-1 text-xs text-center bg-muted border border-border rounded focus:outline-none focus:ring-2 focus:ring-primary"
+                      />
+                      <span className="text-xs text-muted-foreground">of {isTcp ? totalTcpPages : totalPages}</span>
+                    </div>
+
+                    {/* Next */}
+                    <button
+                      onClick={() => {
+                        const maxPages = isTcp ? totalTcpPages : totalPages;
+                        isTcp ? setTcpCurrentPage(p => Math.min(maxPages, p + 1)) : setCurrentPage(p => Math.min(maxPages, p + 1));
+                      }}
+                      disabled={(isTcp ? tcpCurrentPage : currentPage) === (isTcp ? totalTcpPages : totalPages)}
+                      className="px-3 py-1 text-xs bg-muted border border-border rounded text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Next
+                    </button>
+
+                    {/* Last Page */}
+                    <button
+                      onClick={() => isTcp ? setTcpCurrentPage(totalTcpPages) : setCurrentPage(totalPages)}
+                      disabled={(isTcp ? tcpCurrentPage : currentPage) === (isTcp ? totalTcpPages : totalPages)}
+                      className="px-2 py-1 text-xs bg-muted border border-border rounded text-muted-foreground hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      title="Last page"
+                    >
+                      »
+                    </button>
+                  </div>
+
+                  {/* Items Info */}
+                  <div className="text-xs text-muted-foreground">
+                    {isTcp ? (
+                      totalTcpConnections > 0 ? (
+                        <>
+                          Showing {(tcpCurrentPage - 1) * tcpPageSize + 1}-{Math.min(tcpCurrentPage * tcpPageSize, totalTcpConnections)} of {totalTcpConnections}
+                        </>
+                      ) : null
+                    ) : (
+                      totalRequests > 0 ? (
+                        <>
+                          Showing {(currentPage - 1) * pageSize + 1}-{Math.min(currentPage * pageSize, totalRequests)} of {totalRequests}
+                        </>
+                      ) : null
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
+
+        {/* Right: Detail Panel (inline sidebar) - only shown in list-detail mode */}
+        {viewMode === 'list-detail' && selectedRequest && (
+          <Card className="w-[400px] shrink-0 flex flex-col max-h-[calc(100vh-120px)]">
+            {/* Header */}
+            <CardHeader className="py-3 px-4 border-b shrink-0">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className="bg-chart-1/20 text-chart-1 border-chart-1/50"
+                  >
+                    {selectedRequest.method}
+                  </Badge>
+                  {selectedRequest.status && (
+                    <Badge variant={getStatusCodeBadgeVariant(selectedRequest.status)}>
+                      {selectedRequest.status}
+                    </Badge>
+                  )}
+                  {selectedRequest.duration_ms !== undefined && selectedRequest.duration_ms !== null && (
+                    <span className="text-xs text-muted-foreground">
+                      {selectedRequest.duration_ms}ms
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={() => setSelectedRequest(null)}
+                  className="p-1 hover:bg-muted rounded transition"
+                  aria-label="Close panel"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </CardHeader>
+
+            {/* Content */}
+            <CardContent className="p-4 space-y-3 overflow-y-auto flex-1">
+              {/* Path */}
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Path</label>
+                <div className="text-xs font-mono bg-muted p-2 rounded break-all">
+                  {selectedRequest.path}
+                </div>
+              </div>
+
+              {/* Timestamp */}
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Timestamp</label>
+                <div className="text-xs">
+                  {selectedRequest.timestamp ? formatDate(selectedRequest.timestamp) : 'Unknown'}
+                </div>
+              </div>
+
+              {/* Request Headers */}
+              {selectedRequest.headers && selectedRequest.headers.length > 0 && (
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Request Headers</label>
+                  <div className="bg-muted rounded p-2 text-[10px] font-mono max-h-32 overflow-auto space-y-0.5">
+                    {selectedRequest.headers.map(([key, value]: [string, string], i: number) => (
+                      <div key={i}>
+                        <span className="text-chart-1">{key}:</span>{' '}
+                        <span className="text-foreground break-all">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Request Body */}
+              {selectedRequest.body && (
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Request Body</label>
+                  <div className="bg-muted rounded p-2 text-[10px] font-mono max-h-32 overflow-auto whitespace-pre-wrap break-all">
+                    {decodeBase64Preview(selectedRequest.body, 2000)}
+                  </div>
+                </div>
+              )}
+
+              {/* Response Headers */}
+              {selectedRequest.response_headers && selectedRequest.response_headers.length > 0 && (
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Response Headers</label>
+                  <div className="bg-muted rounded p-2 text-[10px] font-mono max-h-32 overflow-auto space-y-0.5">
+                    {selectedRequest.response_headers.map(([key, value]: [string, string], i: number) => (
+                      <div key={i}>
+                        <span className="text-chart-2">{key}:</span>{' '}
+                        <span className="text-foreground break-all">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Response Body */}
+              {selectedRequest.response_body && (
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Response Body</label>
+                  <div className="bg-muted rounded p-2 text-[10px] font-mono max-h-48 overflow-auto whitespace-pre-wrap break-all">
+                    {decodeBase64Preview(selectedRequest.response_body, 5000)}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Right: TCP Connection Detail Panel (inline sidebar) - only shown in list-detail mode */}
+        {viewMode === 'list-detail' && selectedTcpConnection && (
+          <Card className="w-[400px] shrink-0 flex flex-col max-h-[calc(100vh-120px)]">
+            {/* Header */}
+            <CardHeader className="py-3 px-4 border-b shrink-0">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono">{selectedTcpConnection.client_addr}</span>
+                  <span className="text-muted-foreground text-xs">→</span>
+                  <span className="text-xs font-mono text-primary">:{selectedTcpConnection.target_port}</span>
+                </div>
+                <button
+                  onClick={() => setSelectedTcpConnection(null)}
+                  className="p-1 hover:bg-muted rounded transition"
+                  aria-label="Close panel"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </CardHeader>
+
+            {/* Content */}
+            <CardContent className="p-4 space-y-3 overflow-y-auto flex-1">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Bytes Received</label>
+                  <div className="text-sm font-mono text-chart-2">
+                    {formatBytes(selectedTcpConnection.bytes_received)}
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Bytes Sent</label>
+                  <div className="text-sm font-mono text-chart-1">
+                    {formatBytes(selectedTcpConnection.bytes_sent)}
+                  </div>
+                </div>
+              </div>
+
+              {selectedTcpConnection.duration_ms && (
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Duration</label>
+                  <div className="text-xs">{selectedTcpConnection.duration_ms}ms</div>
+                </div>
+              )}
+
+              <div>
+                <label className="text-xs text-muted-foreground mb-1 block">Connected At</label>
+                <div className="text-xs">{formatDate(selectedTcpConnection.connected_at)}</div>
+              </div>
+
+              {selectedTcpConnection.disconnected_at && (
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Disconnected At</label>
+                  <div className="text-xs">{formatDate(selectedTcpConnection.disconnected_at)}</div>
+                </div>
+              )}
+
+              {selectedTcpConnection.disconnect_reason && (
+                <div>
+                  <label className="text-xs text-muted-foreground mb-1 block">Disconnect Reason</label>
+                  <div className="text-xs font-mono bg-muted p-2 rounded">
+                    {selectedTcpConnection.disconnect_reason}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );
