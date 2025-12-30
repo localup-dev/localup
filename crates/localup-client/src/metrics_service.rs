@@ -3,7 +3,7 @@
 //! This module contains the business logic for metrics operations,
 //! separated from HTTP concerns.
 
-use crate::metrics::{HttpMetric, MetricsStats, MetricsStore};
+use crate::metrics::{BodyContent, HttpMetric, MetricsStats, MetricsStore};
 use localup_proto::Endpoint;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -234,5 +234,46 @@ impl MetricsService {
                 error: Some(format!("Failed to replay request: {}", e)),
             }),
         }
+    }
+
+    /// Replay a request by its metric ID
+    ///
+    /// Looks up the stored metric by ID and replays it to the local upstream server.
+    /// This ensures the original request body is used, not what the frontend has.
+    pub async fn replay_by_id(&self, id: &str) -> Result<ReplayResponse, MetricsServiceError> {
+        // Get the stored metric
+        let metric = self.get_metric_by_id(id).await?;
+
+        // Convert stored body to the format expected by replay_request
+        let body = metric.request_body.as_ref().and_then(|body_data| {
+            match &body_data.data {
+                BodyContent::Json(value) => {
+                    // Wrap in the format expected by replay_request
+                    Some(serde_json::json!({
+                        "type": "Json",
+                        "value": value
+                    }))
+                }
+                BodyContent::Text(text) => Some(serde_json::json!({
+                    "type": "Text",
+                    "value": text
+                })),
+                BodyContent::Binary { .. } => {
+                    // Binary bodies cannot be replayed (only metadata stored)
+                    None
+                }
+            }
+        });
+
+        // Build replay request from the stored metric
+        let replay_req = ReplayRequest {
+            method: metric.method,
+            uri: metric.uri,
+            headers: metric.request_headers,
+            body,
+        };
+
+        // Use the existing replay logic
+        self.replay_request(replay_req).await
     }
 }

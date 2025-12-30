@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { handleApiMetrics, handleApiStats, handleApiTcpConnections } from './api/generated/sdk.gen';
-import type { HttpMetric, MetricsStats, TcpMetric } from './api/generated/types.gen';
+import { handleApiMetrics, handleApiStats, handleApiTcpConnections, handleApiReplayById } from './api/generated/sdk.gen';
+import type { HttpMetric, MetricsStats, TcpMetric, ReplayResponse, BodyData } from './api/generated/types.gen';
 
 type ViewMode = 'http' | 'tcp';
 
@@ -53,6 +53,11 @@ function App() {
   const [uriSearch, setUriSearch] = useState('');
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [showFilters, setShowFilters] = useState(false);
+
+  // Replay state
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replayResult, setReplayResult] = useState<ReplayResponse | null>(null);
+  const [replayError, setReplayError] = useState<string | null>(null);
 
   // Initial data fetch
   useEffect(() => {
@@ -270,6 +275,68 @@ function App() {
   const copyToClipboard = useCallback((text: string) => {
     navigator.clipboard.writeText(text);
   }, []);
+
+  // Render body content based on type
+  const renderBodyContent = useCallback((bodyData: BodyData | null | undefined) => {
+    if (!bodyData) return null;
+
+    const { data, content_type, size } = bodyData;
+
+    if (data.type === 'Json') {
+      return (
+        <pre className="text-xs font-mono text-dark-text-primary whitespace-pre-wrap break-all">
+          {JSON.stringify(data.value, null, 2)}
+        </pre>
+      );
+    }
+
+    if (data.type === 'Text') {
+      return (
+        <pre className="text-xs font-mono text-dark-text-primary whitespace-pre-wrap break-all">
+          {data.value}
+        </pre>
+      );
+    }
+
+    if (data.type === 'Binary') {
+      return (
+        <div className="text-xs text-dark-text-muted">
+          <span className="text-yellow-500">[Binary data]</span> {formatBytes(size)} ({content_type})
+        </div>
+      );
+    }
+
+    return null;
+  }, [formatBytes]);
+
+  // Replay a captured HTTP request by ID (backend has the full request data including body)
+  const replayRequest = useCallback(async (metric: HttpMetric) => {
+    setReplayLoading(true);
+    setReplayResult(null);
+    setReplayError(null);
+
+    try {
+      const result = await handleApiReplayById({
+        path: { id: metric.id },
+      });
+
+      if (result.data) {
+        setReplayResult(result.data);
+      } else if (result.error) {
+        setReplayError(typeof result.error === 'string' ? result.error : 'Replay failed');
+      }
+    } catch (error) {
+      setReplayError(error instanceof Error ? error.message : 'Replay failed');
+    } finally {
+      setReplayLoading(false);
+    }
+  }, []);
+
+  // Clear replay state when selection changes
+  useEffect(() => {
+    setReplayResult(null);
+    setReplayError(null);
+  }, [selectedItem]);
 
   // Filter HTTP metrics
   const filteredHttpMetrics = useMemo(() => {
@@ -834,13 +901,75 @@ function App() {
               ) : 'method' in selectedItem ? (
                 // HTTP Request Details
                 <div className="space-y-4">
-                  <div>
-                    <h3 className="text-sm font-medium text-dark-text-secondary">Request</h3>
-                    <div className="mt-1 flex items-center gap-2">
-                      <span className="font-mono text-sm font-semibold text-accent-blue">{selectedItem.method}</span>
-                      <span className="text-sm text-dark-text-primary">{selectedItem.uri}</span>
+                  {/* Request info with Replay button */}
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h3 className="text-sm font-medium text-dark-text-secondary">Request</h3>
+                      <div className="mt-1 flex items-center gap-2">
+                        <span className="font-mono text-sm font-semibold text-accent-blue">{selectedItem.method}</span>
+                        <span className="text-sm text-dark-text-primary">{selectedItem.uri}</span>
+                      </div>
                     </div>
+                    <button
+                      onClick={() => replayRequest(selectedItem)}
+                      disabled={replayLoading}
+                      className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors flex items-center gap-2 ${
+                        replayLoading
+                          ? 'bg-dark-surface-light text-dark-text-muted cursor-not-allowed'
+                          : 'bg-accent-purple hover:bg-accent-purple/80 text-white'
+                      }`}
+                    >
+                      {replayLoading ? (
+                        <>
+                          <span className="inline-block w-4 h-4 border-2 border-dark-text-muted border-t-transparent rounded-full animate-spin"></span>
+                          Replaying...
+                        </>
+                      ) : (
+                        <>
+                          <span>↻</span>
+                          Replay
+                        </>
+                      )}
+                    </button>
                   </div>
+
+                  {/* Replay Result */}
+                  {(replayResult || replayError) && (
+                    <div className={`p-4 rounded-lg border ${
+                      replayError
+                        ? 'bg-accent-red/10 border-accent-red/30'
+                        : replayResult?.status && replayResult.status >= 200 && replayResult.status < 300
+                          ? 'bg-accent-green/10 border-accent-green/30'
+                          : 'bg-yellow-500/10 border-yellow-500/30'
+                    }`}>
+                      <div className="flex items-center justify-between mb-2">
+                        <h3 className="text-sm font-semibold text-dark-text-primary">Replay Result</h3>
+                        {replayResult?.status && (
+                          <span className={`px-2 py-0.5 text-xs font-medium rounded ${
+                            replayResult.status >= 200 && replayResult.status < 300
+                              ? 'bg-accent-green/20 text-accent-green'
+                              : 'bg-yellow-500/20 text-yellow-500'
+                          }`}>
+                            {replayResult.status}
+                          </span>
+                        )}
+                      </div>
+                      {replayError ? (
+                        <p className="text-sm text-accent-red">{replayError}</p>
+                      ) : replayResult?.error ? (
+                        <p className="text-sm text-accent-red">{replayResult.error}</p>
+                      ) : replayResult?.body ? (
+                        <div className="bg-dark-bg rounded p-2 max-h-40 overflow-y-auto scrollbar-dark">
+                          <pre className="text-xs font-mono text-dark-text-primary whitespace-pre-wrap break-all">
+                            {replayResult.body}
+                          </pre>
+                        </div>
+                      ) : (
+                        <p className="text-sm text-dark-text-muted">No response body</p>
+                      )}
+                    </div>
+                  )}
+
                   <div>
                     <h3 className="text-sm font-medium text-dark-text-secondary">Status</h3>
                     <p className={`mt-1 text-sm font-medium ${
@@ -865,6 +994,19 @@ function App() {
                       ))}
                     </div>
                   </div>
+                  {selectedItem.request_body && (
+                    <div>
+                      <h3 className="text-sm font-medium text-dark-text-secondary">
+                        Request Body
+                        <span className="ml-2 text-xs text-dark-text-muted font-normal">
+                          ({formatBytes(selectedItem.request_body.size)})
+                        </span>
+                      </h3>
+                      <div className="mt-1 bg-dark-surface-light rounded-lg p-3 max-h-60 overflow-y-auto scrollbar-dark border border-dark-border">
+                        {renderBodyContent(selectedItem.request_body)}
+                      </div>
+                    </div>
+                  )}
                   {selectedItem.response_headers && (
                     <div>
                       <h3 className="text-sm font-medium text-dark-text-secondary">Response Headers</h3>
@@ -874,6 +1016,19 @@ function App() {
                             <span className="text-accent-green">{key}:</span> <span className="text-dark-text-primary">{value}</span>
                           </div>
                         ))}
+                      </div>
+                    </div>
+                  )}
+                  {selectedItem.response_body && (
+                    <div>
+                      <h3 className="text-sm font-medium text-dark-text-secondary">
+                        Response Body
+                        <span className="ml-2 text-xs text-dark-text-muted font-normal">
+                          ({formatBytes(selectedItem.response_body.size)})
+                        </span>
+                      </h3>
+                      <div className="mt-1 bg-dark-surface-light rounded-lg p-3 max-h-60 overflow-y-auto scrollbar-dark border border-dark-border">
+                        {renderBodyContent(selectedItem.response_body)}
                       </div>
                     </div>
                   )}

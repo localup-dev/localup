@@ -393,3 +393,35 @@ export type HandleApiTcpConnectionByIdResponses = {
 };
 
 export type HandleApiTcpConnectionByIdResponse = HandleApiTcpConnectionByIdResponses[keyof HandleApiTcpConnectionByIdResponses];
+
+export type HandleApiReplayByIdData = {
+    body?: never;
+    path: {
+        /**
+         * Unique metric identifier
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/api/metrics/{id}/replay';
+};
+
+export type HandleApiReplayByIdErrors = {
+    /**
+     * Metric not found
+     */
+    404: unknown;
+    /**
+     * Replay request failed
+     */
+    502: unknown;
+};
+
+export type HandleApiReplayByIdResponses = {
+    /**
+     * Request replayed successfully
+     */
+    200: ReplayResponse;
+};
+
+export type HandleApiReplayByIdResponse = HandleApiReplayByIdResponses[keyof HandleApiReplayByIdResponses];

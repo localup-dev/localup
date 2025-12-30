@@ -76,6 +76,7 @@ pub struct MetricsServer {
         handle_api_metric_by_id,
         handle_api_clear,
         handle_api_replay,
+        handle_api_replay_by_id,
         handle_api_tcp_connections,
         handle_api_tcp_connection_by_id,
     ),
@@ -158,6 +159,7 @@ impl MetricsServer {
             .route("/api/metrics/stats", get(handle_api_stats))
             .route("/api/metrics/stream", get(handle_sse_stream))
             .route("/api/metrics/{id}", get(handle_api_metric_by_id))
+            .route("/api/metrics/{id}/replay", post(handle_api_replay_by_id))
             .route("/api/replay", post(handle_api_replay))
             // TCP connection endpoints
             .route("/api/tcp/connections", get(handle_api_tcp_connections))
@@ -240,6 +242,32 @@ async fn handle_api_replay(
     Json(replay_req): Json<ReplayRequest>,
 ) -> Result<Json<ReplayResponse>, impl IntoResponse> {
     match state.service.replay_request(replay_req).await {
+        Ok(response) => Ok(Json(response)),
+        Err(e) => Err(service_error_to_problem(e)),
+    }
+}
+
+/// Replay a captured request by its ID
+#[utoipa::path(
+    post,
+    path = "/api/metrics/{id}/replay",
+    tag = "localup-cli",
+    summary = "Replay a captured request by ID",
+    description = "Looks up a captured HTTP request by its ID and replays it to the local upstream server. The original request body stored in the backend is used.",
+    params(
+        ("id" = String, Path, description = "Unique metric identifier")
+    ),
+    responses(
+        (status = 200, description = "Request replayed successfully", body = ReplayResponse),
+        (status = 404, description = "Metric not found"),
+        (status = 502, description = "Replay request failed")
+    )
+)]
+async fn handle_api_replay_by_id(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<ReplayResponse>, impl IntoResponse> {
+    match state.service.replay_by_id(&id).await {
         Ok(response) => Ok(Json(response)),
         Err(e) => Err(service_error_to_problem(e)),
     }
