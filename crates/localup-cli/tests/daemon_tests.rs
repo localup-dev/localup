@@ -19,6 +19,7 @@ fn create_test_tunnel(name: &str, port: u16, enabled: bool) -> StoredTunnel {
             protocols: vec![ProtocolConfig::Http {
                 local_port: port,
                 subdomain: Some(format!("{}-test", name)),
+                custom_domain: None,
             }],
             auth_token: "test-token".to_string(),
             exit_node: ExitNodeConfig::Auto,

@@ -46,6 +46,13 @@ struct Cli {
     #[arg(short, long)]
     subdomain: Option<String>,
 
+    /// Custom domain for HTTP/HTTPS tunnels (standalone mode only)
+    /// Requires DNS pointing to relay and valid TLS certificate.
+    /// Takes precedence over subdomain when both are set.
+    /// Example: --custom-domain api.mycompany.com
+    #[arg(long = "custom-domain")]
+    custom_domain: Option<String>,
+
     /// Relay server address (standalone mode only)
     #[arg(short, long, env)]
     relay: Option<String>,
@@ -105,9 +112,10 @@ enum Commands {
         /// Subdomain for HTTP/HTTPS/TLS tunnels
         #[arg(short, long)]
         subdomain: Option<String>,
-        /// Custom domain for HTTPS tunnels
-        #[arg(long)]
-        domain: Option<String>,
+        /// Custom domain for HTTP/HTTPS tunnels (requires DNS and certificate)
+        /// Example: --custom-domain api.mycompany.com
+        #[arg(long = "custom-domain")]
+        custom_domain: Option<String>,
         /// Relay server address (host:port)
         #[arg(short, long)]
         relay: Option<String>,
@@ -634,7 +642,7 @@ async fn main() -> Result<()> {
             protocol,
             token,
             subdomain,
-            domain: _,
+            custom_domain,
             relay,
             transport,
             remote_port,
@@ -646,6 +654,7 @@ async fn main() -> Result<()> {
             protocol,
             token,
             subdomain,
+            custom_domain,
             relay,
             transport,
             remote_port,
@@ -820,6 +829,7 @@ fn handle_add_tunnel(
     protocol: String,
     token: Option<String>,
     subdomain: Option<String>,
+    custom_domain: Option<String>,
     relay: Option<String>,
     transport: Option<String>,
     remote_port: Option<u16>,
@@ -840,8 +850,9 @@ fn handle_add_tunnel(
         ));
     };
 
-    // Parse protocol
-    let protocol_config = parse_protocol(&protocol, local_port, subdomain, remote_port)?;
+    // Parse protocol - custom_domain takes precedence over subdomain for HTTP/HTTPS
+    let protocol_config =
+        parse_protocol(&protocol, local_port, subdomain, custom_domain, remote_port)?;
 
     // Parse exit node
     let exit_node = if let Some(relay_addr) = relay {
@@ -924,18 +935,24 @@ fn handle_list_tunnels() -> Result<()> {
                 ProtocolConfig::Http {
                     local_port,
                     subdomain,
+                    custom_domain,
                 } => {
                     println!("    Protocol: HTTP, Port: {}", local_port);
-                    if let Some(sub) = subdomain {
+                    if let Some(custom) = custom_domain {
+                        println!("    Custom Domain: {}", custom);
+                    } else if let Some(sub) = subdomain {
                         println!("    Subdomain: {}", sub);
                     }
                 }
                 ProtocolConfig::Https {
                     local_port,
                     subdomain,
+                    custom_domain,
                 } => {
                     println!("    Protocol: HTTPS, Port: {}", local_port);
-                    if let Some(sub) = subdomain {
+                    if let Some(custom) = custom_domain {
+                        println!("    Custom Domain: {}", custom);
+                    } else if let Some(sub) = subdomain {
                         println!("    Subdomain: {}", sub);
                     }
                 }
@@ -1081,11 +1098,12 @@ async fn run_standalone(cli: Cli) -> Result<()> {
     info!("Protocol: {}", protocol_str);
     info!("Local address: {}:{}", local_host, local_port);
 
-    // Parse protocol configuration
+    // Parse protocol configuration - custom_domain takes precedence over subdomain
     let protocol = parse_protocol(
         &protocol_str,
         local_port,
         cli.subdomain.clone(),
+        cli.custom_domain.clone(),
         cli.remote_port,
     )?;
 
@@ -1363,16 +1381,19 @@ fn parse_protocol(
     protocol: &str,
     port: u16,
     subdomain: Option<String>,
+    custom_domain: Option<String>,
     remote_port: Option<u16>,
 ) -> Result<ProtocolConfig> {
     match protocol.to_lowercase().as_str() {
         "http" => Ok(ProtocolConfig::Http {
             local_port: port,
             subdomain,
+            custom_domain,
         }),
         "https" => Ok(ProtocolConfig::Https {
             local_port: port,
             subdomain,
+            custom_domain,
         }),
         "tcp" => Ok(ProtocolConfig::Tcp {
             local_port: port,

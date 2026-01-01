@@ -414,6 +414,7 @@ function App() {
                 <span className={`font-medium text-sm ${connected ? 'text-accent-green' : 'text-yellow-500'}`}>
                   {connected ? 'Live' : 'Reconnecting...'}
                 </span>
+                <span className="text-xs text-dark-text-muted ml-2">v{__APP_VERSION__}</span>
               </div>
 
               {/* Protocol badge */}
@@ -455,6 +456,7 @@ function App() {
             <div className="flex items-center gap-2">
               <span className="w-2 h-2 bg-dark-text-muted rounded-full"></span>
               <span className="text-dark-text-muted font-medium text-sm">Connecting...</span>
+              <span className="text-xs text-dark-text-muted ml-2">v{__APP_VERSION__}</span>
             </div>
           )}
         </div>

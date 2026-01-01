@@ -299,15 +299,25 @@ impl TunnelConnector {
             .protocols
             .iter()
             .map(|pc| match pc {
-                ProtocolConfig::Http { subdomain, .. } => Protocol::Http {
+                ProtocolConfig::Http {
+                    subdomain,
+                    custom_domain,
+                    ..
+                } => Protocol::Http {
+                    // custom_domain takes precedence over subdomain
                     // Send None if no subdomain - server will auto-generate one
                     subdomain: subdomain.clone(),
-                    custom_domain: None,
+                    custom_domain: custom_domain.clone(),
                 },
-                ProtocolConfig::Https { subdomain, .. } => Protocol::Https {
+                ProtocolConfig::Https {
+                    subdomain,
+                    custom_domain,
+                    ..
+                } => Protocol::Https {
+                    // custom_domain takes precedence over subdomain
                     // Send None if no subdomain - server will auto-generate one
                     subdomain: subdomain.clone(),
-                    custom_domain: None,
+                    custom_domain: custom_domain.clone(),
                 },
                 ProtocolConfig::Tcp { remote_port, .. } => Protocol::Tcp {
                     // 0 means auto-allocate, specific port means request that port

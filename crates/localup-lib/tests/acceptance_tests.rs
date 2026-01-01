@@ -61,6 +61,7 @@ async fn acceptance_expose_http_server() {
         protocols: vec![ProtocolConfig::Http {
             local_port,
             subdomain: Some("myapp".to_string()),
+            custom_domain: None,
         }],
         auth_token: "test-token-abc123".to_string(),
         exit_node: ExitNodeConfig::Auto,
@@ -139,6 +140,7 @@ async fn acceptance_expose_multiple_services() {
             ProtocolConfig::Http {
                 local_port: http_port,
                 subdomain: Some("api".to_string()),
+                custom_domain: None,
             },
             ProtocolConfig::Tcp {
                 local_port: tcp_port,
@@ -193,6 +195,7 @@ async fn acceptance_configuration_validation() {
         protocols: vec![ProtocolConfig::Http {
             local_port: 3000,
             subdomain: None,
+            custom_domain: None,
         }],
         auth_token: "".to_string(), // Invalid: empty token
         exit_node: ExitNodeConfig::Auto,
@@ -224,6 +227,7 @@ async fn acceptance_configuration_validation() {
         protocols: vec![ProtocolConfig::Http {
             local_port: 1, // Port 1 requires root/admin
             subdomain: None,
+            custom_domain: None,
         }],
         auth_token: "test-token".to_string(),
         exit_node: ExitNodeConfig::Auto,
@@ -267,6 +271,7 @@ async fn acceptance_error_handling() {
         protocols: vec![ProtocolConfig::Http {
             local_port: 3000,
             subdomain: None,
+            custom_domain: None,
         }],
         auth_token: "test-token".to_string(),
         exit_node: ExitNodeConfig::Specific(Region::UsEast),
@@ -321,6 +326,7 @@ async fn acceptance_tunnel_lifecycle() {
         protocols: vec![ProtocolConfig::Http {
             local_port,
             subdomain: Some("test".to_string()),
+            custom_domain: None,
         }],
         auth_token: "test-token-lifecycle".to_string(),
         exit_node: ExitNodeConfig::Auto,
@@ -390,6 +396,7 @@ async fn acceptance_regional_selection() {
         protocols: vec![ProtocolConfig::Http {
             local_port: 3000,
             subdomain: None,
+            custom_domain: None,
         }],
         auth_token: "test-token".to_string(),
         exit_node: ExitNodeConfig::Auto,
@@ -415,6 +422,7 @@ async fn acceptance_regional_selection() {
         protocols: vec![ProtocolConfig::Http {
             local_port: 3000,
             subdomain: None,
+            custom_domain: None,
         }],
         auth_token: "test-token".to_string(),
         exit_node: ExitNodeConfig::Specific(Region::EuWest),
@@ -458,6 +466,7 @@ async fn acceptance_subdomain_management() {
         protocols: vec![ProtocolConfig::Https {
             local_port: 3000,
             subdomain: Some("myapp".to_string()),
+            custom_domain: None,
         }],
         auth_token: "test-token-subdomain".to_string(),
         exit_node: ExitNodeConfig::Auto,
@@ -510,6 +519,7 @@ async fn acceptance_metrics_monitoring() {
         protocols: vec![ProtocolConfig::Http {
             local_port,
             subdomain: None,
+            custom_domain: None,
         }],
         auth_token: "test-token-metrics".to_string(),
         exit_node: ExitNodeConfig::Auto,

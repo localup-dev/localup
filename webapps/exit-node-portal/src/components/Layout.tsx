@@ -24,10 +24,13 @@ export default function Layout({ children }: LayoutProps) {
   const navigate = useNavigate();
   const { teams, selectedTeam, selectTeam } = useTeam();
 
-  const { data: user, isLoading, isError } = useQuery({
+  const { data: userData, isLoading, isError } = useQuery({
     ...getCurrentUserOptions(),
     retry: false,
   });
+
+  // API returns { user: { email, ... } } structure
+  const user = userData?.user as { email?: string; id?: string } | undefined;
 
   const logout = useMutation({
     ...logoutMutation(),
@@ -70,7 +73,10 @@ export default function Layout({ children }: LayoutProps) {
       {/* Sidebar */}
       <div className="w-64 bg-card border-r border-border flex flex-col">
         <div className="p-6">
-          <Logo size="md" className="text-foreground" />
+          <div className="flex items-center justify-between">
+            <Logo size="md" className="text-foreground" />
+            <span className="text-xs text-muted-foreground">v{__APP_VERSION__}</span>
+          </div>
           <div className="flex items-center gap-3 mt-4">
             <Avatar className="h-8 w-8">
               <AvatarFallback className="bg-primary text-primary-foreground text-xs">

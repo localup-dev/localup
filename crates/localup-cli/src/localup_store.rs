@@ -195,6 +195,7 @@ mod tests {
                 protocols: vec![ProtocolConfig::Http {
                     local_port: 3000,
                     subdomain: Some("test".to_string()),
+                    custom_domain: None,
                 }],
                 auth_token: "test-token".to_string(),
                 exit_node: ExitNodeConfig::Auto,

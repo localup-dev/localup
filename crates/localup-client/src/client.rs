@@ -124,6 +124,7 @@ mod tests {
             .protocol(ProtocolConfig::Http {
                 local_port: 3000,
                 subdomain: Some("test".to_string()),
+                custom_domain: None,
             })
             .auth_token("test-token".to_string())
             .exit_node(ExitNodeConfig::Custom("localhost:9000".to_string()))

@@ -137,6 +137,7 @@ async fn acceptance_e2e_basic_http_tunnel() {
         protocols: vec![ProtocolConfig::Http {
             local_port: http_port,
             subdomain: Some("test".to_string()),
+            custom_domain: None,
         }],
         auth_token: "test-token-e2e".to_string(),
         exit_node: ExitNodeConfig::Custom(relay_addr.clone()),
@@ -226,6 +227,7 @@ async fn acceptance_e2e_multiple_protocols() {
             ProtocolConfig::Http {
                 local_port: http_port,
                 subdomain: Some("api".to_string()),
+                custom_domain: None,
             },
             ProtocolConfig::Tcp {
                 local_port: tcp_port,
@@ -288,6 +290,7 @@ async fn acceptance_e2e_connection_lifecycle() {
         protocols: vec![ProtocolConfig::Http {
             local_port: http_port,
             subdomain: None,
+            custom_domain: None,
         }],
         auth_token: "test-token-lifecycle-e2e".to_string(),
         exit_node: ExitNodeConfig::Custom(relay_addr),
@@ -357,6 +360,7 @@ async fn acceptance_e2e_error_recovery() {
         protocols: vec![ProtocolConfig::Http {
             local_port: http_port,
             subdomain: None,
+            custom_domain: None,
         }],
         auth_token: "test-token".to_string(),
         exit_node: ExitNodeConfig::Custom("127.0.0.1:1".to_string()),
@@ -383,6 +387,7 @@ async fn acceptance_e2e_error_recovery() {
         protocols: vec![ProtocolConfig::Http {
             local_port: http_port,
             subdomain: None,
+            custom_domain: None,
         }],
         auth_token: "".to_string(), // Empty token
         exit_node: ExitNodeConfig::Custom(relay_addr),

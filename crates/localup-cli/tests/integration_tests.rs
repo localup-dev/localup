@@ -16,6 +16,7 @@ fn create_test_config(name: &str, port: u16) -> StoredTunnel {
             protocols: vec![ProtocolConfig::Http {
                 local_port: port,
                 subdomain: Some(format!("{}-test", name)),
+                custom_domain: None,
             }],
             auth_token: "test-token".to_string(),
             exit_node: ExitNodeConfig::Auto,
@@ -255,6 +256,7 @@ fn test_localup_store_protocol_types() {
             protocols: vec![ProtocolConfig::Http {
                 local_port: 3000,
                 subdomain: Some("test".to_string()),
+                custom_domain: None,
             }],
             auth_token: "test-token".to_string(),
             exit_node: ExitNodeConfig::Auto,
@@ -275,6 +277,7 @@ fn test_localup_store_protocol_types() {
             protocols: vec![ProtocolConfig::Https {
                 local_port: 3000,
                 subdomain: Some("test".to_string()),
+                custom_domain: None,
             }],
             auth_token: "test-token".to_string(),
             exit_node: ExitNodeConfig::Auto,
@@ -369,6 +372,7 @@ fn test_localup_store_exit_node_configs() {
             protocols: vec![ProtocolConfig::Http {
                 local_port: 3000,
                 subdomain: None,
+                custom_domain: None,
             }],
             auth_token: "test-token".to_string(),
             exit_node: ExitNodeConfig::Auto,
@@ -389,6 +393,7 @@ fn test_localup_store_exit_node_configs() {
             protocols: vec![ProtocolConfig::Http {
                 local_port: 3000,
                 subdomain: None,
+                custom_domain: None,
             }],
             auth_token: "test-token".to_string(),
             exit_node: ExitNodeConfig::Custom("relay.example.com:8080".to_string()),
@@ -421,6 +426,7 @@ fn test_localup_store_serialization_roundtrip() {
             protocols: vec![ProtocolConfig::Https {
                 local_port: 8443,
                 subdomain: Some("complex-app".to_string()),
+                custom_domain: None,
             }],
             auth_token: "very-secret-token-12345".to_string(),
             exit_node: ExitNodeConfig::Custom("custom-relay.example.com:9999".to_string()),
@@ -451,6 +457,7 @@ fn test_localup_store_serialization_roundtrip() {
         ProtocolConfig::Https {
             local_port,
             subdomain,
+            custom_domain: _,
         } => {
             assert_eq!(*local_port, 8443);
             assert_eq!(subdomain.as_deref(), Some("complex-app"));

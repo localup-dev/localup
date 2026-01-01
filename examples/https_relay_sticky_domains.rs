@@ -281,6 +281,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         protocols: vec![ProtocolConfig::Https {
             local_port,
             subdomain: None, // Sticky assignment based on token
+            custom_domain: None,
         }],
         auth_token: auth_token_client1,
         exit_node: ExitNodeConfig::Custom("127.0.0.1:4443".to_string()),

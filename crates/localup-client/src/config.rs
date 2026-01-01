@@ -23,11 +23,19 @@ pub enum ProtocolConfig {
     Http {
         local_port: u16,
         subdomain: Option<String>,
+        /// Full custom domain (e.g., "api.example.com") - requires DNS pointing to relay
+        /// and certificate to be provisioned. Takes precedence over subdomain.
+        #[serde(default)]
+        custom_domain: Option<String>,
     },
     /// HTTPS with automatic certificate management
     Https {
         local_port: u16,
         subdomain: Option<String>,
+        /// Full custom domain (e.g., "api.example.com") - requires DNS pointing to relay
+        /// and valid TLS certificate. Takes precedence over subdomain.
+        #[serde(default)]
+        custom_domain: Option<String>,
     },
 }
 
@@ -155,6 +163,7 @@ mod tests {
             .protocol(ProtocolConfig::Https {
                 local_port: 3000,
                 subdomain: Some("myapp".to_string()),
+                custom_domain: None,
             })
             .auth_token("test-token".to_string())
             .build()
@@ -165,11 +174,61 @@ mod tests {
     }
 
     #[test]
+    fn test_config_builder_with_custom_domain() {
+        let config = TunnelConfig::builder()
+            .protocol(ProtocolConfig::Https {
+                local_port: 3000,
+                subdomain: None,
+                custom_domain: Some("api.example.com".to_string()),
+            })
+            .auth_token("test-token".to_string())
+            .build()
+            .unwrap();
+
+        assert_eq!(config.auth_token, "test-token");
+        assert_eq!(config.protocols.len(), 1);
+        match &config.protocols[0] {
+            ProtocolConfig::Https { custom_domain, .. } => {
+                assert_eq!(custom_domain.as_deref(), Some("api.example.com"));
+            }
+            _ => panic!("Expected HTTPS protocol"),
+        }
+    }
+
+    #[test]
+    fn test_config_builder_custom_domain_precedence() {
+        // When both subdomain and custom_domain are set, custom_domain takes precedence
+        let config = TunnelConfig::builder()
+            .protocol(ProtocolConfig::Http {
+                local_port: 8080,
+                subdomain: Some("myapp".to_string()),
+                custom_domain: Some("api.mycompany.com".to_string()),
+            })
+            .auth_token("test-token".to_string())
+            .build()
+            .unwrap();
+
+        match &config.protocols[0] {
+            ProtocolConfig::Http {
+                subdomain,
+                custom_domain,
+                ..
+            } => {
+                // Both can be set, but custom_domain takes precedence in routing
+                assert_eq!(subdomain.as_deref(), Some("myapp"));
+                assert_eq!(custom_domain.as_deref(), Some("api.mycompany.com"));
+            }
+            _ => panic!("Expected HTTP protocol"),
+        }
+    }
+
+    #[test]
     fn test_config_builder_missing_token() {
         let result = TunnelConfig::builder()
             .protocol(ProtocolConfig::Http {
                 local_port: 8080,
                 subdomain: None,
+                custom_domain: None,
             })
             .build();
 

@@ -1609,10 +1609,62 @@ impl TunnelHandler {
 
         for protocol in protocols {
             match protocol {
-                Protocol::Http { subdomain, .. } | Protocol::Https { subdomain, .. } => {
+                Protocol::Http {
+                    subdomain,
+                    custom_domain,
+                }
+                | Protocol::Https {
+                    subdomain,
+                    custom_domain,
+                } => {
+                    let protocol_name = if matches!(protocol, Protocol::Http { .. }) {
+                        "http"
+                    } else {
+                        "https"
+                    };
+
+                    // Check if custom domain is provided - it takes precedence
+                    if let Some(ref custom) = custom_domain {
+                        if !custom.is_empty() {
+                            info!(
+                                "🌐 Using custom domain '{}' for tunnel {} ({})",
+                                custom, localup_id, protocol_name
+                            );
+
+                            // Create endpoint with custom domain
+                            let endpoint_protocol = if matches!(protocol, Protocol::Http { .. }) {
+                                Protocol::Http {
+                                    subdomain: None,
+                                    custom_domain: Some(custom.clone()),
+                                }
+                            } else {
+                                Protocol::Https {
+                                    subdomain: None,
+                                    custom_domain: Some(custom.clone()),
+                                }
+                            };
+
+                            // Use actual HTTPS relay port if configured
+                            let actual_port = self.https_port.unwrap_or(443);
+                            let url_with_port = if actual_port == 443 {
+                                format!("https://{}", custom)
+                            } else {
+                                format!("https://{}:{}", custom, actual_port)
+                            };
+
+                            endpoints.push(Endpoint {
+                                protocol: endpoint_protocol,
+                                public_url: url_with_port,
+                                port: None,
+                            });
+                            continue;
+                        }
+                    }
+
+                    // No custom domain - use subdomain logic
                     // Extract local port if available for sticky domain context
                     let local_port = match protocol {
-                        Protocol::Http { .. } => None, // HTTP doesn't have a local port concept in Protocol enum
+                        Protocol::Http { .. } => None,
                         Protocol::Https { .. } => None,
                         _ => None,
                     };
@@ -1621,23 +1673,11 @@ impl TunnelHandler {
                     let domain_context = DomainContext::new()
                         .with_client_id(localup_id.to_string())
                         .with_local_port(local_port.unwrap_or(0))
-                        .with_protocol(
-                            if matches!(protocol, Protocol::Http { .. }) {
-                                "http"
-                            } else {
-                                "https"
-                            }
-                            .to_string(),
-                        );
+                        .with_protocol(protocol_name.to_string());
 
                     // Use provided subdomain or generate via domain provider
                     let actual_subdomain = match subdomain {
                         Some(ref s) if !s.is_empty() => {
-                            let protocol_name = if matches!(protocol, Protocol::Http { .. }) {
-                                "http"
-                            } else {
-                                "https"
-                            };
                             // Check if manual subdomains are allowed
                             if let Some(ref provider) = self.domain_provider {
                                 if !provider.allow_manual_subdomain() {
@@ -1672,12 +1712,6 @@ impl TunnelHandler {
                             if let Some(ref provider) = self.domain_provider {
                                 match provider.generate_subdomain(&domain_context).await {
                                     Ok(generated) => {
-                                        let protocol_name =
-                                            if matches!(protocol, Protocol::Http { .. }) {
-                                                "http"
-                                            } else {
-                                                "https"
-                                            };
                                         info!(
                                             "🎯 Domain provider generated subdomain '{}' for tunnel {} ({})",
                                             generated, localup_id, protocol_name
@@ -1700,11 +1734,6 @@ impl TunnelHandler {
                                 }
                             } else {
                                 let generated = Self::generate_subdomain(localup_id, peer_addr);
-                                let protocol_name = if matches!(protocol, Protocol::Http { .. }) {
-                                    "http"
-                                } else {
-                                    "https"
-                                };
                                 info!(
                                     "🎯 Auto-generated subdomain '{}' for tunnel {} ({})",
                                     generated, localup_id, protocol_name
@@ -1990,6 +2019,7 @@ impl TunnelHandler {
 mod tests {
     use super::*;
     use localup_proto::{Protocol, TunnelConfig};
+    use localup_router::RouteKey;
     use std::sync::Arc;
 
     #[test]
@@ -2519,5 +2549,290 @@ mod tests {
 
         // Verify deallocate was called
         assert!(*deallocated.lock().unwrap());
+    }
+
+    // ============================================================================
+    // CUSTOM DOMAIN TESTS
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_build_endpoints_with_custom_domain_http() {
+        let connection_manager = Arc::new(TunnelConnectionManager::new());
+        let route_registry = Arc::new(RouteRegistry::new());
+        let pending_requests = Arc::new(PendingRequests::new());
+
+        let handler = TunnelHandler::new(
+            connection_manager,
+            route_registry,
+            None,
+            "tunnel.test".to_string(),
+            pending_requests,
+        );
+
+        let localup_id = "test-tunnel";
+        let protocols = vec![Protocol::Http {
+            subdomain: None,
+            custom_domain: Some("api.mycompany.com".to_string()),
+        }];
+        let config = TunnelConfig::default();
+
+        let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let endpoints = handler
+            .build_endpoints(localup_id, &protocols, &config, mock_peer_addr)
+            .await;
+
+        assert_eq!(endpoints.len(), 1);
+        // Custom domain should be used directly (not combined with relay domain)
+        assert_eq!(endpoints[0].public_url, "https://api.mycompany.com");
+        assert!(
+            matches!(&endpoints[0].protocol, Protocol::Http { subdomain: None, custom_domain: Some(ref cd) } if cd == "api.mycompany.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_endpoints_with_custom_domain_https() {
+        let connection_manager = Arc::new(TunnelConnectionManager::new());
+        let route_registry = Arc::new(RouteRegistry::new());
+        let pending_requests = Arc::new(PendingRequests::new());
+
+        let handler = TunnelHandler::new(
+            connection_manager,
+            route_registry,
+            None,
+            "tunnel.test".to_string(),
+            pending_requests,
+        );
+
+        let localup_id = "test-tunnel";
+        let protocols = vec![Protocol::Https {
+            subdomain: None,
+            custom_domain: Some("secure.example.org".to_string()),
+        }];
+        let config = TunnelConfig::default();
+
+        let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let endpoints = handler
+            .build_endpoints(localup_id, &protocols, &config, mock_peer_addr)
+            .await;
+
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].public_url, "https://secure.example.org");
+        assert!(
+            matches!(&endpoints[0].protocol, Protocol::Https { subdomain: None, custom_domain: Some(ref cd) } if cd == "secure.example.org")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_endpoints_custom_domain_precedence_over_subdomain() {
+        let connection_manager = Arc::new(TunnelConnectionManager::new());
+        let route_registry = Arc::new(RouteRegistry::new());
+        let pending_requests = Arc::new(PendingRequests::new());
+
+        let handler = TunnelHandler::new(
+            connection_manager,
+            route_registry,
+            None,
+            "tunnel.test".to_string(),
+            pending_requests,
+        );
+
+        let localup_id = "test-tunnel";
+        // Both subdomain and custom_domain provided - custom_domain should take precedence
+        let protocols = vec![Protocol::Http {
+            subdomain: Some("myapp".to_string()),
+            custom_domain: Some("api.mycompany.com".to_string()),
+        }];
+        let config = TunnelConfig::default();
+
+        let mock_peer_addr = "127.0.0.1:12345".parse().unwrap();
+        let endpoints = handler
+            .build_endpoints(localup_id, &protocols, &config, mock_peer_addr)
+            .await;
+
+        assert_eq!(endpoints.len(), 1);
+        // Custom domain should take precedence over subdomain
+        assert_eq!(endpoints[0].public_url, "https://api.mycompany.com");
+        // Protocol should have custom_domain set, subdomain cleared
+        assert!(
+            matches!(&endpoints[0].protocol, Protocol::Http { subdomain: None, custom_domain: Some(ref cd) } if cd == "api.mycompany.com")
+        );
+    }
+
+    #[test]
+    fn test_register_route_with_custom_domain_http() {
+        let connection_manager = Arc::new(TunnelConnectionManager::new());
+        let route_registry = Arc::new(RouteRegistry::new());
+        let pending_requests = Arc::new(PendingRequests::new());
+
+        let handler = TunnelHandler::new(
+            connection_manager,
+            route_registry.clone(),
+            None,
+            "tunnel.test".to_string(),
+            pending_requests,
+        );
+
+        let localup_id = "test-tunnel";
+        let endpoint = Endpoint {
+            protocol: Protocol::Http {
+                subdomain: None,
+                custom_domain: Some("api.mycompany.com".to_string()),
+            },
+            public_url: "https://api.mycompany.com".to_string(),
+            port: None,
+        };
+
+        let result = handler.register_route(localup_id, &endpoint);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
+
+        // Verify route was registered with full custom domain
+        assert_eq!(route_registry.count(), 1);
+        // The route should be registered with the full custom domain
+        let route = route_registry.lookup(&RouteKey::HttpHost("api.mycompany.com".to_string()));
+        assert!(route.is_ok());
+        assert_eq!(route.unwrap().localup_id, localup_id);
+    }
+
+    #[test]
+    fn test_register_route_with_custom_domain_https() {
+        let connection_manager = Arc::new(TunnelConnectionManager::new());
+        let route_registry = Arc::new(RouteRegistry::new());
+        let pending_requests = Arc::new(PendingRequests::new());
+
+        let handler = TunnelHandler::new(
+            connection_manager,
+            route_registry.clone(),
+            None,
+            "tunnel.test".to_string(),
+            pending_requests,
+        );
+
+        let localup_id = "test-tunnel";
+        let endpoint = Endpoint {
+            protocol: Protocol::Https {
+                subdomain: None,
+                custom_domain: Some("secure.example.org".to_string()),
+            },
+            public_url: "https://secure.example.org".to_string(),
+            port: None,
+        };
+
+        let result = handler.register_route(localup_id, &endpoint);
+        assert!(result.is_ok());
+
+        // Verify route was registered with full custom domain
+        assert_eq!(route_registry.count(), 1);
+        let route = route_registry.lookup(&RouteKey::HttpHost("secure.example.org".to_string()));
+        assert!(route.is_ok());
+        assert_eq!(route.unwrap().localup_id, localup_id);
+    }
+
+    #[test]
+    fn test_register_route_custom_domain_conflict() {
+        let connection_manager = Arc::new(TunnelConnectionManager::new());
+        let route_registry = Arc::new(RouteRegistry::new());
+        let pending_requests = Arc::new(PendingRequests::new());
+
+        let handler = TunnelHandler::new(
+            connection_manager,
+            route_registry.clone(),
+            None,
+            "tunnel.test".to_string(),
+            pending_requests,
+        );
+
+        // Register first tunnel with custom domain
+        let endpoint1 = Endpoint {
+            protocol: Protocol::Http {
+                subdomain: None,
+                custom_domain: Some("api.mycompany.com".to_string()),
+            },
+            public_url: "https://api.mycompany.com".to_string(),
+            port: None,
+        };
+        let result1 = handler.register_route("tunnel-1", &endpoint1);
+        assert!(result1.is_ok());
+
+        // Try to register second tunnel with same custom domain - should fail
+        let endpoint2 = Endpoint {
+            protocol: Protocol::Http {
+                subdomain: None,
+                custom_domain: Some("api.mycompany.com".to_string()),
+            },
+            public_url: "https://api.mycompany.com".to_string(),
+            port: None,
+        };
+        let result2 = handler.register_route("tunnel-2", &endpoint2);
+        assert!(result2.is_err());
+        assert!(result2.unwrap_err().contains("already in use"));
+    }
+
+    #[tokio::test]
+    async fn test_unregister_route_custom_domain() {
+        let connection_manager = Arc::new(TunnelConnectionManager::new());
+        let route_registry = Arc::new(RouteRegistry::new());
+        let pending_requests = Arc::new(PendingRequests::new());
+
+        let handler = TunnelHandler::new(
+            connection_manager,
+            route_registry.clone(),
+            None,
+            "tunnel.test".to_string(),
+            pending_requests,
+        );
+
+        let localup_id = "test-tunnel";
+        let endpoint = Endpoint {
+            protocol: Protocol::Http {
+                subdomain: None,
+                custom_domain: Some("api.mycompany.com".to_string()),
+            },
+            public_url: "https://api.mycompany.com".to_string(),
+            port: None,
+        };
+
+        // Register first
+        handler.register_route(localup_id, &endpoint).unwrap();
+        assert_eq!(route_registry.count(), 1);
+
+        // Unregister
+        handler.unregister_route(localup_id, &endpoint).await;
+        assert_eq!(route_registry.count(), 0);
+
+        // Verify route was removed
+        let route = route_registry.lookup(&RouteKey::HttpHost("api.mycompany.com".to_string()));
+        assert!(route.is_err());
+    }
+
+    #[test]
+    fn test_register_route_requires_subdomain_or_custom_domain() {
+        let connection_manager = Arc::new(TunnelConnectionManager::new());
+        let route_registry = Arc::new(RouteRegistry::new());
+        let pending_requests = Arc::new(PendingRequests::new());
+
+        let handler = TunnelHandler::new(
+            connection_manager,
+            route_registry.clone(),
+            None,
+            "tunnel.test".to_string(),
+            pending_requests,
+        );
+
+        let localup_id = "test-tunnel";
+        // Neither subdomain nor custom_domain provided
+        let endpoint = Endpoint {
+            protocol: Protocol::Http {
+                subdomain: None,
+                custom_domain: None,
+            },
+            public_url: "https://tunnel.test".to_string(),
+            port: None,
+        };
+
+        let result = handler.register_route(localup_id, &endpoint);
+        // This should fail because neither subdomain nor custom_domain is provided
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("subdomain or custom_domain"));
     }
 }
