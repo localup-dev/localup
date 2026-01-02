@@ -98,6 +98,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Extract version from tag
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        shell: bash
+
       - name: Download webapp artifacts
         uses: actions/download-artifact@v4
         with:
@@ -142,6 +149,7 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross == true && 'aarch64-linux-gnu-gcc' || '' }}
           CC_aarch64_unknown_linux_gnu: ${{ matrix.cross == true && 'aarch64-linux-gnu-gcc' || '' }}
           AR_aarch64_unknown_linux_gnu: ${{ matrix.cross == true && 'aarch64-linux-gnu-ar' || '' }}
+          LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
         run: |
           cargo build --release --target ${{ matrix.target }} -p localup-cli
 

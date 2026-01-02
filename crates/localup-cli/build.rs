@@ -10,13 +10,19 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Get git tag (version)
-    let git_tag = Command::new("git")
-        .args(["describe", "--tags", "--abbrev=0"])
-        .output()
+    // Get version: prefer LOCALUP_VERSION env var (set in CI), then git tag, then Cargo.toml version
+    let git_tag = std::env::var("LOCALUP_VERSION")
         .ok()
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|s| s.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            Command::new("git")
+                .args(["describe", "--tags", "--abbrev=0"])
+                .output()
+                .ok()
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
     // Get build timestamp
@@ -27,7 +33,8 @@ fn main() {
     println!("cargo:rustc-env=GIT_TAG={}", git_tag);
     println!("cargo:rustc-env=BUILD_TIME={}", build_time);
 
-    // Rebuild if git state changes
+    // Rebuild if git state or version changes
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/refs");
+    println!("cargo:rerun-if-env-changed=LOCALUP_VERSION");
 }
