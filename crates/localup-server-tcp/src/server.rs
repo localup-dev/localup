@@ -411,10 +411,11 @@ impl TcpServer {
                 let response_line = format!("HTTP/1.1 {} {}\r\n", status, status_text);
                 client_socket.write_all(response_line.as_bytes()).await?;
 
-                // Forward response headers (skip Content-Length, we'll add our own)
+                // Forward response headers (skip Content-Length and Transfer-Encoding, we'll add our own Content-Length)
                 for (name, value) in resp_headers {
-                    if name.to_lowercase() == "content-length" {
-                        continue; // Skip original Content-Length
+                    let name_lower = name.to_lowercase();
+                    if name_lower == "content-length" || name_lower == "transfer-encoding" {
+                        continue; // Skip - we'll add our own Content-Length
                     }
                     let header_line = format!("{}: {}\r\n", name, value);
                     client_socket.write_all(header_line.as_bytes()).await?;

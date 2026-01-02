@@ -1511,9 +1511,7 @@ impl TunnelConnection {
             }
         } else if is_chunked {
             // Chunked transfer encoding - read until connection closes or we see end marker
-            // For simplicity, we'll read the entire chunked response and pass it as-is
-            // The exit node will forward it with the same encoding
-            let mut body_data = response_buf[header_end_pos..].to_vec();
+            let mut chunked_data = response_buf[header_end_pos..].to_vec();
 
             // Keep reading until connection closes or end marker
             // Use a short timeout per read to avoid waiting unnecessarily after last chunk
@@ -1529,22 +1527,22 @@ impl TunnelConnection {
                         // Connection closed
                         debug!(
                             "Chunked response: connection closed after {} bytes",
-                            body_data.len()
+                            chunked_data.len()
                         );
                         break;
                     }
                     Ok(Ok(n)) => {
-                        body_data.extend_from_slice(&temp_buf[..n]);
+                        chunked_data.extend_from_slice(&temp_buf[..n]);
 
                         // Check for chunked encoding end marker
                         // Look for "\r\n0\r\n\r\n" or just "0\r\n\r\n" at the end
-                        if body_data.len() >= 5
-                            && (body_data.ends_with(b"0\r\n\r\n")
-                                || body_data.ends_with(b"\r\n0\r\n\r\n"))
+                        if chunked_data.len() >= 5
+                            && (chunked_data.ends_with(b"0\r\n\r\n")
+                                || chunked_data.ends_with(b"\r\n0\r\n\r\n"))
                         {
                             debug!(
                                 "Chunked response: found end marker after {} bytes",
-                                body_data.len()
+                                chunked_data.len()
                             );
                             break;
                         }
@@ -1557,12 +1555,21 @@ impl TunnelConnection {
                         // Timeout - assume response is complete (after 100ms of no data)
                         debug!(
                             "Chunked response: read timeout, assuming complete ({} bytes)",
-                            body_data.len()
+                            chunked_data.len()
                         );
                         break;
                     }
                 }
             }
+
+            // Decode chunked transfer encoding to get raw body
+            // This removes chunk markers (size\r\n...data...\r\n) and extracts the actual content
+            let body_data = Self::decode_chunked_body(&chunked_data);
+            debug!(
+                "Decoded chunked body: {} bytes -> {} bytes",
+                chunked_data.len(),
+                body_data.len()
+            );
 
             if body_data.is_empty() {
                 None
@@ -1633,6 +1640,53 @@ impl TunnelConnection {
             headers: resp_headers,
             body,
         }
+    }
+
+    /// Decode chunked transfer encoding body
+    /// Parses format: SIZE\r\n...DATA...\r\n...SIZE\r\n...DATA...\r\n0\r\n\r\n
+    fn decode_chunked_body(chunked_data: &[u8]) -> Vec<u8> {
+        let mut decoded = Vec::new();
+        let mut pos = 0;
+
+        while pos < chunked_data.len() {
+            // Find the chunk size line (ends with \r\n)
+            let size_end = match chunked_data[pos..].windows(2).position(|w| w == b"\r\n") {
+                Some(p) => pos + p,
+                None => break,
+            };
+
+            // Parse chunk size (hex)
+            let size_str = match std::str::from_utf8(&chunked_data[pos..size_end]) {
+                Ok(s) => s.split(';').next().unwrap_or("").trim(), // Handle chunk extensions
+                Err(_) => break,
+            };
+
+            let chunk_size = match usize::from_str_radix(size_str, 16) {
+                Ok(0) => break, // Final chunk
+                Ok(size) => size,
+                Err(_) => break,
+            };
+
+            // Move past the size line
+            pos = size_end + 2;
+
+            // Extract chunk data
+            if pos + chunk_size <= chunked_data.len() {
+                decoded.extend_from_slice(&chunked_data[pos..pos + chunk_size]);
+                pos += chunk_size;
+            } else {
+                // Incomplete chunk - take what we have
+                decoded.extend_from_slice(&chunked_data[pos..]);
+                break;
+            }
+
+            // Skip trailing \r\n after chunk data
+            if pos + 2 <= chunked_data.len() && &chunked_data[pos..pos + 2] == b"\r\n" {
+                pos += 2;
+            }
+        }
+
+        decoded
     }
 
     #[allow(dead_code)] // Legacy function - now using handle_tcp_stream

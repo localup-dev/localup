@@ -794,9 +794,10 @@ impl HttpsServer {
                 let response_line = format!("HTTP/1.1 {} {}\r\n", status, status_text);
                 tls_stream.write_all(response_line.as_bytes()).await?;
 
-                // Forward response headers (skip Content-Length, we'll add our own)
+                // Forward response headers (skip Content-Length and Transfer-Encoding, we'll add our own Content-Length)
                 for (name, value) in resp_headers {
-                    if name.to_lowercase() == "content-length" {
+                    let name_lower = name.to_lowercase();
+                    if name_lower == "content-length" || name_lower == "transfer-encoding" {
                         continue;
                     }
                     let header_line = format!("{}: {}\r\n", name, value);
@@ -805,6 +806,21 @@ impl HttpsServer {
 
                 // Write body with correct Content-Length
                 if let Some(ref body) = resp_body {
+                    // Debug: Log if there's a Content-Encoding header with mismatched length
+                    let original_content_length = resp_headers_clone
+                        .iter()
+                        .find(|(n, _)| n.to_lowercase() == "content-length")
+                        .and_then(|(_, v)| v.parse::<usize>().ok());
+                    if let Some(orig_len) = original_content_length {
+                        if orig_len != body.len() {
+                            warn!(
+                                "Content-Length mismatch! Original: {}, Actual body: {}",
+                                orig_len,
+                                body.len()
+                            );
+                        }
+                    }
+
                     let content_length = format!("Content-Length: {}\r\n", body.len());
                     tls_stream.write_all(content_length.as_bytes()).await?;
                     tls_stream.write_all(b"\r\n").await?;
