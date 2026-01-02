@@ -56,6 +56,14 @@ pub struct Model {
     /// Error message if provisioning failed
     #[sea_orm(column_type = "Text", nullable)]
     pub error_message: Option<String>,
+
+    /// Certificate in PEM format (stored directly in database)
+    #[sea_orm(column_type = "Text", nullable)]
+    pub cert_pem: Option<String>,
+
+    /// Private key in PEM format (stored directly in database)
+    #[sea_orm(column_type = "Text", nullable)]
+    pub key_pem: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -826,7 +826,11 @@ pub async fn upload_custom_domain(
     // TODO: Extract expiration from certificate
     let expires_at = Utc::now() + chrono::Duration::days(90);
 
-    // Save to database
+    // Convert PEM content to strings for database storage
+    let cert_pem_str = String::from_utf8_lossy(&cert_pem).to_string();
+    let key_pem_str = String::from_utf8_lossy(&key_pem).to_string();
+
+    // Save to database (including PEM content for direct loading)
     let domain_model = custom_domain::ActiveModel {
         domain: Set(req.domain.clone()),
         id: Set(Some(uuid::Uuid::new_v4().to_string())),
@@ -837,6 +841,8 @@ pub async fn upload_custom_domain(
         expires_at: Set(Some(expires_at)),
         auto_renew: Set(req.auto_renew),
         error_message: Set(None),
+        cert_pem: Set(Some(cert_pem_str)),
+        key_pem: Set(Some(key_pem_str)),
     };
 
     domain_model.insert(&state.db).await.map_err(|e| {
@@ -1209,6 +1215,8 @@ pub async fn initiate_challenge(
         expires_at: Set(Some(challenge_state.expires_at)),
         auto_renew: Set(true),
         error_message: Set(None),
+        cert_pem: Set(None),
+        key_pem: Set(None),
     };
 
     use sea_orm::EntityTrait;
@@ -1332,10 +1340,33 @@ pub async fn complete_challenge(
     let key_path = format!("{}/{}.key", cert_dir, req.domain);
     drop(acme_client_read);
 
+    // Read certificate content from files for database storage
+    let cert_pem_str = tokio::fs::read_to_string(&cert_path).await.map_err(|e| {
+        error!("Failed to read certificate file: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to read certificate: {}", e),
+                code: Some("CERT_READ_FAILED".to_string()),
+            }),
+        )
+    })?;
+
+    let key_pem_str = tokio::fs::read_to_string(&key_path).await.map_err(|e| {
+        error!("Failed to read key file: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("Failed to read key: {}", e),
+                code: Some("KEY_READ_FAILED".to_string()),
+            }),
+        )
+    })?;
+
     // Calculate expiration (Let's Encrypt certs are valid for 90 days)
     let expires_at = Utc::now() + chrono::Duration::days(90);
 
-    // Save to database (keep existing id if updating)
+    // Save to database (keep existing id if updating, include PEM content)
     use sea_orm::ActiveValue::NotSet;
     let domain_model = custom_domain::ActiveModel {
         domain: Set(req.domain.clone()),
@@ -1347,6 +1378,8 @@ pub async fn complete_challenge(
         expires_at: Set(Some(expires_at)),
         auto_renew: Set(true),
         error_message: Set(None),
+        cert_pem: Set(Some(cert_pem_str)),
+        key_pem: Set(Some(key_pem_str)),
     };
 
     // Try to update if exists, otherwise insert
@@ -1362,6 +1395,8 @@ pub async fn complete_challenge(
                     custom_domain::Column::ExpiresAt,
                     custom_domain::Column::AutoRenew,
                     custom_domain::Column::ErrorMessage,
+                    custom_domain::Column::CertPem,
+                    custom_domain::Column::KeyPem,
                 ])
                 .to_owned(),
         )
@@ -1802,6 +1837,8 @@ pub async fn cancel_challenge(
         expires_at: NotSet,
         auto_renew: NotSet,
         error_message: Set(Some("Challenge cancelled by user".to_string())),
+        cert_pem: NotSet,
+        key_pem: NotSet,
     };
     domain_model.update(&state.db).await.ok();
 

@@ -7,6 +7,7 @@ mod m20250118_000001_make_tcp_fields_nullable;
 mod m20251216_000001_create_domain_challenges;
 mod m20251216_000002_make_cert_paths_nullable;
 mod m20251216_000003_add_domain_id;
+mod m20260102_000001_add_cert_pem_columns;
 
 pub struct Migrator;
 
@@ -19,6 +20,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251216_000001_create_domain_challenges::Migration),
             Box::new(m20251216_000002_make_cert_paths_nullable::Migration),
             Box::new(m20251216_000003_add_domain_id::Migration),
+            Box::new(m20260102_000001_add_cert_pem_columns::Migration),
         ]
     }
 }

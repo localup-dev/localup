@@ -185,6 +185,19 @@ impl HttpsServer {
             .map_err(|e| HttpsServerError::TlsError(format!("Failed to parse certs: {}", e)))
     }
 
+    /// Load TLS certificates from PEM string content
+    fn load_certs_from_pem(
+        pem_content: &str,
+    ) -> Result<Vec<CertificateDer<'static>>, HttpsServerError> {
+        let mut reader = BufReader::new(pem_content.as_bytes());
+
+        rustls_pemfile::certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                HttpsServerError::TlsError(format!("Failed to parse certs from PEM: {}", e))
+            })
+    }
+
     /// Load private key from PEM file
     fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, HttpsServerError> {
         let file = File::open(path)
@@ -196,7 +209,24 @@ impl HttpsServer {
             .ok_or_else(|| HttpsServerError::TlsError("No private key found".to_string()))
     }
 
+    /// Load private key from PEM string content
+    fn load_private_key_from_pem(
+        pem_content: &str,
+    ) -> Result<PrivateKeyDer<'static>, HttpsServerError> {
+        let mut reader = BufReader::new(pem_content.as_bytes());
+
+        rustls_pemfile::private_key(&mut reader)
+            .map_err(|e| {
+                HttpsServerError::TlsError(format!("Failed to parse key from PEM: {}", e))
+            })?
+            .ok_or_else(|| {
+                HttpsServerError::TlsError("No private key found in PEM content".to_string())
+            })
+    }
+
     /// Load custom domain certificates from database
+    /// Prefers loading from cert_pem/key_pem content stored directly in database,
+    /// falls back to cert_path/key_path filesystem loading if content not available
     async fn load_custom_domain_certs(
         db: &DatabaseConnection,
         resolver: &Arc<CustomCertResolver>,
@@ -215,25 +245,58 @@ impl HttpsServer {
         let mut loaded_count = 0;
 
         for domain in domains {
-            // Skip if cert or key path is missing
+            // Try loading from database content first (preferred)
+            if let (Some(cert_pem), Some(key_pem)) = (&domain.cert_pem, &domain.key_pem) {
+                match Self::load_domain_cert_from_pem(cert_pem, key_pem) {
+                    Ok(cert_key) => {
+                        info!(
+                            "Loaded certificate for domain {} from database content",
+                            domain.domain
+                        );
+                        resolver
+                            .add_custom_cert(domain.domain.clone(), Arc::new(cert_key))
+                            .await;
+                        loaded_count += 1;
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to load certificate for domain {} from database content: {}, trying file path",
+                            domain.domain, e
+                        );
+                    }
+                }
+            }
+
+            // Fall back to loading from file paths
             let cert_path = match &domain.cert_path {
                 Some(path) => path,
                 None => {
-                    warn!("Domain {} has no cert_path, skipping", domain.domain);
+                    warn!(
+                        "Domain {} has no cert_pem or cert_path, skipping",
+                        domain.domain
+                    );
                     continue;
                 }
             };
             let key_path = match &domain.key_path {
                 Some(path) => path,
                 None => {
-                    warn!("Domain {} has no key_path, skipping", domain.domain);
+                    warn!(
+                        "Domain {} has no key_pem or key_path, skipping",
+                        domain.domain
+                    );
                     continue;
                 }
             };
 
-            // Load certificate and key
+            // Load certificate and key from filesystem
             match Self::load_domain_cert(cert_path, key_path) {
                 Ok(cert_key) => {
+                    info!(
+                        "Loaded certificate for domain {} from filesystem",
+                        domain.domain
+                    );
                     resolver
                         .add_custom_cert(domain.domain.clone(), Arc::new(cert_key))
                         .await;
@@ -259,6 +322,21 @@ impl HttpsServer {
     ) -> Result<CertifiedKey, HttpsServerError> {
         let certs = Self::load_certs(Path::new(cert_path))?;
         let key = Self::load_private_key(Path::new(key_path))?;
+
+        let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
+            .map_err(|e| HttpsServerError::TlsError(format!("Invalid key: {}", e)))?;
+
+        Ok(CertifiedKey::new(certs, signing_key))
+    }
+
+    /// Load a single domain's certificate and key from PEM content strings
+    /// This is used when loading certificates stored directly in the database.
+    pub fn load_domain_cert_from_pem(
+        cert_pem: &str,
+        key_pem: &str,
+    ) -> Result<CertifiedKey, HttpsServerError> {
+        let certs = Self::load_certs_from_pem(cert_pem)?;
+        let key = Self::load_private_key_from_pem(key_pem)?;
 
         let signing_key = rustls::crypto::ring::sign::any_supported_type(&key)
             .map_err(|e| HttpsServerError::TlsError(format!("Invalid key: {}", e)))?;
