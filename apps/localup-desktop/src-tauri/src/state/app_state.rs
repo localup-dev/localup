@@ -1,10 +1,20 @@
 //! Global application state
 
-use sea_orm::DatabaseConnection;
+use localup_lib::{
+    ExitNodeConfig, ProtocolConfig, TunnelClient, TunnelConfig as ClientTunnelConfig,
+};
+use sea_orm::{DatabaseConnection, EntityTrait};
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{oneshot, RwLock};
+use tokio::task::JoinHandle;
+use tracing::{error, info};
 
-use super::TunnelManager;
+use super::{TunnelManager, TunnelStatus};
+use crate::db::entities::{RelayServer, TunnelConfig};
+
+/// Handle for a running tunnel task
+pub type TunnelHandle = (JoinHandle<()>, oneshot::Sender<()>);
 
 /// Global application state shared across all Tauri commands
 #[derive(Clone)]
@@ -14,6 +24,9 @@ pub struct AppState {
 
     /// Tunnel manager for running tunnels
     pub tunnel_manager: Arc<RwLock<TunnelManager>>,
+
+    /// Handles for running tunnel tasks (for shutdown)
+    pub tunnel_handles: Arc<RwLock<HashMap<String, TunnelHandle>>>,
 }
 
 impl AppState {
@@ -22,6 +35,259 @@ impl AppState {
         Self {
             db: Arc::new(db),
             tunnel_manager: Arc::new(RwLock::new(TunnelManager::new())),
+            tunnel_handles: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Start all tunnels marked with auto_start=true
+    pub async fn start_auto_start_tunnels(&self) {
+        info!("Checking for auto-start tunnels...");
+
+        // Get all tunnels with auto_start=true
+        let tunnels = match TunnelConfig::find().all(self.db.as_ref()).await {
+            Ok(tunnels) => tunnels,
+            Err(e) => {
+                error!("Failed to load tunnels for auto-start: {}", e);
+                return;
+            }
+        };
+
+        let auto_start_tunnels: Vec<_> = tunnels
+            .into_iter()
+            .filter(|t| t.auto_start && t.enabled)
+            .collect();
+
+        if auto_start_tunnels.is_empty() {
+            info!("No auto-start tunnels configured");
+            return;
+        }
+
+        info!(
+            "Found {} auto-start tunnel(s), starting...",
+            auto_start_tunnels.len()
+        );
+
+        // Get all relays for lookup
+        let relays: HashMap<String, _> = match RelayServer::find().all(self.db.as_ref()).await {
+            Ok(relays) => relays.into_iter().map(|r| (r.id.clone(), r)).collect(),
+            Err(e) => {
+                error!("Failed to load relays for auto-start: {}", e);
+                return;
+            }
+        };
+
+        for tunnel in auto_start_tunnels {
+            let relay = match relays.get(&tunnel.relay_server_id) {
+                Some(r) => r,
+                None => {
+                    error!(
+                        "Relay {} not found for tunnel {}",
+                        tunnel.relay_server_id, tunnel.name
+                    );
+                    continue;
+                }
+            };
+
+            info!("Auto-starting tunnel: {}", tunnel.name);
+
+            // Build protocol config
+            let protocol_config = match build_protocol_config(&tunnel) {
+                Ok(p) => p,
+                Err(e) => {
+                    error!("Failed to build protocol config for {}: {}", tunnel.name, e);
+                    continue;
+                }
+            };
+
+            let client_config = ClientTunnelConfig {
+                local_host: tunnel.local_host.clone(),
+                protocols: vec![protocol_config],
+                auth_token: relay.jwt_token.clone().unwrap_or_default(),
+                exit_node: ExitNodeConfig::Custom(relay.address.clone()),
+                ..Default::default()
+            };
+
+            // Update status to connecting
+            {
+                let mut manager = self.tunnel_manager.write().await;
+                manager.update_status(&tunnel.id, TunnelStatus::Connecting, None, None, None);
+            }
+
+            // Spawn tunnel task
+            let tunnel_manager = self.tunnel_manager.clone();
+            let tunnel_handles = self.tunnel_handles.clone();
+            let config_id = tunnel.id.clone();
+
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+            let handle = tokio::spawn(async move {
+                run_tunnel(
+                    config_id.clone(),
+                    client_config,
+                    tunnel_manager,
+                    shutdown_rx,
+                )
+                .await;
+            });
+
+            // Store handle for later shutdown
+            {
+                let mut handles = tunnel_handles.write().await;
+                handles.insert(tunnel.id.clone(), (handle, shutdown_tx));
+            }
+        }
+    }
+}
+
+/// Build protocol config from database model
+pub fn build_protocol_config(
+    config: &crate::db::entities::tunnel_config::Model,
+) -> Result<ProtocolConfig, String> {
+    let local_port = config.local_port as u16;
+
+    match config.protocol.as_str() {
+        "http" => Ok(ProtocolConfig::Http {
+            local_port,
+            subdomain: config.subdomain.clone(),
+            custom_domain: config.custom_domain.clone(),
+        }),
+        "https" => Ok(ProtocolConfig::Https {
+            local_port,
+            subdomain: config.subdomain.clone(),
+            custom_domain: config.custom_domain.clone(),
+        }),
+        "tcp" => Ok(ProtocolConfig::Tcp {
+            local_port,
+            remote_port: None,
+        }),
+        "tls" => Ok(ProtocolConfig::Tls {
+            local_port,
+            sni_hostname: config.custom_domain.clone(),
+        }),
+        other => Err(format!("Unknown protocol: {}", other)),
+    }
+}
+
+/// Run a tunnel with reconnection logic
+pub async fn run_tunnel(
+    config_id: String,
+    config: ClientTunnelConfig,
+    tunnel_manager: Arc<RwLock<TunnelManager>>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) {
+    let mut reconnect_attempt = 0u32;
+
+    loop {
+        // Calculate backoff delay
+        let backoff_seconds = if reconnect_attempt == 0 {
+            0
+        } else {
+            std::cmp::min(2u64.pow(reconnect_attempt - 1), 30)
+        };
+
+        if backoff_seconds > 0 {
+            info!(
+                "[{}] Waiting {} seconds before reconnecting...",
+                config_id, backoff_seconds
+            );
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(backoff_seconds)).await;
+        }
+
+        // Check for shutdown
+        if shutdown_rx.try_recv().is_ok() {
+            info!("[{}] Tunnel stopped by request", config_id);
+            let mut manager = tunnel_manager.write().await;
+            manager.update_status(&config_id, TunnelStatus::Disconnected, None, None, None);
+            break;
+        }
+
+        info!(
+            "[{}] Connecting... (attempt {})",
+            config_id,
+            reconnect_attempt + 1
+        );
+
+        match TunnelClient::connect(config.clone()).await {
+            Ok(client) => {
+                reconnect_attempt = 0;
+
+                info!("[{}] Connected successfully!", config_id);
+
+                let public_url = client.public_url().map(|s| s.to_string());
+
+                if let Some(url) = &public_url {
+                    info!("[{}] Public URL: {}", config_id, url);
+                }
+
+                // Update status to connected
+                {
+                    let mut manager = tunnel_manager.write().await;
+                    manager.update_status(
+                        &config_id,
+                        TunnelStatus::Connected,
+                        public_url.clone(),
+                        None,
+                        None,
+                    );
+                }
+
+                // Wait for tunnel to close or shutdown signal
+                tokio::select! {
+                    result = client.wait() => {
+                        match result {
+                            Ok(_) => {
+                                info!("[{}] Tunnel closed gracefully", config_id);
+                            }
+                            Err(e) => {
+                                error!("[{}] Tunnel error: {}", config_id, e);
+                            }
+                        }
+                    }
+                    _ = &mut shutdown_rx => {
+                        info!("[{}] Shutdown requested", config_id);
+                        let mut manager = tunnel_manager.write().await;
+                        manager.update_status(&config_id, TunnelStatus::Disconnected, None, None, None);
+                        break;
+                    }
+                }
+
+                info!(
+                    "[{}] Connection lost, attempting to reconnect...",
+                    config_id
+                );
+            }
+            Err(e) => {
+                error!("[{}] Failed to connect: {}", config_id, e);
+
+                // Update status to error
+                {
+                    let mut manager = tunnel_manager.write().await;
+                    manager.update_status(
+                        &config_id,
+                        TunnelStatus::Error,
+                        None,
+                        None,
+                        Some(e.to_string()),
+                    );
+                }
+
+                // Check if non-recoverable
+                if e.is_non_recoverable() {
+                    error!("[{}] Non-recoverable error, stopping tunnel", config_id);
+                    break;
+                }
+
+                reconnect_attempt += 1;
+
+                // Check for shutdown
+                if shutdown_rx.try_recv().is_ok() {
+                    info!("[{}] Tunnel stopped by request", config_id);
+                    let mut manager = tunnel_manager.write().await;
+                    manager.update_status(&config_id, TunnelStatus::Disconnected, None, None, None);
+                    break;
+                }
+            }
         }
     }
 }

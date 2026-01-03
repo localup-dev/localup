@@ -33,6 +33,13 @@ pub struct TcpServerConfig {
     pub bind_addr: SocketAddr,
 }
 
+/// Captured response data from transparent proxy
+struct ResponseCapture {
+    status: Option<u16>,
+    headers: Option<Vec<(String, String)>>,
+    body: Option<Vec<u8>>,
+}
+
 impl Default for TcpServerConfig {
     fn default() -> Self {
         Self {
@@ -334,12 +341,6 @@ impl TcpServer {
             None
         };
 
-        // Clone request data for database capture before moving
-        let method_clone = method.clone();
-        let uri_clone = uri.clone();
-        let headers_clone = headers.clone();
-        let body_clone = body.clone();
-
         // Open a new QUIC stream for this HTTP request
         let stream = match connection.open_stream().await {
             Ok(s) => s,
@@ -353,155 +354,69 @@ impl TcpServer {
         };
 
         // Split stream for bidirectional communication without mutexes
-        let (mut quic_send, mut quic_recv) = stream.split();
+        let (mut quic_send, quic_recv) = stream.split();
 
-        // Send HTTP request through tunnel
-        let http_request = TunnelMessage::HttpRequest {
+        // Use transparent streaming - send raw HTTP request bytes through tunnel
+        // This preserves all headers including Content-Length and Transfer-Encoding
+        let connect_msg = TunnelMessage::HttpStreamConnect {
             stream_id,
-            method,
-            uri,
-            headers,
-            body,
+            host: localup_id.to_string(),
+            initial_data: request_bytes.to_vec(),
         };
 
-        if let Err(e) = quic_send.send_message(&http_request).await {
-            error!("Failed to send request to tunnel: {}", e);
-            let response =
-                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 23\r\n\r\nTunnel send error\n";
+        if let Err(e) = quic_send.send_message(&connect_msg).await {
+            error!("Failed to send stream connect: {}", e);
+            let response = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 12\r\n\r\nTunnel error";
             client_socket.write_all(response).await?;
             return Ok(());
         }
 
-        debug!("HTTP request sent to tunnel client (stream {})", stream_id);
+        debug!(
+            "HTTP transparent stream initiated for tunnel {} (stream {})",
+            localup_id, stream_id
+        );
 
-        // Wait for response from tunnel (with timeout)
-        let response =
-            tokio::time::timeout(std::time::Duration::from_secs(30), quic_recv.recv_message())
-                .await;
+        // Bidirectional transparent streaming - passes bytes through unchanged
+        let response_capture =
+            Self::proxy_transparent_stream(client_socket, quic_send, quic_recv, stream_id).await?;
 
-        match response {
-            Ok(Ok(Some(TunnelMessage::HttpResponse {
-                stream_id: _,
-                status,
-                headers: resp_headers,
-                body: resp_body,
-            }))) => {
-                // Clone values for database capture before moving them
-                let resp_headers_clone = resp_headers.clone();
-                let resp_body_clone = resp_body.clone();
+        // Save to database (metrics capture)
+        if let Some(ref db_conn) = db {
+            let response_end = chrono::Utc::now();
+            let latency_ms = (response_end - request_start).num_milliseconds() as i32;
 
-                // Build HTTP response
-                let status_text = match status {
-                    200 => "OK",
-                    201 => "Created",
-                    204 => "No Content",
-                    301 => "Moved Permanently",
-                    302 => "Found",
-                    304 => "Not Modified",
-                    400 => "Bad Request",
-                    401 => "Unauthorized",
-                    403 => "Forbidden",
-                    404 => "Not Found",
-                    500 => "Internal Server Error",
-                    502 => "Bad Gateway",
-                    503 => "Service Unavailable",
-                    _ => "Unknown",
-                };
+            let captured_request = localup_relay_db::entities::captured_request::ActiveModel {
+                id: sea_orm::Set(request_id.clone()),
+                localup_id: sea_orm::Set(localup_id.to_string()),
+                method: sea_orm::Set(method.clone()),
+                path: sea_orm::Set(uri.clone()),
+                host: sea_orm::Set(Self::extract_host_from_request(request)),
+                headers: sea_orm::Set(serde_json::to_string(&headers).unwrap_or_default()),
+                body: sea_orm::Set(body.as_ref().map(|b| BASE64.encode(b))),
+                status: sea_orm::Set(response_capture.status.map(|s| s as i32)),
+                response_headers: sea_orm::Set(
+                    response_capture
+                        .headers
+                        .as_ref()
+                        .map(|h| serde_json::to_string(h).unwrap_or_default()),
+                ),
+                response_body: sea_orm::Set(
+                    response_capture.body.as_ref().map(|b| BASE64.encode(b)),
+                ),
+                created_at: sea_orm::Set(request_start),
+                responded_at: sea_orm::Set(Some(response_end)),
+                latency_ms: sea_orm::Set(Some(latency_ms)),
+            };
 
-                let response_line = format!("HTTP/1.1 {} {}\r\n", status, status_text);
-                client_socket.write_all(response_line.as_bytes()).await?;
-
-                // Forward response headers (skip Content-Length and Transfer-Encoding, we'll add our own Content-Length)
-                for (name, value) in resp_headers {
-                    let name_lower = name.to_lowercase();
-                    if name_lower == "content-length" || name_lower == "transfer-encoding" {
-                        continue; // Skip - we'll add our own Content-Length
-                    }
-                    let header_line = format!("{}: {}\r\n", name, value);
-                    client_socket.write_all(header_line.as_bytes()).await?;
-                }
-
-                // Write body with correct Content-Length
-                if let Some(body) = resp_body {
-                    let content_length = format!("Content-Length: {}\r\n", body.len());
-                    client_socket.write_all(content_length.as_bytes()).await?;
-                    client_socket.write_all(b"\r\n").await?;
-                    client_socket.write_all(&body).await?;
-                } else {
-                    client_socket
-                        .write_all(b"Content-Length: 0\r\n\r\n")
-                        .await?;
-                }
-
-                debug!(
-                    "Tunnel response forwarded to client: {} {}",
-                    status, status_text
-                );
-
-                // Capture request/response to database
-                if let Some(ref db_conn) = db {
-                    let response_end = chrono::Utc::now();
-                    let latency_ms = (response_end - request_start).num_milliseconds() as i32;
-
-                    let captured_request =
-                        localup_relay_db::entities::captured_request::ActiveModel {
-                            id: sea_orm::Set(request_id.clone()),
-                            localup_id: sea_orm::Set(localup_id.to_string()),
-                            method: sea_orm::Set(method_clone.clone()),
-                            path: sea_orm::Set(uri_clone.clone()),
-                            host: sea_orm::Set(Self::extract_host_from_request(request)),
-                            headers: sea_orm::Set(
-                                serde_json::to_string(&headers_clone).unwrap_or_default(),
-                            ),
-                            body: sea_orm::Set(body_clone.as_ref().map(|b| BASE64.encode(b))),
-                            status: sea_orm::Set(Some(status as i32)),
-                            response_headers: sea_orm::Set(Some(
-                                serde_json::to_string(&resp_headers_clone).unwrap_or_default(),
-                            )),
-                            response_body: sea_orm::Set(
-                                resp_body_clone.as_ref().map(|b| BASE64.encode(b)),
-                            ),
-                            created_at: sea_orm::Set(request_start),
-                            responded_at: sea_orm::Set(Some(response_end)),
-                            latency_ms: sea_orm::Set(Some(latency_ms)),
-                        };
-
-                    use sea_orm::EntityTrait;
-                    if let Err(e) = localup_relay_db::entities::prelude::CapturedRequest::insert(
-                        captured_request,
-                    )
+            use sea_orm::EntityTrait;
+            if let Err(e) =
+                localup_relay_db::entities::prelude::CapturedRequest::insert(captured_request)
                     .exec(db_conn)
                     .await
-                    {
-                        warn!("Failed to save captured request {}: {}", request_id, e);
-                    } else {
-                        debug!("Captured request {} to database", request_id);
-                    }
-                }
-            }
-            Ok(Ok(Some(msg))) => {
-                warn!("Unexpected message from tunnel: {:?}", msg);
-                let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 20\r\n\r\nUnexpected response\n";
-                client_socket.write_all(response).await?;
-            }
-            Ok(Ok(None)) => {
-                warn!("Tunnel stream closed before sending response");
-                let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 14\r\n\r\nTunnel closed\n";
-                client_socket.write_all(response).await?;
-            }
-            Ok(Err(e)) => {
-                warn!("Error reading from tunnel: {}", e);
-                let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 13\r\n\r\nTunnel error\n";
-                client_socket.write_all(response).await?;
-            }
-            Err(_) => {
-                warn!("Timeout waiting for tunnel response (stream {})", stream_id);
-                let response =
-                    b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 15\r\n\r\nTunnel timeout\n";
-                client_socket.write_all(response).await?;
+            {
+                warn!("Failed to save captured request {}: {}", request_id, e);
+            } else {
+                debug!("Captured request {} to database", request_id);
             }
         }
 
@@ -551,6 +466,146 @@ impl TcpServer {
             }
         }
         None
+    }
+
+    /// Bidirectional transparent streaming proxy with response capture
+    async fn proxy_transparent_stream(
+        mut client_socket: TcpStream,
+        mut quic_send: localup_transport_quic::QuicSendHalf,
+        mut quic_recv: localup_transport_quic::QuicRecvHalf,
+        stream_id: u32,
+    ) -> Result<ResponseCapture, TcpServerError> {
+        let mut client_buffer = vec![0u8; 16384];
+        let mut response_buffer = Vec::new();
+        let mut headers_parsed = false;
+        let mut status: Option<u16> = None;
+        let mut response_headers: Option<Vec<(String, String)>> = None;
+
+        loop {
+            tokio::select! {
+                // Client → Tunnel
+                result = client_socket.read(&mut client_buffer) => {
+                    match result {
+                        Ok(0) => {
+                            debug!("Client closed connection (stream {})", stream_id);
+                            let _ = quic_send.send_message(&TunnelMessage::HttpStreamClose { stream_id }).await;
+                            break;
+                        }
+                        Ok(n) => {
+                            debug!("Forwarding {} bytes from client to tunnel (stream {})", n, stream_id);
+                            let data_msg = TunnelMessage::HttpStreamData {
+                                stream_id,
+                                data: client_buffer[..n].to_vec(),
+                            };
+                            if let Err(e) = quic_send.send_message(&data_msg).await {
+                                warn!("Failed to send data to tunnel: {}", e);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Client read error (stream {}): {}", stream_id, e);
+                            let _ = quic_send.send_message(&TunnelMessage::HttpStreamClose { stream_id }).await;
+                            break;
+                        }
+                    }
+                }
+
+                // Tunnel → Client
+                result = quic_recv.recv_message() => {
+                    match result {
+                        Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
+                            debug!("Forwarding {} bytes from tunnel to client (stream {})", data.len(), stream_id);
+
+                            // Capture response data for database (limit to first 64KB)
+                            if response_buffer.len() < 65536 {
+                                let remaining = 65536 - response_buffer.len();
+                                let to_capture = data.len().min(remaining);
+                                response_buffer.extend_from_slice(&data[..to_capture]);
+                            }
+
+                            // Parse headers from first chunk if not already done
+                            if !headers_parsed {
+                                if let Ok(response_str) = std::str::from_utf8(&response_buffer) {
+                                    if let Some(header_end) = response_str.find("\r\n\r\n") {
+                                        let header_section = &response_str[..header_end];
+                                        let mut lines = header_section.lines();
+
+                                        // Parse status line
+                                        if let Some(status_line) = lines.next() {
+                                            let parts: Vec<&str> = status_line.split_whitespace().collect();
+                                            if parts.len() >= 2 {
+                                                status = parts[1].parse().ok();
+                                            }
+                                        }
+
+                                        // Parse headers
+                                        let mut hdrs = Vec::new();
+                                        for line in lines {
+                                            if let Some(colon_pos) = line.find(':') {
+                                                let name = line[..colon_pos].trim().to_string();
+                                                let value = line[colon_pos + 1..].trim().to_string();
+                                                hdrs.push((name, value));
+                                            }
+                                        }
+                                        response_headers = Some(hdrs);
+                                        headers_parsed = true;
+                                    }
+                                }
+                            }
+
+                            if let Err(e) = client_socket.write_all(&data).await {
+                                warn!("Failed to write to client: {}", e);
+                                break;
+                            }
+                            if let Err(e) = client_socket.flush().await {
+                                warn!("Failed to flush to client: {}", e);
+                                break;
+                            }
+                        }
+                        Ok(Some(TunnelMessage::HttpStreamClose { .. })) => {
+                            debug!("Tunnel closed stream {}", stream_id);
+                            break;
+                        }
+                        Ok(None) => {
+                            debug!("Tunnel stream ended (stream {})", stream_id);
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("Tunnel read error (stream {}): {}", stream_id, e);
+                            break;
+                        }
+                        _ => {
+                            warn!("Unexpected message type from tunnel (stream {})", stream_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!("Transparent stream proxy ended (stream {})", stream_id);
+        let _ = client_socket.shutdown().await;
+
+        // Extract body from response buffer
+        let body = if let Ok(response_str) = std::str::from_utf8(&response_buffer) {
+            if let Some(header_end) = response_str.find("\r\n\r\n") {
+                let body_start = header_end + 4;
+                if body_start < response_buffer.len() {
+                    Some(response_buffer[body_start..].to_vec())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(ResponseCapture {
+            status,
+            headers: response_headers,
+            body,
+        })
     }
 
     /// Look up an ACME HTTP-01 challenge from the database

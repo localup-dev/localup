@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { Toaster } from "@/components/ui/sonner";
 import { Layout } from "@/components/layout/Layout";
 import { Dashboard } from "@/pages/Dashboard";
 import { Tunnels } from "@/pages/Tunnels";
@@ -8,6 +9,7 @@ import { Settings } from "@/pages/Settings";
 function App() {
   return (
     <BrowserRouter>
+      <Toaster position="bottom-right" richColors />
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />

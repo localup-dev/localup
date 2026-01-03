@@ -5,6 +5,7 @@ use tauri::Manager;
 mod commands;
 mod db;
 mod state;
+mod tray;
 
 use state::AppState;
 
@@ -54,7 +55,21 @@ pub fn run() {
 
             // Create app state and manage it
             let app_state = AppState::new(db);
-            app.manage(app_state);
+            app.manage(app_state.clone());
+
+            // Setup system tray
+            let app_handle = app.handle().clone();
+            if let Err(e) = tray::setup_tray(&app_handle) {
+                tracing::error!("Failed to setup system tray: {}", e);
+            }
+
+            // Start auto-start tunnels in background
+            let app_handle_for_tunnels = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                app_state.start_auto_start_tunnels().await;
+                // Update tray after tunnels start
+                tray::update_tray_menu(&app_handle_for_tunnels).await;
+            });
 
             // Hide window on close (minimize to tray) instead of quitting
             let window = app.get_webview_window("main").unwrap();
@@ -73,13 +88,25 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_version,
+            // Tunnel commands
             commands::list_tunnels,
+            commands::get_tunnel,
+            commands::create_tunnel,
+            commands::update_tunnel,
+            commands::delete_tunnel,
+            commands::start_tunnel,
+            commands::stop_tunnel,
+            // Relay commands
             commands::list_relays,
             commands::get_relay,
             commands::add_relay,
             commands::update_relay,
             commands::delete_relay,
             commands::test_relay,
+            // Settings commands
+            commands::get_settings,
+            commands::update_setting,
+            commands::get_autostart_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
