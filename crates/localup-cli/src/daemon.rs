@@ -1,15 +1,18 @@
 //! Daemon mode for managing multiple tunnels
 //!
 //! Runs multiple tunnel connections concurrently and manages their lifecycle.
+//! Includes an IPC server for CLI communication.
 
 use anyhow::Result;
-use localup_client::TunnelClient;
+use localup_client::{ProtocolConfig, TunnelClient};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
+use crate::ipc::{IpcRequest, IpcResponse, IpcServer, TunnelStatusDisplay, TunnelStatusInfo};
 use crate::localup_store::{StoredTunnel, TunnelStore};
 
 /// Daemon status for a single tunnel
@@ -47,6 +50,12 @@ struct TunnelHandle {
     status: TunnelStatus,
     cancel_tx: mpsc::Sender<()>,
     task: JoinHandle<()>,
+    /// Protocol type for display
+    protocol: String,
+    /// Local port for display
+    local_port: u16,
+    /// When the tunnel connected (for uptime)
+    connected_at: Option<Instant>,
 }
 
 impl Daemon {
@@ -62,6 +71,28 @@ impl Daemon {
     /// Run the daemon
     pub async fn run(self, mut command_rx: mpsc::Receiver<DaemonCommand>) -> Result<()> {
         info!("🚀 Daemon starting...");
+
+        // Start IPC server
+        let ipc_server = match IpcServer::bind().await {
+            Ok(server) => {
+                info!("IPC server listening at {:?}", server.path());
+                Some(server)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to start IPC server: {}. Status queries will not work.",
+                    e
+                );
+                None
+            }
+        };
+
+        // Spawn IPC handler if server is available
+        if let Some(server) = ipc_server {
+            let tunnels_for_ipc = self.tunnels.clone();
+            let store_for_ipc = TunnelStore::new().ok();
+            tokio::spawn(Self::run_ipc_server(server, tunnels_for_ipc, store_for_ipc));
+        }
 
         // Load and start all enabled tunnels
         match self.store.list_enabled() {
@@ -123,6 +154,124 @@ impl Daemon {
         Ok(())
     }
 
+    /// Run the IPC server to handle CLI requests
+    async fn run_ipc_server(
+        server: IpcServer,
+        tunnels: Arc<RwLock<HashMap<String, TunnelHandle>>>,
+        store: Option<TunnelStore>,
+    ) {
+        loop {
+            match server.accept().await {
+                Ok(mut conn) => {
+                    let tunnels = tunnels.clone();
+                    let store_ref = store.as_ref();
+
+                    // Handle request
+                    let response = match conn.recv().await {
+                        Ok(request) => Self::handle_ipc_request(request, &tunnels, store_ref).await,
+                        Err(e) => {
+                            // Connection closed or error
+                            if !e.to_string().contains("Connection closed") {
+                                warn!("IPC recv error: {}", e);
+                            }
+                            continue;
+                        }
+                    };
+
+                    if let Err(e) = conn.send(&response).await {
+                        warn!("IPC send error: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("IPC accept error: {}", e);
+                    // Brief pause before retrying
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+
+    /// Handle an IPC request
+    async fn handle_ipc_request(
+        request: IpcRequest,
+        tunnels: &Arc<RwLock<HashMap<String, TunnelHandle>>>,
+        _store: Option<&TunnelStore>,
+    ) -> IpcResponse {
+        match request {
+            IpcRequest::Ping => IpcResponse::Pong,
+
+            IpcRequest::GetStatus => {
+                let tunnels = tunnels.read().await;
+                let mut status_map = HashMap::new();
+
+                for (name, handle) in tunnels.iter() {
+                    let (status, public_url, last_error) = match &handle.status {
+                        TunnelStatus::Starting => (TunnelStatusDisplay::Starting, None, None),
+                        TunnelStatus::Connected { public_url } => {
+                            (TunnelStatusDisplay::Connected, public_url.clone(), None)
+                        }
+                        TunnelStatus::Reconnecting { attempt } => (
+                            TunnelStatusDisplay::Reconnecting { attempt: *attempt },
+                            None,
+                            None,
+                        ),
+                        TunnelStatus::Failed { error } => {
+                            (TunnelStatusDisplay::Failed, None, Some(error.clone()))
+                        }
+                        TunnelStatus::Stopped => (TunnelStatusDisplay::Stopped, None, None),
+                    };
+
+                    let uptime_seconds = handle.connected_at.map(|t| t.elapsed().as_secs());
+
+                    status_map.insert(
+                        name.clone(),
+                        TunnelStatusInfo {
+                            name: name.clone(),
+                            protocol: handle.protocol.clone(),
+                            local_port: handle.local_port,
+                            public_url,
+                            status,
+                            uptime_seconds,
+                            last_error,
+                        },
+                    );
+                }
+
+                IpcResponse::Status {
+                    tunnels: status_map,
+                }
+            }
+
+            IpcRequest::StartTunnel { name } => {
+                // Note: Actually starting requires access to the daemon command channel
+                // For now, return an error suggesting to use daemon commands
+                IpcResponse::Error {
+                    message: format!(
+                        "Starting tunnel '{}' via IPC not yet implemented. Use 'localup daemon start' instead.",
+                        name
+                    ),
+                }
+            }
+
+            IpcRequest::StopTunnel { name } => {
+                // Similar limitation
+                IpcResponse::Error {
+                    message: format!(
+                        "Stopping tunnel '{}' via IPC not yet implemented. Use 'localup daemon stop' instead.",
+                        name
+                    ),
+                }
+            }
+
+            IpcRequest::Reload => {
+                // Would need access to daemon command channel
+                IpcResponse::Error {
+                    message: "Reload via IPC not yet implemented.".to_string(),
+                }
+            }
+        }
+    }
+
     /// Start a tunnel
     async fn start_tunnel(&self, stored_tunnel: StoredTunnel) -> Result<()> {
         let name = stored_tunnel.name.clone();
@@ -136,6 +285,19 @@ impl Daemon {
             }
         }
 
+        // Extract protocol and port for status display
+        let (protocol, local_port) = stored_tunnel
+            .config
+            .protocols
+            .first()
+            .map(|p| match p {
+                ProtocolConfig::Http { local_port, .. } => ("http".to_string(), *local_port),
+                ProtocolConfig::Https { local_port, .. } => ("https".to_string(), *local_port),
+                ProtocolConfig::Tcp { local_port, .. } => ("tcp".to_string(), *local_port),
+                ProtocolConfig::Tls { local_port, .. } => ("tls".to_string(), *local_port),
+            })
+            .unwrap_or(("unknown".to_string(), 0));
+
         let (cancel_tx, cancel_rx) = mpsc::channel::<()>(1);
 
         // Update status to Starting
@@ -148,6 +310,9 @@ impl Daemon {
                     status: TunnelStatus::Starting,
                     cancel_tx: cancel_tx.clone(),
                     task: tokio::spawn(async {}), // Placeholder, will be replaced
+                    protocol,
+                    local_port,
+                    connected_at: None,
                 },
             );
         }
@@ -370,6 +535,13 @@ impl Daemon {
     ) {
         let mut tunnels = tunnels.write().await;
         if let Some(handle) = tunnels.get_mut(name) {
+            // Track connected_at for uptime calculation
+            if matches!(status, TunnelStatus::Connected { .. }) {
+                handle.connected_at = Some(Instant::now());
+            } else if !matches!(status, TunnelStatus::Reconnecting { .. }) {
+                // Reset connected_at when not connected or reconnecting
+                handle.connected_at = None;
+            }
             handle.status = status;
         }
     }

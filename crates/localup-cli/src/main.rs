@@ -312,6 +312,18 @@ enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Show status of running tunnels (alias for 'daemon status')
+    Status,
+    /// Initialize a new .localup.yml config file in the current directory
+    Init,
+    /// Start tunnels from .localup.yml config file
+    Up {
+        /// Specific tunnel names to start (all enabled if omitted)
+        #[arg(short, long)]
+        tunnels: Vec<String>,
+    },
+    /// Stop tunnels from .localup.yml config file
+    Down,
 }
 
 #[derive(Subcommand, Debug)]
@@ -755,6 +767,10 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Commands::Config { ref command }) => handle_config_command(command).await,
+        Some(Commands::Status) => handle_status_command().await,
+        Some(Commands::Init) => handle_init_command().await,
+        Some(Commands::Up { tunnels }) => handle_up_command(tunnels).await,
+        Some(Commands::Down) => handle_down_command().await,
         None => {
             // Standalone mode - run a single tunnel
             run_standalone(cli).await
@@ -785,9 +801,41 @@ async fn handle_daemon_command(command: DaemonCommands) -> Result<()> {
             Ok(())
         }
         DaemonCommands::Status => {
-            // TODO: Implement IPC to query running daemon
-            println!("Daemon status: Not implemented yet");
-            println!("Use 'localup service status' to check if service is running");
+            use localup_cli::ipc::{print_status_table, IpcClient, IpcRequest, IpcResponse};
+
+            match IpcClient::connect().await {
+                Ok(mut client) => match client.request(&IpcRequest::GetStatus).await {
+                    Ok(IpcResponse::Status { tunnels }) => {
+                        if tunnels.is_empty() {
+                            println!("Daemon is running but no tunnels are active.");
+                            println!(
+                                    "Use 'localup add' to add a tunnel, then 'localup enable' to start it."
+                                );
+                        } else {
+                            print_status_table(&tunnels);
+                        }
+                    }
+                    Ok(IpcResponse::Error { message }) => {
+                        eprintln!("Error from daemon: {}", message);
+                    }
+                    Ok(_) => {
+                        eprintln!("Unexpected response from daemon");
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to get status: {}", e);
+                    }
+                },
+                Err(_) => {
+                    println!("Daemon is not running.");
+                    println!();
+                    println!("To start the daemon:");
+                    println!("  localup daemon start");
+                    println!();
+                    println!("Or install as a system service:");
+                    println!("  localup service install");
+                    println!("  localup service start");
+                }
+            }
             Ok(())
         }
     }
@@ -3204,4 +3252,158 @@ fn parse_port_range(range_str: &str) -> Result<(u16, u16)> {
     }
 
     Ok((start, end))
+}
+
+// ============================================================================
+// Project config commands (init, up, down, status)
+// ============================================================================
+
+/// Handle `localup status` command - show running tunnel status
+async fn handle_status_command() -> Result<()> {
+    use localup_cli::ipc::{print_status_table, IpcClient, IpcRequest, IpcResponse};
+
+    match IpcClient::connect().await {
+        Ok(mut client) => match client.request(&IpcRequest::GetStatus).await {
+            Ok(IpcResponse::Status { tunnels }) => {
+                if tunnels.is_empty() {
+                    println!("Daemon is running but no tunnels are active.");
+                    println!(
+                        "Use 'localup add' to add a tunnel, then 'localup enable' to start it."
+                    );
+                    println!("Or use 'localup up' with a .localup.yml config file.");
+                } else {
+                    print_status_table(&tunnels);
+                }
+                Ok(())
+            }
+            Ok(IpcResponse::Error { message }) => {
+                eprintln!("Error from daemon: {}", message);
+                Ok(())
+            }
+            Ok(_) => {
+                eprintln!("Unexpected response from daemon");
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("Failed to get status: {}", e);
+                Ok(())
+            }
+        },
+        Err(_) => {
+            println!("Daemon is not running.");
+            println!();
+            println!("To start the daemon:");
+            println!("  localup daemon start");
+            println!();
+            println!("Or install as a system service:");
+            println!("  localup service install");
+            println!("  localup service start");
+            Ok(())
+        }
+    }
+}
+
+/// Handle `localup init` command - create .localup.yml template
+async fn handle_init_command() -> Result<()> {
+    use localup_cli::project_config::ProjectConfig;
+
+    let config_path = std::env::current_dir()?.join(".localup.yml");
+
+    if config_path.exists() {
+        eprintln!("❌ .localup.yml already exists in this directory.");
+        eprintln!("   Remove it first or edit it manually.");
+        std::process::exit(1);
+    }
+
+    let template = ProjectConfig::template();
+    std::fs::write(&config_path, template)?;
+
+    println!("✅ Created .localup.yml");
+    println!();
+    println!("Edit the file to configure your tunnels, then run:");
+    println!("  localup up");
+    Ok(())
+}
+
+/// Handle `localup up` command - start tunnels from .localup.yml
+async fn handle_up_command(tunnel_names: Vec<String>) -> Result<()> {
+    use localup_cli::project_config::ProjectConfig;
+
+    // Discover config file
+    let (config_path, config) = match ProjectConfig::discover()? {
+        Some((path, config)) => (path, config),
+        None => {
+            eprintln!("❌ No .localup.yml found in current directory or parents.");
+            eprintln!();
+            eprintln!("Create one with:");
+            eprintln!("  localup init");
+            std::process::exit(1);
+        }
+    };
+
+    info!("Using config: {:?}", config_path);
+
+    // Filter tunnels
+    let tunnels_to_start: Vec<_> = if tunnel_names.is_empty() {
+        config.enabled_tunnels().into_iter().collect()
+    } else {
+        tunnel_names
+            .iter()
+            .filter_map(|name| config.get_tunnel(name))
+            .collect()
+    };
+
+    if tunnels_to_start.is_empty() {
+        if tunnel_names.is_empty() {
+            eprintln!("❌ No enabled tunnels in config file.");
+            eprintln!("   Set 'enabled: true' on tunnels you want to start.");
+        } else {
+            eprintln!("❌ No matching tunnels found: {:?}", tunnel_names);
+            eprintln!("   Available tunnels:");
+            for t in &config.tunnels {
+                eprintln!("     - {}", t.name);
+            }
+        }
+        std::process::exit(1);
+    }
+
+    println!("Starting {} tunnel(s)...", tunnels_to_start.len());
+
+    // Convert to TunnelConfig and start
+    for project_tunnel in tunnels_to_start {
+        let tunnel_config = project_tunnel.to_tunnel_config(&config.defaults)?;
+
+        println!("  {} ({})...", project_tunnel.name, project_tunnel.protocol);
+
+        match TunnelClient::connect(tunnel_config).await {
+            Ok(client) => {
+                if let Some(url) = client.public_url() {
+                    println!("  ✅ {} → {}", project_tunnel.name, url);
+                } else {
+                    println!("  ✅ {} connected", project_tunnel.name);
+                }
+
+                // Keep the client running (in a real implementation, we'd track these)
+                // For now, wait on the first one
+                client.wait().await?;
+            }
+            Err(e) => {
+                eprintln!("  ❌ {} failed: {}", project_tunnel.name, e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Handle `localup down` command - stop tunnels
+async fn handle_down_command() -> Result<()> {
+    // For now, this just tells the user how to stop
+    // A full implementation would track running tunnels and stop them
+    println!("To stop running tunnels:");
+    println!();
+    println!("  If running in foreground: Press Ctrl+C");
+    println!("  If running as daemon: localup daemon stop");
+    println!("  If running as service: localup service stop");
+    Ok(())
 }

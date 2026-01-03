@@ -288,3 +288,310 @@ async fn test_daemon_concurrent_status_queries() {
     command_tx.send(DaemonCommand::Shutdown).await.unwrap();
     let _ = timeout(Duration::from_secs(2), daemon_handle).await;
 }
+
+// ============================================================================
+// IPC Integration Tests
+// ============================================================================
+
+mod ipc_tests {
+    use localup_cli::ipc::{
+        format_duration, IpcClient, IpcRequest, IpcResponse, IpcServer, TunnelStatusDisplay,
+        TunnelStatusInfo,
+    };
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_ipc_server_bind_and_accept() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("test.sock");
+
+        // Bind server
+        let server = IpcServer::bind_to(&socket_path).await.unwrap();
+        assert!(socket_path.exists());
+
+        // Server should be listening
+        let server_handle = tokio::spawn(async move {
+            let mut conn = server.accept().await.unwrap();
+            let req = conn.recv().await.unwrap();
+            assert_eq!(req, IpcRequest::Ping);
+            conn.send(&IpcResponse::Pong).await.unwrap();
+        });
+
+        // Connect client and ping
+        let mut client = IpcClient::connect_to(&socket_path).await.unwrap();
+        let response = client.request(&IpcRequest::Ping).await.unwrap();
+        assert_eq!(response, IpcResponse::Pong);
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ipc_get_status_with_tunnels() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("status.sock");
+
+        let server = IpcServer::bind_to(&socket_path).await.unwrap();
+
+        // Server responds with mock tunnel status
+        let server_handle = tokio::spawn(async move {
+            let mut conn = server.accept().await.unwrap();
+            let req = conn.recv().await.unwrap();
+
+            if let IpcRequest::GetStatus = req {
+                let mut tunnels = HashMap::new();
+                tunnels.insert(
+                    "api".to_string(),
+                    TunnelStatusInfo {
+                        name: "api".to_string(),
+                        protocol: "http".to_string(),
+                        local_port: 3000,
+                        public_url: Some("https://api.example.com".to_string()),
+                        status: TunnelStatusDisplay::Connected,
+                        uptime_seconds: Some(3600),
+                        last_error: None,
+                    },
+                );
+                tunnels.insert(
+                    "db".to_string(),
+                    TunnelStatusInfo {
+                        name: "db".to_string(),
+                        protocol: "tcp".to_string(),
+                        local_port: 5432,
+                        public_url: Some("tcp://example.com:15432".to_string()),
+                        status: TunnelStatusDisplay::Reconnecting { attempt: 2 },
+                        uptime_seconds: None,
+                        last_error: None,
+                    },
+                );
+                conn.send(&IpcResponse::Status { tunnels }).await.unwrap();
+            }
+        });
+
+        let mut client = IpcClient::connect_to(&socket_path).await.unwrap();
+        let response = client.request(&IpcRequest::GetStatus).await.unwrap();
+
+        if let IpcResponse::Status { tunnels } = response {
+            assert_eq!(tunnels.len(), 2);
+
+            let api = tunnels.get("api").unwrap();
+            assert_eq!(api.name, "api");
+            assert_eq!(api.protocol, "http");
+            assert_eq!(api.local_port, 3000);
+            assert_eq!(api.status, TunnelStatusDisplay::Connected);
+            assert_eq!(api.uptime_seconds, Some(3600));
+
+            let db = tunnels.get("db").unwrap();
+            assert_eq!(db.name, "db");
+            assert_eq!(db.protocol, "tcp");
+            assert_eq!(db.status, TunnelStatusDisplay::Reconnecting { attempt: 2 });
+        } else {
+            panic!("Expected Status response");
+        }
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ipc_error_response() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("error.sock");
+
+        let server = IpcServer::bind_to(&socket_path).await.unwrap();
+
+        let server_handle = tokio::spawn(async move {
+            let mut conn = server.accept().await.unwrap();
+            let _req = conn.recv().await.unwrap();
+            conn.send(&IpcResponse::Error {
+                message: "Not implemented".to_string(),
+            })
+            .await
+            .unwrap();
+        });
+
+        let mut client = IpcClient::connect_to(&socket_path).await.unwrap();
+        let response = client
+            .request(&IpcRequest::StartTunnel {
+                name: "test".to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response,
+            IpcResponse::Error {
+                message: "Not implemented".to_string()
+            }
+        );
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ipc_connection_refused_when_no_server() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("nonexistent.sock");
+
+        // No server running, connection should fail
+        let result = IpcClient::connect_to(&socket_path).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_ipc_server_prevents_duplicate_bind() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("dup.sock");
+
+        // First server binds successfully
+        let _server1 = IpcServer::bind_to(&socket_path).await.unwrap();
+
+        // Second server should fail (socket is in use)
+        let result = IpcServer::bind_to(&socket_path).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(
+            err.to_string().contains("already running"),
+            "Expected 'already running' error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ipc_socket_cleanup_on_drop() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("cleanup.sock");
+
+        {
+            let _server = IpcServer::bind_to(&socket_path).await.unwrap();
+            assert!(socket_path.exists());
+        }
+        // Server dropped, socket should be cleaned up
+        assert!(!socket_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_ipc_concurrent_clients() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("concurrent.sock");
+
+        let server = IpcServer::bind_to(&socket_path).await.unwrap();
+        let socket_path_clone = socket_path.clone();
+
+        // Server handles multiple sequential connections
+        let server_handle = tokio::spawn(async move {
+            for _ in 0..3 {
+                let mut conn = server.accept().await.unwrap();
+                let req = conn.recv().await.unwrap();
+                if let IpcRequest::Ping = req {
+                    conn.send(&IpcResponse::Pong).await.unwrap();
+                }
+            }
+        });
+
+        // Multiple clients connect sequentially
+        for i in 0..3 {
+            let mut client = IpcClient::connect_to(&socket_path_clone).await.unwrap();
+            let response = client.request(&IpcRequest::Ping).await.unwrap();
+            assert_eq!(response, IpcResponse::Pong, "Client {} should get Pong", i);
+        }
+
+        server_handle.await.unwrap();
+    }
+
+    #[test]
+    fn test_format_duration_various_values() {
+        // Seconds
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(1), "1s");
+        assert_eq!(format_duration(59), "59s");
+
+        // Minutes
+        assert_eq!(format_duration(60), "1m 0s");
+        assert_eq!(format_duration(61), "1m 1s");
+        assert_eq!(format_duration(120), "2m 0s");
+        assert_eq!(format_duration(3599), "59m 59s");
+
+        // Hours
+        assert_eq!(format_duration(3600), "1h 0m");
+        assert_eq!(format_duration(3660), "1h 1m");
+        assert_eq!(format_duration(7200), "2h 0m");
+        assert_eq!(format_duration(86400), "24h 0m"); // 1 day
+    }
+
+    #[test]
+    fn test_tunnel_status_display_all_variants() {
+        // Test Display trait for all variants
+        assert_eq!(TunnelStatusDisplay::Starting.to_string(), "◐ Starting");
+        assert_eq!(TunnelStatusDisplay::Connected.to_string(), "● Connected");
+        assert_eq!(
+            TunnelStatusDisplay::Reconnecting { attempt: 1 }.to_string(),
+            "⟳ Reconnecting (attempt 1)"
+        );
+        assert_eq!(
+            TunnelStatusDisplay::Reconnecting { attempt: 5 }.to_string(),
+            "⟳ Reconnecting (attempt 5)"
+        );
+        assert_eq!(TunnelStatusDisplay::Failed.to_string(), "✗ Failed");
+        assert_eq!(TunnelStatusDisplay::Stopped.to_string(), "○ Stopped");
+    }
+
+    #[tokio::test]
+    async fn test_ipc_request_response_all_types() {
+        let temp_dir = TempDir::new().unwrap();
+        let socket_path = temp_dir.path().join("alltypes.sock");
+
+        let server = IpcServer::bind_to(&socket_path).await.unwrap();
+
+        // Test each request type
+        let requests = vec![
+            IpcRequest::Ping,
+            IpcRequest::GetStatus,
+            IpcRequest::StartTunnel {
+                name: "test".to_string(),
+            },
+            IpcRequest::StopTunnel {
+                name: "test".to_string(),
+            },
+            IpcRequest::Reload,
+        ];
+
+        let num_requests = requests.len();
+
+        let server_handle = tokio::spawn(async move {
+            for _ in 0..num_requests {
+                let mut conn = server.accept().await.unwrap();
+                let req = conn.recv().await.unwrap();
+                let response = match req {
+                    IpcRequest::Ping => IpcResponse::Pong,
+                    IpcRequest::GetStatus => IpcResponse::Status {
+                        tunnels: HashMap::new(),
+                    },
+                    IpcRequest::StartTunnel { .. } => IpcResponse::Ok {
+                        message: Some("Started".to_string()),
+                    },
+                    IpcRequest::StopTunnel { .. } => IpcResponse::Ok {
+                        message: Some("Stopped".to_string()),
+                    },
+                    IpcRequest::Reload => IpcResponse::Ok {
+                        message: Some("Reloaded".to_string()),
+                    },
+                };
+                conn.send(&response).await.unwrap();
+            }
+        });
+
+        for req in requests {
+            let mut client = IpcClient::connect_to(&socket_path).await.unwrap();
+            let response = client.request(&req).await.unwrap();
+            // Just verify we got a valid response
+            match response {
+                IpcResponse::Pong
+                | IpcResponse::Status { .. }
+                | IpcResponse::Ok { .. }
+                | IpcResponse::Error { .. } => {}
+            }
+        }
+
+        server_handle.await.unwrap();
+    }
+}
