@@ -608,9 +608,56 @@ fn parse_transport(s: &str) -> Result<TransportType, String> {
 #[derive(Subcommand, Debug, Clone)]
 enum DaemonCommands {
     /// Start daemon in foreground
-    Start,
-    /// Check daemon status
+    Start {
+        /// Path to .localup.yml config file (default: discovers from current dir)
+        #[arg(short, long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Stop running daemon (via IPC)
+    Stop,
+    /// Check daemon status (running tunnels)
     Status,
+    /// List all configured tunnels from .localup.yml
+    List,
+    /// Reload all tunnel configurations (via IPC)
+    Reload,
+    /// Start a specific tunnel by name (via IPC)
+    TunnelStart {
+        /// Tunnel name to start
+        name: String,
+    },
+    /// Stop a specific tunnel by name (via IPC)
+    TunnelStop {
+        /// Tunnel name to stop
+        name: String,
+    },
+    /// Reload a specific tunnel (stop + start with new config, via IPC)
+    TunnelReload {
+        /// Tunnel name to reload
+        name: String,
+    },
+    /// Add a new tunnel to .localup.yml
+    Add {
+        /// Tunnel name
+        name: String,
+        /// Local port to expose
+        #[arg(short, long)]
+        port: u16,
+        /// Protocol (http, https, tcp, tls)
+        #[arg(long, default_value = "https")]
+        protocol: String,
+        /// Subdomain for HTTP/HTTPS tunnels
+        #[arg(short, long)]
+        subdomain: Option<String>,
+        /// Custom domain for HTTP/HTTPS tunnels
+        #[arg(long = "custom-domain")]
+        custom_domain: Option<String>,
+    },
+    /// Remove a tunnel from .localup.yml
+    Remove {
+        /// Tunnel name to remove
+        name: String,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -780,7 +827,7 @@ async fn main() -> Result<()> {
 
 async fn handle_daemon_command(command: DaemonCommands) -> Result<()> {
     match command {
-        DaemonCommands::Start => {
+        DaemonCommands::Start { config } => {
             info!("Starting daemon...");
 
             let daemon = daemon::Daemon::new()?;
@@ -797,7 +844,8 @@ async fn handle_daemon_command(command: DaemonCommands) -> Result<()> {
                     .ok();
             });
 
-            daemon.run(command_rx).await?;
+            // Pass command_tx to IPC server for handling tunnel start/stop/reload
+            daemon.run(command_rx, Some(command_tx), config).await?;
             Ok(())
         }
         DaemonCommands::Status => {
@@ -836,6 +884,295 @@ async fn handle_daemon_command(command: DaemonCommands) -> Result<()> {
                     println!("  localup service start");
                 }
             }
+            Ok(())
+        }
+        DaemonCommands::Stop => {
+            use localup_cli::ipc::{IpcClient, IpcRequest, IpcResponse};
+
+            match IpcClient::connect().await {
+                Ok(mut client) => {
+                    // Send shutdown request
+                    match client.request(&IpcRequest::Ping).await {
+                        Ok(IpcResponse::Pong) => {
+                            // Daemon is running - Note: we don't have a Shutdown IPC request yet
+                            // For now, tell user to use Ctrl+C or kill
+                            println!("⚠️  Daemon is running. Use Ctrl+C in the daemon terminal to stop it.");
+                            println!(
+                                "    Or kill the daemon process: pkill -f 'localup daemon start'"
+                            );
+                        }
+                        _ => {
+                            println!("Failed to communicate with daemon");
+                        }
+                    }
+                }
+                Err(_) => {
+                    println!("Daemon is not running.");
+                }
+            }
+            Ok(())
+        }
+        DaemonCommands::List => {
+            use localup_cli::project_config::ProjectConfig;
+
+            // Try to discover and load project config
+            match ProjectConfig::discover() {
+                Ok(Some((path, config))) => {
+                    println!("📁 Config: {}", path.display());
+                    println!();
+
+                    if config.tunnels.is_empty() {
+                        println!("No tunnels configured.");
+                        return Ok(());
+                    }
+
+                    // Print table header
+                    println!(
+                        "{:<15} {:<10} {:<8} {:<20} {:<8}",
+                        "NAME", "PROTOCOL", "PORT", "SUBDOMAIN/DOMAIN", "ENABLED"
+                    );
+                    println!("{}", "-".repeat(70));
+
+                    for tunnel in &config.tunnels {
+                        let domain = tunnel
+                            .custom_domain
+                            .as_ref()
+                            .or(tunnel.subdomain.as_ref())
+                            .map(|s| s.as_str())
+                            .unwrap_or("-");
+
+                        let enabled = if tunnel.enabled { "✅" } else { "❌" };
+
+                        println!(
+                            "{:<15} {:<10} {:<8} {:<20} {:<8}",
+                            tunnel.name, tunnel.protocol, tunnel.port, domain, enabled
+                        );
+                    }
+                }
+                Ok(None) => {
+                    println!("❌ No .localup.yml found in current directory or parents.");
+                    println!();
+                    println!("Create one with: localup init");
+                }
+                Err(e) => {
+                    eprintln!("❌ Error loading config: {}", e);
+                }
+            }
+            Ok(())
+        }
+        DaemonCommands::Reload => {
+            use localup_cli::ipc::{IpcClient, IpcRequest, IpcResponse};
+
+            match IpcClient::connect().await {
+                Ok(mut client) => match client.request(&IpcRequest::Reload).await {
+                    Ok(IpcResponse::Ok { message }) => {
+                        println!(
+                            "✅ {}",
+                            message.unwrap_or_else(|| "Configuration reloaded".to_string())
+                        );
+                    }
+                    Ok(IpcResponse::Error { message }) => {
+                        eprintln!("❌ {}", message);
+                    }
+                    Ok(_) => {
+                        eprintln!("Unexpected response from daemon");
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to reload: {}", e);
+                    }
+                },
+                Err(_) => {
+                    println!("Daemon is not running.");
+                    println!("Start it with: localup daemon start");
+                }
+            }
+            Ok(())
+        }
+        DaemonCommands::TunnelStart { name } => {
+            use localup_cli::ipc::{IpcClient, IpcRequest, IpcResponse};
+
+            match IpcClient::connect().await {
+                Ok(mut client) => {
+                    match client
+                        .request(&IpcRequest::StartTunnel { name: name.clone() })
+                        .await
+                    {
+                        Ok(IpcResponse::Ok { message }) => {
+                            println!(
+                                "✅ {}",
+                                message.unwrap_or_else(|| format!("Tunnel '{}' started", name))
+                            );
+                        }
+                        Ok(IpcResponse::Error { message }) => {
+                            eprintln!("❌ {}", message);
+                        }
+                        Ok(_) => {
+                            eprintln!("Unexpected response from daemon");
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to start tunnel: {}", e);
+                        }
+                    }
+                }
+                Err(_) => {
+                    println!("Daemon is not running.");
+                    println!("Start it with: localup daemon start");
+                }
+            }
+            Ok(())
+        }
+        DaemonCommands::TunnelStop { name } => {
+            use localup_cli::ipc::{IpcClient, IpcRequest, IpcResponse};
+
+            match IpcClient::connect().await {
+                Ok(mut client) => {
+                    match client
+                        .request(&IpcRequest::StopTunnel { name: name.clone() })
+                        .await
+                    {
+                        Ok(IpcResponse::Ok { message }) => {
+                            println!(
+                                "✅ {}",
+                                message.unwrap_or_else(|| format!("Tunnel '{}' stopped", name))
+                            );
+                        }
+                        Ok(IpcResponse::Error { message }) => {
+                            eprintln!("❌ {}", message);
+                        }
+                        Ok(_) => {
+                            eprintln!("Unexpected response from daemon");
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to stop tunnel: {}", e);
+                        }
+                    }
+                }
+                Err(_) => {
+                    println!("Daemon is not running.");
+                    println!("Start it with: localup daemon start");
+                }
+            }
+            Ok(())
+        }
+        DaemonCommands::TunnelReload { name } => {
+            use localup_cli::ipc::{IpcClient, IpcRequest, IpcResponse};
+
+            match IpcClient::connect().await {
+                Ok(mut client) => {
+                    match client
+                        .request(&IpcRequest::ReloadTunnel { name: name.clone() })
+                        .await
+                    {
+                        Ok(IpcResponse::Ok { message }) => {
+                            println!(
+                                "✅ {}",
+                                message.unwrap_or_else(|| format!("Tunnel '{}' reloading", name))
+                            );
+                        }
+                        Ok(IpcResponse::Error { message }) => {
+                            eprintln!("❌ {}", message);
+                        }
+                        Ok(_) => {
+                            eprintln!("Unexpected response from daemon");
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to reload tunnel: {}", e);
+                        }
+                    }
+                }
+                Err(_) => {
+                    println!("Daemon is not running.");
+                    println!("Start it with: localup daemon start");
+                }
+            }
+            Ok(())
+        }
+        DaemonCommands::Add {
+            name,
+            port,
+            protocol,
+            subdomain,
+            custom_domain,
+        } => {
+            use localup_cli::project_config::{ProjectConfig, TunnelEntry};
+
+            // Load or create project config
+            let (config_path, mut config) = match ProjectConfig::discover() {
+                Ok(Some((path, config))) => (path, config),
+                Ok(None) => {
+                    // Create new config file in current directory
+                    let path = std::env::current_dir()?.join(".localup.yml");
+                    let config = ProjectConfig::default();
+                    (path, config)
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to load config: {}", e);
+                    return Ok(());
+                }
+            };
+
+            // Check if tunnel already exists
+            if config.tunnels.iter().any(|t| t.name == name) {
+                eprintln!("❌ Tunnel '{}' already exists in config", name);
+                return Ok(());
+            }
+
+            // Create new tunnel entry
+            let tunnel = TunnelEntry {
+                name: name.clone(),
+                port,
+                protocol,
+                subdomain,
+                custom_domain,
+                enabled: true,
+                ..Default::default()
+            };
+
+            config.tunnels.push(tunnel);
+
+            // Save config
+            if let Err(e) = config.save(&config_path) {
+                eprintln!("❌ Failed to save config: {}", e);
+                return Ok(());
+            }
+
+            println!("✅ Added tunnel '{}' to {:?}", name, config_path);
+            println!("   Run 'localup daemon reload' to apply changes");
+            Ok(())
+        }
+        DaemonCommands::Remove { name } => {
+            use localup_cli::project_config::ProjectConfig;
+
+            // Load project config
+            let (config_path, mut config) = match ProjectConfig::discover() {
+                Ok(Some((path, config))) => (path, config),
+                Ok(None) => {
+                    eprintln!("❌ No .localup.yml found");
+                    return Ok(());
+                }
+                Err(e) => {
+                    eprintln!("❌ Failed to load config: {}", e);
+                    return Ok(());
+                }
+            };
+
+            // Find and remove tunnel
+            let original_len = config.tunnels.len();
+            config.tunnels.retain(|t| t.name != name);
+
+            if config.tunnels.len() == original_len {
+                eprintln!("❌ Tunnel '{}' not found in config", name);
+                return Ok(());
+            }
+
+            // Save config
+            if let Err(e) = config.save(&config_path) {
+                eprintln!("❌ Failed to save config: {}", e);
+                return Ok(());
+            }
+
+            println!("✅ Removed tunnel '{}' from {:?}", name, config_path);
+            println!("   Run 'localup daemon reload' to apply changes");
             Ok(())
         }
     }

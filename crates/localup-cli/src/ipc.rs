@@ -23,11 +23,17 @@ pub enum IpcRequest {
     /// Stop a specific tunnel by name
     StopTunnel { name: String },
 
+    /// Reload a specific tunnel (stop + start with new config)
+    ReloadTunnel { name: String },
+
     /// Ping to check if daemon is alive
     Ping,
 
-    /// Trigger configuration reload
+    /// Trigger configuration reload (all tunnels)
     Reload,
+
+    /// Shutdown the daemon (stops all tunnels and exits)
+    Shutdown,
 }
 
 /// IPC response from daemon to CLI

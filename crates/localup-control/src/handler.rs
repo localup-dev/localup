@@ -5,7 +5,11 @@ use tracing::{debug, error, info, warn};
 
 use localup_auth::JwtValidator;
 use localup_proto::{Endpoint, Protocol, TunnelMessage};
-use localup_relay_db::entities::{auth_token, prelude::AuthToken as AuthTokenEntity};
+use localup_relay_db::entities::{
+    auth_token,
+    custom_domain::{self, DomainStatus},
+    prelude::{AuthToken as AuthTokenEntity, CustomDomain as CustomDomainEntity},
+};
 use localup_router::{RouteKey, RouteRegistry, RouteTarget};
 use localup_transport::{TransportConnection, TransportStream};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
@@ -128,6 +132,45 @@ impl TunnelHandler {
     pub fn with_https_port(mut self, port: u16) -> Self {
         self.https_port = Some(port);
         self
+    }
+
+    /// Check if a custom domain is registered and active in the database
+    async fn is_custom_domain_registered(&self, domain: &str) -> Result<bool, String> {
+        let Some(ref db) = self.db else {
+            // If no database, allow all custom domains (for testing/simple setups)
+            warn!(
+                "No database configured - allowing custom domain '{}' without validation",
+                domain
+            );
+            return Ok(true);
+        };
+
+        match CustomDomainEntity::find()
+            .filter(custom_domain::Column::Domain.eq(domain))
+            .one(db)
+            .await
+        {
+            Ok(Some(record)) => {
+                if record.status == DomainStatus::Active {
+                    info!("Custom domain '{}' is registered and active", domain);
+                    Ok(true)
+                } else {
+                    warn!(
+                        "Custom domain '{}' exists but status is {:?}",
+                        domain, record.status
+                    );
+                    Ok(false)
+                }
+            }
+            Ok(None) => {
+                info!("Custom domain '{}' is not registered", domain);
+                Ok(false)
+            }
+            Err(e) => {
+                error!("Database error checking custom domain '{}': {}", domain, e);
+                Err(format!("Database error: {}", e))
+            }
+        }
     }
 
     /// Handle an incoming tunnel connection (client or agent)
@@ -297,7 +340,7 @@ impl TunnelHandler {
         // For TCP endpoints, update with allocated port
         for endpoint in &mut endpoints {
             debug!("Registering endpoint: protocol={:?}", endpoint.protocol);
-            match self.register_route(&localup_id, endpoint) {
+            match self.register_route(&localup_id, endpoint).await {
                 Ok(Some(allocated_port)) => {
                     // Update TCP endpoint with allocated port
                     endpoint.public_url = format!("tcp://{}:{}", self.domain, allocated_port);
@@ -1805,7 +1848,11 @@ impl TunnelHandler {
         endpoints
     }
 
-    fn register_route(&self, localup_id: &str, endpoint: &Endpoint) -> Result<Option<u16>, String> {
+    async fn register_route(
+        &self,
+        localup_id: &str,
+        endpoint: &Endpoint,
+    ) -> Result<Option<u16>, String> {
         match &endpoint.protocol {
             Protocol::Http {
                 subdomain,
@@ -1826,6 +1873,29 @@ impl TunnelHandler {
                             .to_string(),
                     );
                 };
+
+                // Validate custom domain is registered
+                if is_custom_domain {
+                    match self.is_custom_domain_registered(&host).await {
+                        Ok(true) => {
+                            // Domain is registered and active, proceed
+                        }
+                        Ok(false) => {
+                            error!(
+                                "Custom domain '{}' is not registered or not active. Register it first via the API.",
+                                host
+                            );
+                            return Err(format!(
+                                "Custom domain '{}' is not registered. Register it first via the relay API or admin dashboard.",
+                                host
+                            ));
+                        }
+                        Err(e) => {
+                            error!("Failed to validate custom domain '{}': {}", host, e);
+                            return Err(format!("Failed to validate custom domain: {}", e));
+                        }
+                    }
+                }
 
                 let route_key = RouteKey::HttpHost(host.clone());
 
@@ -2335,8 +2405,8 @@ mod tests {
         assert!(handler.tcp_proxy_spawner.is_some());
     }
 
-    #[test]
-    fn test_register_route_http() {
+    #[tokio::test]
+    async fn test_register_route_http() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -2359,7 +2429,7 @@ mod tests {
             port: None,
         };
 
-        let result = handler.register_route(localup_id, &endpoint);
+        let result = handler.register_route(localup_id, &endpoint).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None); // HTTP doesn't return allocated port
 
@@ -2367,8 +2437,8 @@ mod tests {
         assert_eq!(route_registry.count(), 1);
     }
 
-    #[test]
-    fn test_register_route_https() {
+    #[tokio::test]
+    async fn test_register_route_https() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -2391,15 +2461,15 @@ mod tests {
             port: None,
         };
 
-        let result = handler.register_route(localup_id, &endpoint);
+        let result = handler.register_route(localup_id, &endpoint).await;
         assert!(result.is_ok());
 
         // Verify route was registered
         assert_eq!(route_registry.count(), 1);
     }
 
-    #[test]
-    fn test_register_route_tcp_without_allocator() {
+    #[tokio::test]
+    async fn test_register_route_tcp_without_allocator() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -2419,13 +2489,13 @@ mod tests {
             port: Some(8080),
         };
 
-        let result = handler.register_route(localup_id, &endpoint);
+        let result = handler.register_route(localup_id, &endpoint).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
     }
 
-    #[test]
-    fn test_register_route_tcp_with_allocator() {
+    #[tokio::test]
+    async fn test_register_route_tcp_with_allocator() {
         struct MockPortAllocator;
         impl PortAllocator for MockPortAllocator {
             fn allocate(
@@ -2461,7 +2531,7 @@ mod tests {
             port: Some(8080),
         };
 
-        let result = handler.register_route(localup_id, &endpoint);
+        let result = handler.register_route(localup_id, &endpoint).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some(9000));
     }
@@ -2491,7 +2561,7 @@ mod tests {
         };
 
         // Register first
-        handler.register_route(localup_id, &endpoint).unwrap();
+        handler.register_route(localup_id, &endpoint).await.unwrap();
         assert_eq!(route_registry.count(), 1);
 
         // Unregister
@@ -2658,8 +2728,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_register_route_with_custom_domain_http() {
+    #[tokio::test]
+    async fn test_register_route_with_custom_domain_http() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -2682,7 +2752,7 @@ mod tests {
             port: None,
         };
 
-        let result = handler.register_route(localup_id, &endpoint);
+        let result = handler.register_route(localup_id, &endpoint).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
 
@@ -2694,8 +2764,8 @@ mod tests {
         assert_eq!(route.unwrap().localup_id, localup_id);
     }
 
-    #[test]
-    fn test_register_route_with_custom_domain_https() {
+    #[tokio::test]
+    async fn test_register_route_with_custom_domain_https() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -2718,7 +2788,7 @@ mod tests {
             port: None,
         };
 
-        let result = handler.register_route(localup_id, &endpoint);
+        let result = handler.register_route(localup_id, &endpoint).await;
         assert!(result.is_ok());
 
         // Verify route was registered with full custom domain
@@ -2728,8 +2798,8 @@ mod tests {
         assert_eq!(route.unwrap().localup_id, localup_id);
     }
 
-    #[test]
-    fn test_register_route_custom_domain_conflict() {
+    #[tokio::test]
+    async fn test_register_route_custom_domain_conflict() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -2751,7 +2821,7 @@ mod tests {
             public_url: "https://api.mycompany.com".to_string(),
             port: None,
         };
-        let result1 = handler.register_route("tunnel-1", &endpoint1);
+        let result1 = handler.register_route("tunnel-1", &endpoint1).await;
         assert!(result1.is_ok());
 
         // Try to register second tunnel with same custom domain - should fail
@@ -2763,7 +2833,7 @@ mod tests {
             public_url: "https://api.mycompany.com".to_string(),
             port: None,
         };
-        let result2 = handler.register_route("tunnel-2", &endpoint2);
+        let result2 = handler.register_route("tunnel-2", &endpoint2).await;
         assert!(result2.is_err());
         assert!(result2.unwrap_err().contains("already in use"));
     }
@@ -2793,7 +2863,7 @@ mod tests {
         };
 
         // Register first
-        handler.register_route(localup_id, &endpoint).unwrap();
+        handler.register_route(localup_id, &endpoint).await.unwrap();
         assert_eq!(route_registry.count(), 1);
 
         // Unregister
@@ -2805,8 +2875,8 @@ mod tests {
         assert!(route.is_err());
     }
 
-    #[test]
-    fn test_register_route_requires_subdomain_or_custom_domain() {
+    #[tokio::test]
+    async fn test_register_route_requires_subdomain_or_custom_domain() {
         let connection_manager = Arc::new(TunnelConnectionManager::new());
         let route_registry = Arc::new(RouteRegistry::new());
         let pending_requests = Arc::new(PendingRequests::new());
@@ -2830,7 +2900,7 @@ mod tests {
             port: None,
         };
 
-        let result = handler.register_route(localup_id, &endpoint);
+        let result = handler.register_route(localup_id, &endpoint).await;
         // This should fail because neither subdomain nor custom_domain is provided
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("subdomain or custom_domain"));

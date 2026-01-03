@@ -9,6 +9,9 @@ use localup_proto::{HttpAuthConfig, TransportProtocol};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracing::info;
+
+use crate::config::ConfigManager;
 
 /// Project-level configuration file format
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -67,6 +70,12 @@ pub struct ProjectTunnel {
     /// Subdomain for HTTP/HTTPS/TLS tunnels
     pub subdomain: Option<String>,
 
+    /// Custom domain for HTTP/HTTPS tunnels (e.g., "api.example.com")
+    /// Requires DNS pointing to relay and valid TLS certificate.
+    /// Takes precedence over subdomain when specified.
+    #[serde(default)]
+    pub custom_domain: Option<String>,
+
     /// Remote port for TCP tunnels
     pub remote_port: Option<u16>,
 
@@ -98,6 +107,28 @@ fn default_enabled() -> bool {
     true
 }
 
+impl Default for ProjectTunnel {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            port: 0,
+            protocol: default_protocol(),
+            subdomain: None,
+            custom_domain: None,
+            remote_port: None,
+            sni_hostname: None,
+            relay: None,
+            token: None,
+            transport: None,
+            enabled: true,
+            local_host: None,
+        }
+    }
+}
+
+/// Type alias for use in CLI add/remove commands
+pub type TunnelEntry = ProjectTunnel;
+
 impl ProjectConfig {
     /// Discover and load project config by walking up the directory tree
     ///
@@ -106,6 +137,14 @@ impl ProjectConfig {
     pub fn discover() -> Result<Option<(PathBuf, Self)>> {
         let current_dir = std::env::current_dir()?;
         Self::discover_from(&current_dir)
+    }
+
+    /// Save config to a file
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let content = serde_yaml::to_string(self).context("Failed to serialize config")?;
+        std::fs::write(path, content)
+            .with_context(|| format!("Failed to write config file: {:?}", path))?;
+        Ok(())
     }
 
     /// Discover config starting from a specific directory
@@ -221,6 +260,12 @@ tunnels:
   #   protocol: https
   #   subdomain: my-frontend
   #   enabled: false
+
+  # Custom domain example (requires DNS pointing to relay and valid certificate)
+  # - name: production-api
+  #   port: 8080
+  #   protocol: https
+  #   custom_domain: api.example.com
 "#
         .to_string()
     }
@@ -237,14 +282,31 @@ impl ProjectTunnel {
             .cloned()
             .unwrap_or_else(|| "localhost:4443".to_string());
 
-        let token = expand_env_vars(
-            self.token
-                .as_ref()
-                .or(defaults.token.as_ref())
-                .cloned()
-                .unwrap_or_default()
-                .as_str(),
-        );
+        // Token resolution order:
+        // 1. Tunnel-specific token (with env var expansion)
+        // 2. Defaults token (with env var expansion)
+        // 3. ConfigManager::get_token() (from `config set-token`)
+        let raw_token = self
+            .token
+            .as_ref()
+            .or(defaults.token.as_ref())
+            .cloned()
+            .unwrap_or_default();
+
+        let expanded_token = expand_env_vars(&raw_token);
+
+        // If token is empty after expansion, try to get from config
+        let token = if expanded_token.is_empty() {
+            match ConfigManager::get_token() {
+                Ok(Some(t)) => {
+                    info!("Using saved auth token from ~/.localup/config.json");
+                    t
+                }
+                _ => expanded_token,
+            }
+        } else {
+            expanded_token
+        };
 
         let local_host = self
             .local_host
@@ -258,10 +320,12 @@ impl ProjectTunnel {
             "http" => ProtocolConfig::Http {
                 local_port: self.port,
                 subdomain: self.subdomain.clone(),
+                custom_domain: self.custom_domain.clone(),
             },
             "https" => ProtocolConfig::Https {
                 local_port: self.port,
                 subdomain: self.subdomain.clone(),
+                custom_domain: self.custom_domain.clone(),
             },
             "tcp" => ProtocolConfig::Tcp {
                 local_port: self.port,
@@ -537,6 +601,7 @@ tunnels:
             port: 3000,
             protocol: "http".to_string(),
             subdomain: Some("my-api".to_string()),
+            custom_domain: None,
             remote_port: None,
             sni_hostname: None,
             relay: None,
@@ -555,6 +620,7 @@ tunnels:
         if let ProtocolConfig::Http {
             local_port,
             subdomain,
+            custom_domain: _,
         } = &config.protocols[0]
         {
             assert_eq!(*local_port, 3000);
@@ -573,6 +639,7 @@ tunnels:
             port: 5432,
             protocol: "tcp".to_string(),
             subdomain: None,
+            custom_domain: None,
             remote_port: Some(15432),
             sni_hostname: None,
             relay: Some("custom-relay:4443".to_string()),
@@ -614,6 +681,7 @@ tunnels:
             port: 3000,
             protocol: "http".to_string(),
             subdomain: None,
+            custom_domain: None,
             remote_port: None,
             sni_hostname: None,
             relay: None,
@@ -776,6 +844,7 @@ tunnels:
         if let ProtocolConfig::Https {
             local_port,
             subdomain,
+            custom_domain: _,
         } = &tunnel_config.protocols[0]
         {
             assert_eq!(*local_port, 3001);
@@ -797,6 +866,7 @@ tunnels:
             port: 3000,
             protocol: "http".to_string(),
             subdomain: None,
+            custom_domain: None,
             remote_port: None,
             sni_hostname: None,
             relay: None,

@@ -72,7 +72,7 @@ async fn test_daemon_shutdown_command() {
 
     // Spawn daemon in background
     let daemon_handle = tokio::spawn(async move {
-        let _ = daemon.run(command_rx).await;
+        let _ = daemon.run(command_rx, None, None).await;
     });
 
     // Give daemon time to start
@@ -104,7 +104,7 @@ async fn test_daemon_get_status_command() {
 
     // Spawn daemon in background
     let daemon_handle = tokio::spawn(async move {
-        let _ = daemon.run(command_rx).await;
+        let _ = daemon.run(command_rx, None, None).await;
     });
 
     // Give daemon more time to start and initialize (increased for CI stability)
@@ -194,7 +194,7 @@ async fn test_daemon_with_no_enabled_tunnels() {
     let (_command_tx, command_rx) = mpsc::channel::<DaemonCommand>(32);
 
     let daemon_handle = tokio::spawn(async move {
-        let _ = daemon.run(command_rx).await;
+        let _ = daemon.run(command_rx, None, None).await;
     });
 
     // Give daemon time to start
@@ -260,7 +260,7 @@ async fn test_daemon_concurrent_status_queries() {
     let (command_tx, command_rx) = mpsc::channel::<DaemonCommand>(32);
 
     let daemon_handle = tokio::spawn(async move {
-        let _ = daemon.run(command_rx).await;
+        let _ = daemon.run(command_rx, None, None).await;
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
