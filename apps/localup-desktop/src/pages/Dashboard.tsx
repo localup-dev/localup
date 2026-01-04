@@ -23,6 +23,7 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
+  ArrowRight,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -276,9 +277,14 @@ export function Dashboard() {
                 key={tunnel.id}
                 className="flex items-center justify-between p-3 border rounded-lg bg-green-500/5 border-green-500/20"
               >
-                <div className="space-y-1">
+                <div className="space-y-1 flex-1">
                   <div className="flex items-center gap-2">
-                    <span className="font-medium">{tunnel.name}</span>
+                    <span
+                      className="font-medium cursor-pointer hover:underline"
+                      onClick={() => navigate(`/tunnels/${tunnel.id}`)}
+                    >
+                      {tunnel.name}
+                    </span>
                     {getStatusBadge(tunnel.status)}
                   </div>
                   {tunnel.public_url && (
@@ -308,21 +314,31 @@ export function Dashboard() {
                     {tunnel.local_host}:{tunnel.local_port} via {tunnel.relay_name || "relay"}
                   </p>
                 </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleStopTunnel(tunnel)}
-                  disabled={actionLoading === `stop-${tunnel.id}`}
-                >
-                  {actionLoading === `stop-${tunnel.id}` ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <>
-                      <Square className="h-4 w-4 mr-2" />
-                      Stop
-                    </>
-                  )}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => navigate(`/tunnels/${tunnel.id}`)}
+                    title="View details"
+                  >
+                    <ArrowRight className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleStopTunnel(tunnel)}
+                    disabled={actionLoading === `stop-${tunnel.id}`}
+                  >
+                    {actionLoading === `stop-${tunnel.id}` ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <>
+                        <Square className="h-4 w-4 mr-2" />
+                        Stop
+                      </>
+                    )}
+                  </Button>
+                </div>
               </div>
             ))}
           </CardContent>

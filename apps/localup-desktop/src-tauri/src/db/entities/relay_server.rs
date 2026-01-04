@@ -28,6 +28,10 @@ pub struct Model {
     /// Is this the default relay
     pub is_default: bool,
 
+    /// Supported tunnel protocols (JSON array: ["http", "https", "tcp", "tls"])
+    #[sea_orm(column_type = "Text")]
+    pub supported_protocols: String,
+
     /// Creation timestamp
     pub created_at: ChronoDateTimeUtc,
 

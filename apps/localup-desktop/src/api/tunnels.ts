@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface Tunnel {
   id: string;
@@ -14,9 +15,26 @@ export interface Tunnel {
   enabled: boolean;
   status: string;
   public_url: string | null;
+  localup_id: string | null;
   error_message: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface CapturedRequest {
+  id: string;
+  tunnel_session_id: string;
+  localup_id: string;
+  method: string;
+  path: string;
+  host: string | null;
+  headers: string;
+  body: string | null;
+  status: number | null;
+  response_headers: string | null;
+  response_body: string | null;
+  created_at: string;
+  latency_ms: number | null;
 }
 
 export interface CreateTunnelRequest {
@@ -94,4 +112,112 @@ export async function startTunnel(id: string): Promise<Tunnel> {
  */
 export async function stopTunnel(id: string): Promise<Tunnel> {
   return invoke<Tunnel>("stop_tunnel", { id });
+}
+
+/**
+ * Get captured requests for a tunnel
+ */
+export async function getCapturedRequests(tunnelId: string): Promise<CapturedRequest[]> {
+  return invoke<CapturedRequest[]>("get_captured_requests", { tunnelId });
+}
+
+// ============================================================================
+// Real-time Metrics Types and Functions
+// ============================================================================
+
+/** Body content types */
+export type BodyContent =
+  | { type: "Json"; value: unknown }
+  | { type: "Text"; value: string }
+  | { type: "Binary"; value: { size: number } };
+
+/** Body data wrapper */
+export interface BodyData {
+  content_type: string;
+  size: number;
+  data: BodyContent;
+}
+
+/** HTTP request/response metric */
+export interface HttpMetric {
+  id: string;
+  stream_id: string;
+  timestamp: number;
+  method: string;
+  uri: string;
+  request_headers: [string, string][];
+  request_body: BodyData | null;
+  response_status: number | null;
+  response_headers: [string, string][] | null;
+  response_body: BodyData | null;
+  duration_ms: number | null;
+  error: string | null;
+}
+
+/** Metrics event types from backend */
+export type MetricsEvent =
+  | { type: "request"; metric: HttpMetric }
+  | { type: "response"; id: string; status: number; headers: [string, string][]; body: BodyData | null; duration_ms: number }
+  | { type: "error"; id: string; error: string; duration_ms: number }
+  | { type: "tcp_connection"; connection: unknown }
+  | { type: "tcp_data"; connection_id: string; bytes_in: number; bytes_out: number }
+  | { type: "tcp_close"; connection_id: string }
+  | { type: "stats"; stats: unknown };
+
+/** Tunnel metrics event payload */
+export interface TunnelMetricsPayload {
+  tunnel_id: string;
+  event: MetricsEvent;
+}
+
+/**
+ * Get real-time metrics for a tunnel (from in-memory store)
+ */
+export async function getTunnelMetrics(tunnelId: string): Promise<HttpMetric[]> {
+  return invoke<HttpMetric[]>("get_tunnel_metrics", { tunnelId });
+}
+
+/**
+ * Clear metrics for a tunnel
+ */
+export async function clearTunnelMetrics(tunnelId: string): Promise<void> {
+  return invoke("clear_tunnel_metrics", { tunnelId });
+}
+
+/** Replay request parameters */
+export interface ReplayRequestParams {
+  method: string;
+  uri: string;
+  headers: [string, string][];
+  body: string | null;
+}
+
+/** Replay response */
+export interface ReplayResponse {
+  status: number;
+  headers: [string, string][];
+  body: string | null;
+  duration_ms: number;
+}
+
+/**
+ * Replay a captured HTTP request to the local service
+ */
+export async function replayRequest(
+  tunnelId: string,
+  request: ReplayRequestParams
+): Promise<ReplayResponse> {
+  return invoke<ReplayResponse>("replay_request", { tunnelId, request });
+}
+
+/**
+ * Subscribe to real-time metrics events for all tunnels.
+ * Returns an unsubscribe function.
+ */
+export async function subscribeToMetrics(
+  callback: (payload: TunnelMetricsPayload) => void
+): Promise<UnlistenFn> {
+  return listen<TunnelMetricsPayload>("tunnel-metrics", (event) => {
+    callback(event.payload);
+  });
 }

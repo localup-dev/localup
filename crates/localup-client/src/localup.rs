@@ -834,10 +834,14 @@ impl TunnelConnection {
     async fn handle_http_transparent_stream(
         stream: StreamWrapper,
         config: &TunnelConfig,
-        _metrics: &MetricsStore,
+        metrics: &MetricsStore,
         stream_id: u32,
         initial_data: Vec<u8>,
     ) {
+        use std::time::Instant;
+
+        let start_time = Instant::now();
+
         // Extract the inner QUIC stream
         let mut stream = match stream {
             StreamWrapper::Quic(s) => s,
@@ -846,6 +850,22 @@ impl TunnelConnection {
                 return;
             }
         };
+
+        // Parse HTTP request from initial_data for metrics
+        let (method, uri, headers) = Self::parse_http_request(&initial_data);
+        let short_stream_id = generate_short_id(stream_id);
+
+        // Record request in metrics
+        let metric_id = metrics
+            .record_request(
+                short_stream_id,
+                method.clone(),
+                uri.clone(),
+                headers.clone(),
+                None, // Body is mixed in with request in transparent mode
+            )
+            .await;
+
         // Get local HTTP/HTTPS port from protocols
         let local_port = config.protocols.iter().find_map(|p| match p {
             ProtocolConfig::Http { local_port, .. } => Some(*local_port),
@@ -857,6 +877,14 @@ impl TunnelConnection {
             Some(port) => port,
             None => {
                 error!("No HTTP/HTTPS protocol configured for transparent streaming");
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+                metrics
+                    .record_error(
+                        &metric_id,
+                        "No HTTP protocol configured".to_string(),
+                        duration_ms,
+                    )
+                    .await;
                 let _ = stream
                     .send_message(&TunnelMessage::HttpStreamClose { stream_id })
                     .await;
@@ -873,6 +901,10 @@ impl TunnelConnection {
                     "Failed to connect to local HTTP service at {}: {}",
                     local_addr, e
                 );
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+                metrics
+                    .record_error(&metric_id, format!("Connection failed: {}", e), duration_ms)
+                    .await;
                 let _ = stream
                     .send_message(&TunnelMessage::HttpStreamClose { stream_id })
                     .await;
@@ -891,6 +923,10 @@ impl TunnelConnection {
                 "Failed to write initial data to local server (stream {}): {}",
                 stream_id, e
             );
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            metrics
+                .record_error(&metric_id, format!("Write error: {}", e), duration_ms)
+                .await;
             let _ = stream
                 .send_message(&TunnelMessage::HttpStreamClose { stream_id })
                 .await;
@@ -907,9 +943,16 @@ impl TunnelConnection {
         let (mut local_read, mut local_write) = local_socket.into_split();
         let (mut quic_send, mut quic_recv) = stream.split();
 
+        // Shared state for capturing response status
+        let response_captured = Arc::new(tokio::sync::Mutex::new(false));
+        let response_captured_clone = response_captured.clone();
+        let metrics_clone = metrics.clone();
+        let metric_id_clone = metric_id.clone();
+
         // Task: Local → Tunnel (read from local server, send to tunnel)
         let local_to_tunnel = tokio::spawn(async move {
             let mut buffer = vec![0u8; 16384];
+            let mut first_response = true;
             loop {
                 match local_read.read(&mut buffer).await {
                     Ok(0) => {
@@ -920,6 +963,29 @@ impl TunnelConnection {
                         break;
                     }
                     Ok(n) => {
+                        // On first response chunk, try to parse status code for metrics
+                        if first_response {
+                            first_response = false;
+                            let mut captured = response_captured_clone.lock().await;
+                            if !*captured {
+                                *captured = true;
+                                drop(captured);
+
+                                let (status, resp_headers) =
+                                    Self::parse_http_response(&buffer[..n]);
+                                let duration_ms = start_time.elapsed().as_millis() as u64;
+                                metrics_clone
+                                    .record_response(
+                                        &metric_id_clone,
+                                        status,
+                                        resp_headers,
+                                        None, // Body not captured in transparent mode
+                                        duration_ms,
+                                    )
+                                    .await;
+                            }
+                        }
+
                         debug!(
                             "Read {} bytes from local HTTP server (stream {})",
                             n, stream_id
@@ -986,7 +1052,83 @@ impl TunnelConnection {
 
         // Wait for both tasks to complete
         let _ = tokio::join!(local_to_tunnel, localup_to_local);
+
+        // Record error if no response was captured (connection closed without response)
+        let captured = response_captured.lock().await;
+        if !*captured {
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            metrics
+                .record_error(
+                    &metric_id,
+                    "Connection closed without response".to_string(),
+                    duration_ms,
+                )
+                .await;
+        }
+
         debug!("Transparent HTTP stream {} ended", stream_id);
+    }
+
+    /// Parse HTTP request line and headers from raw bytes
+    fn parse_http_request(data: &[u8]) -> (String, String, Vec<(String, String)>) {
+        let text = String::from_utf8_lossy(data);
+        let mut lines = text.lines();
+
+        // Parse request line: METHOD URI HTTP/1.x
+        let (method, uri) = if let Some(request_line) = lines.next() {
+            let parts: Vec<&str> = request_line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                (parts[0].to_string(), parts[1].to_string())
+            } else {
+                ("UNKNOWN".to_string(), "/".to_string())
+            }
+        } else {
+            ("UNKNOWN".to_string(), "/".to_string())
+        };
+
+        // Parse headers
+        let mut headers = Vec::new();
+        for line in lines {
+            if line.is_empty() {
+                break; // End of headers
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                headers.push((name.trim().to_string(), value.trim().to_string()));
+            }
+        }
+
+        (method, uri, headers)
+    }
+
+    /// Parse HTTP response status line and headers from raw bytes
+    fn parse_http_response(data: &[u8]) -> (u16, Vec<(String, String)>) {
+        let text = String::from_utf8_lossy(data);
+        let mut lines = text.lines();
+
+        // Parse status line: HTTP/1.x STATUS REASON
+        let status = if let Some(status_line) = lines.next() {
+            let parts: Vec<&str> = status_line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                parts[1].parse().unwrap_or(0)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        // Parse headers
+        let mut headers = Vec::new();
+        for line in lines {
+            if line.is_empty() {
+                break; // End of headers
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                headers.push((name.trim().to_string(), value.trim().to_string()));
+            }
+        }
+
+        (status, headers)
     }
 
     async fn handle_tcp_stream(

@@ -3,11 +3,16 @@
 use tauri::Manager;
 
 mod commands;
+pub mod daemon;
 mod db;
 mod state;
 mod tray;
 
+use daemon::DaemonClient;
 use state::AppState;
+
+#[cfg(target_os = "macos")]
+use tauri::ActivationPolicy;
 
 /// Get application version
 #[tauri::command]
@@ -55,6 +60,13 @@ pub fn run() {
 
             // Create app state and manage it
             let app_state = AppState::new(db);
+
+            // Set app handle for metrics event emission
+            let app_handle_for_state = app.handle().clone();
+            tauri::async_runtime::block_on(async {
+                app_state.set_app_handle(app_handle_for_state).await;
+            });
+
             app.manage(app_state.clone());
 
             // Setup system tray
@@ -63,10 +75,33 @@ pub fn run() {
                 tracing::error!("Failed to setup system tray: {}", e);
             }
 
-            // Start auto-start tunnels in background
+            // Clone app handle for the spawn block
             let app_handle_for_tunnels = app.handle().clone();
+
+            // Start the daemon automatically (ensures tunnels can run independently)
             tauri::async_runtime::spawn(async move {
-                app_state.start_auto_start_tunnels().await;
+                tracing::info!("Checking daemon status...");
+                match DaemonClient::connect_or_start().await {
+                    Ok(mut client) => match client.ping().await {
+                        Ok((version, uptime, count)) => {
+                            tracing::info!(
+                                "Daemon running: v{}, uptime {}s, {} tunnels",
+                                version,
+                                uptime,
+                                count
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("Daemon ping failed: {}", e);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!("Failed to start daemon: {}", e);
+                        // Fall back to in-process tunnel management
+                        tracing::info!("Falling back to in-process tunnel management");
+                        app_state.start_auto_start_tunnels().await;
+                    }
+                }
                 // Update tray after tunnels start
                 tray::update_tray_menu(&app_handle_for_tunnels).await;
             });
@@ -74,12 +109,21 @@ pub fn run() {
             // Hide window on close (minimize to tray) instead of quitting
             let window = app.get_webview_window("main").unwrap();
             let window_clone = window.clone();
+            #[cfg(target_os = "macos")]
+            let app_handle_for_policy = app.handle().clone();
 
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     // Prevent the window from closing, hide it instead
                     api.prevent_close();
                     let _ = window_clone.hide();
+
+                    // On macOS, hide from dock when window is hidden
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = app_handle_for_policy
+                            .set_activation_policy(ActivationPolicy::Accessory);
+                    }
                 }
             });
 
@@ -96,6 +140,10 @@ pub fn run() {
             commands::delete_tunnel,
             commands::start_tunnel,
             commands::stop_tunnel,
+            commands::get_tunnel_metrics,
+            commands::clear_tunnel_metrics,
+            commands::get_captured_requests,
+            commands::replay_request,
             // Relay commands
             commands::list_relays,
             commands::get_relay,
@@ -107,6 +155,15 @@ pub fn run() {
             commands::get_settings,
             commands::update_setting,
             commands::get_autostart_status,
+            // Daemon commands
+            commands::get_daemon_status,
+            commands::start_daemon,
+            commands::stop_daemon,
+            commands::daemon_list_tunnels,
+            commands::daemon_get_tunnel,
+            commands::daemon_start_tunnel,
+            commands::daemon_stop_tunnel,
+            commands::daemon_delete_tunnel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

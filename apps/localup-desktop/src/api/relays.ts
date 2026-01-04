@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export type TunnelProtocol = "http" | "https" | "tcp" | "tls";
+
 export interface RelayServer {
   id: string;
   name: string;
@@ -8,6 +10,7 @@ export interface RelayServer {
   protocol: string;
   insecure: boolean;
   is_default: boolean;
+  supported_protocols: TunnelProtocol[];
   created_at: string;
   updated_at: string;
 }
@@ -19,6 +22,7 @@ export interface CreateRelayRequest {
   protocol?: string;
   insecure?: boolean;
   is_default?: boolean;
+  supported_protocols?: TunnelProtocol[];
 }
 
 export interface UpdateRelayRequest {
@@ -28,6 +32,7 @@ export interface UpdateRelayRequest {
   protocol?: string;
   insecure?: boolean;
   is_default?: boolean;
+  supported_protocols?: TunnelProtocol[];
 }
 
 export interface TestRelayResult {

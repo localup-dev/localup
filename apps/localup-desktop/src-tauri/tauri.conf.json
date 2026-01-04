@@ -20,10 +20,6 @@
         "center": true
       }
     ],
-    "trayIcon": {
-      "iconPath": "icons/icon.png",
-      "iconAsTemplate": true
-    },
     "security": {
       "csp": null
     }
@@ -38,9 +34,15 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "externalBin": [
+      "binaries/localup-daemon"
+    ],
     "category": "DeveloperTool",
     "shortDescription": "Tunnel management for developers",
-    "longDescription": "LocalUp Desktop allows you to expose local servers to the internet through geographically distributed relay servers."
+    "longDescription": "LocalUp Desktop allows you to expose local servers to the internet through geographically distributed relay servers.",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
   },
   "plugins": {}
 }

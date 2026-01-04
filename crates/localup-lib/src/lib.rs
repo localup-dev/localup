@@ -167,6 +167,7 @@ pub use localup_transport::{
 pub use localup_transport_quic::{QuicConfig, QuicConnection, QuicConnector, QuicListener};
 
 // Re-export client types (primary API for tunnel clients)
+pub use localup_client::metrics::MetricsEvent;
 pub use localup_client::{
     BodyContent, BodyData, DbMetricsStore, ExitNodeConfig, HttpMetric, MetricsStats, MetricsStore,
     ProtocolConfig, Region, ReverseTunnelClient, ReverseTunnelConfig, ReverseTunnelError,

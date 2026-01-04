@@ -10,47 +10,64 @@ use sea_orm::EntityTrait;
 use tauri::{
     image::Image,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
-    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
+    tray::{TrayIcon, TrayIconBuilder},
     AppHandle, Manager, Wry,
 };
+
+#[cfg(target_os = "macos")]
+use tauri::ActivationPolicy;
 use tracing::{error, info};
 
 use crate::db::entities::{RelayServer, TunnelConfig};
 use crate::state::AppState;
 
+// Embedded tray icon (22x22 PNG for macOS menu bar)
+// This is the "l" logo as a template icon
+const TRAY_ICON: &[u8] = include_bytes!("../icons/tray-iconTemplate.png");
+
 /// Create and setup the system tray
 pub fn setup_tray(app: &AppHandle) -> Result<TrayIcon, Box<dyn std::error::Error>> {
     let menu = build_tray_menu(app)?;
 
-    // Use the app's default icon for the tray
-    let icon = app.default_window_icon().cloned().unwrap_or_else(|| {
-        // Fallback: create a simple 32x32 icon
-        Image::new_owned(vec![0u8; 32 * 32 * 4], 32, 32)
-    });
+    // Load the embedded tray icon
+    let icon = load_tray_icon()?;
 
     let tray = TrayIconBuilder::with_id("main")
         .icon(icon)
+        .icon_as_template(true) // macOS: use as template (adapts to light/dark mode)
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(true) // Show menu on left click (standard macOS behavior)
         .tooltip("LocalUp - No tunnels active")
         .on_menu_event(handle_menu_event)
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                // Left click shows the window
-                if let Some(window) = tray.app_handle().get_webview_window("main") {
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
-            }
-        })
         .build(app)?;
 
     Ok(tray)
+}
+
+/// Load the tray icon from embedded PNG data
+fn load_tray_icon() -> Result<Image<'static>, Box<dyn std::error::Error>> {
+    // Decode the PNG manually since Tauri's Image expects raw RGBA
+    let decoder = png::Decoder::new(TRAY_ICON);
+    let mut reader = decoder.read_info()?;
+    let mut buf = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf)?;
+
+    // Convert grayscale+alpha to RGBA (our template icon format)
+    let rgba = match info.color_type {
+        png::ColorType::GrayscaleAlpha => {
+            let mut rgba = Vec::with_capacity(buf.len() * 2);
+            for chunk in buf.chunks(2) {
+                let gray = chunk[0];
+                let alpha = chunk[1];
+                rgba.extend_from_slice(&[gray, gray, gray, alpha]);
+            }
+            rgba
+        }
+        png::ColorType::Rgba => buf,
+        _ => return Err("Unsupported PNG color type for tray icon".into()),
+    };
+
+    Ok(Image::new_owned(rgba, info.width, info.height))
 }
 
 /// Build the tray menu
@@ -98,6 +115,11 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
     match event.id.as_ref() {
         "show" => {
             if let Some(window) = app.get_webview_window("main") {
+                // On macOS, restore dock icon when showing window
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = app.set_activation_policy(ActivationPolicy::Regular);
+                }
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -360,6 +382,8 @@ async fn start_tunnel(app: &AppHandle, tunnel_id: &str) {
     // Spawn tunnel task
     let tunnel_manager = state.tunnel_manager.clone();
     let tunnel_handles = state.tunnel_handles.clone();
+    let tunnel_metrics = state.tunnel_metrics.clone();
+    let app_handle = state.app_handle.clone();
     let config_id = tunnel_id.to_string();
     let app_clone = app.clone();
 
@@ -370,6 +394,8 @@ async fn start_tunnel(app: &AppHandle, tunnel_id: &str) {
             config_id.clone(),
             client_config,
             tunnel_manager,
+            tunnel_metrics,
+            app_handle,
             shutdown_rx,
         )
         .await;

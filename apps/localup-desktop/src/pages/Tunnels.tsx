@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Card,
   CardContent,
@@ -65,7 +66,15 @@ import {
   type CreateTunnelRequest,
   type UpdateTunnelRequest,
 } from "@/api/tunnels";
-import { listRelays, type RelayServer } from "@/api/relays";
+import { listRelays, type RelayServer, type TunnelProtocol } from "@/api/relays";
+import { openUrl } from "@tauri-apps/plugin-opener";
+
+const PROTOCOL_LABELS: Record<TunnelProtocol, string> = {
+  http: "HTTP",
+  https: "HTTPS",
+  tcp: "TCP",
+  tls: "TLS/SNI",
+};
 
 type TunnelStatus = "disconnected" | "connecting" | "connected" | "error";
 
@@ -119,6 +128,7 @@ function TunnelSkeleton() {
 }
 
 export function Tunnels() {
+  const navigate = useNavigate();
   const [tunnels, setTunnels] = useState<Tunnel[]>([]);
   const [relays, setRelays] = useState<RelayServer[]>([]);
   const [loading, setLoading] = useState(true);
@@ -319,8 +329,14 @@ export function Tunnels() {
     toast.success("Copied to clipboard");
   };
 
-  const openInBrowser = (url: string) => {
-    window.open(url, "_blank");
+  const openInBrowser = async (url: string) => {
+    try {
+      await openUrl(url);
+    } catch (error) {
+      toast.error("Failed to open URL", {
+        description: String(error),
+      });
+    }
   };
 
   if (loading) {
@@ -394,9 +410,17 @@ export function Tunnels() {
                   <Label htmlFor="relay">Relay Server</Label>
                   <Select
                     value={newTunnel.relay_id}
-                    onValueChange={(value) =>
-                      setNewTunnel({ ...newTunnel, relay_id: value })
-                    }
+                    onValueChange={(value) => {
+                      const selectedRelay = relays.find((r) => r.id === value);
+                      // Reset protocol if current one is not supported by new relay
+                      const supportedProtocols = selectedRelay?.supported_protocols || [];
+                      const currentProtocolSupported = supportedProtocols.includes(newTunnel.protocol as TunnelProtocol);
+                      setNewTunnel({
+                        ...newTunnel,
+                        relay_id: value,
+                        protocol: currentProtocolSupported ? newTunnel.protocol : (supportedProtocols[0] || "http"),
+                      });
+                    }}
                   >
                     <SelectTrigger>
                       <SelectValue placeholder="Select a relay" />
@@ -434,15 +458,21 @@ export function Tunnels() {
                       onValueChange={(value) =>
                         setNewTunnel({ ...newTunnel, protocol: value })
                       }
+                      disabled={!newTunnel.relay_id}
                     >
                       <SelectTrigger>
-                        <SelectValue />
+                        <SelectValue placeholder="Select protocol" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="http">HTTP</SelectItem>
-                        <SelectItem value="https">HTTPS</SelectItem>
-                        <SelectItem value="tcp">TCP</SelectItem>
-                        <SelectItem value="tls">TLS</SelectItem>
+                        {(() => {
+                          const selectedRelay = relays.find((r) => r.id === newTunnel.relay_id);
+                          const supportedProtocols = selectedRelay?.supported_protocols || ["http", "https", "tcp", "tls"];
+                          return supportedProtocols.map((protocol) => (
+                            <SelectItem key={protocol} value={protocol}>
+                              {PROTOCOL_LABELS[protocol as TunnelProtocol] || protocol.toUpperCase()}
+                            </SelectItem>
+                          ));
+                        })()}
                       </SelectContent>
                     </Select>
                   </div>
@@ -557,9 +587,9 @@ export function Tunnels() {
                     key={tunnel.id}
                     className="flex items-center justify-between p-4 border rounded-lg hover:bg-muted/50 transition-colors"
                   >
-                    <div className="space-y-1">
+                    <div className="space-y-1 cursor-pointer" onClick={() => navigate(`/tunnels/${tunnel.id}`)}>
                       <div className="flex items-center gap-3">
-                        <span className="font-medium">{tunnel.name}</span>
+                        <span className="font-medium hover:underline">{tunnel.name}</span>
                         {getStatusBadge(tunnel.status)}
                       </div>
                       <div className="text-sm text-muted-foreground">

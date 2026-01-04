@@ -5,17 +5,14 @@
 //! This approach is cross-platform (Windows/macOS/Linux).
 
 use chrono::Utc;
-use localup_lib::{
-    ExitNodeConfig, ProtocolConfig, TunnelClient, TunnelConfig as ClientTunnelConfig,
-};
+use localup_lib::{ExitNodeConfig, HttpMetric, TunnelConfig as ClientTunnelConfig};
 use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tauri::State;
 use tokio::sync::oneshot;
-use tracing::{error, info};
 
 use crate::db::entities::{tunnel_config, RelayServer, TunnelConfig};
+use crate::state::app_state::run_tunnel;
 use crate::state::tunnel_manager::TunnelStatus;
 use crate::state::AppState;
 
@@ -35,9 +32,28 @@ pub struct TunnelResponse {
     pub enabled: bool,
     pub status: String,
     pub public_url: Option<String>,
+    pub localup_id: Option<String>,
     pub error_message: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Captured request response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapturedRequestResponse {
+    pub id: String,
+    pub tunnel_session_id: String,
+    pub localup_id: String,
+    pub method: String,
+    pub path: String,
+    pub host: Option<String>,
+    pub headers: String,
+    pub body: Option<String>,
+    pub status: Option<i32>,
+    pub response_headers: Option<String>,
+    pub response_body: Option<String>,
+    pub created_at: String,
+    pub latency_ms: Option<i32>,
 }
 
 /// Request to create a new tunnel
@@ -106,6 +122,7 @@ pub async fn list_tunnels(state: State<'_, AppState>) -> Result<Vec<TunnelRespon
                     .map(|t| t.status.as_str().to_string())
                     .unwrap_or_else(|| "disconnected".to_string()),
                 public_url: running.and_then(|t| t.public_url.clone()),
+                localup_id: running.and_then(|t| t.localup_id.clone()),
                 error_message: running.and_then(|t| t.error_message.clone()),
                 created_at: config.created_at.to_rfc3339(),
                 updated_at: config.updated_at.to_rfc3339(),
@@ -156,6 +173,7 @@ pub async fn get_tunnel(
             .map(|t| t.status.as_str().to_string())
             .unwrap_or_else(|| "disconnected".to_string()),
         public_url: running.and_then(|t| t.public_url.clone()),
+        localup_id: running.and_then(|t| t.localup_id.clone()),
         error_message: running.and_then(|t| t.error_message.clone()),
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
@@ -214,6 +232,7 @@ pub async fn create_tunnel(
         enabled: result.enabled,
         status: "disconnected".to_string(),
         public_url: None,
+        localup_id: None,
         error_message: None,
         created_at: result.created_at.to_rfc3339(),
         updated_at: result.updated_at.to_rfc3339(),
@@ -301,6 +320,7 @@ pub async fn update_tunnel(
             .map(|t| t.status.as_str().to_string())
             .unwrap_or_else(|| "disconnected".to_string()),
         public_url: running.and_then(|t| t.public_url.clone()),
+        localup_id: running.and_then(|t| t.localup_id.clone()),
         error_message: running.and_then(|t| t.error_message.clone()),
         created_at: result.created_at.to_rfc3339(),
         updated_at: result.updated_at.to_rfc3339(),
@@ -373,6 +393,8 @@ pub async fn start_tunnel(
     // Spawn tunnel task
     let tunnel_manager = state.tunnel_manager.clone();
     let tunnel_handles = state.tunnel_handles.clone();
+    let tunnel_metrics = state.tunnel_metrics.clone();
+    let app_handle = state.app_handle.clone();
     let config_id = id.clone();
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -382,6 +404,8 @@ pub async fn start_tunnel(
             config_id.clone(),
             client_config,
             tunnel_manager,
+            tunnel_metrics,
+            app_handle,
             shutdown_rx,
         )
         .await;
@@ -427,155 +451,273 @@ async fn stop_tunnel_internal(state: &State<'_, AppState>, id: &str) {
         let mut manager = state.tunnel_manager.write().await;
         manager.update_status(id, TunnelStatus::Disconnected, None, None, None);
     }
+
+    // Clean up metrics
+    state.remove_tunnel_metrics(id).await;
 }
 
-/// Run a tunnel with reconnection logic
-async fn run_tunnel(
-    config_id: String,
-    config: ClientTunnelConfig,
-    tunnel_manager: Arc<tokio::sync::RwLock<crate::state::TunnelManager>>,
-    mut shutdown_rx: oneshot::Receiver<()>,
-) {
-    let mut reconnect_attempt = 0u32;
+// Use build_protocol_config from app_state
+use crate::state::app_state::build_protocol_config;
 
-    loop {
-        // Calculate backoff delay
-        let backoff_seconds = if reconnect_attempt == 0 {
-            0
-        } else {
-            std::cmp::min(2u64.pow(reconnect_attempt - 1), 30)
-        };
+/// Get real-time metrics for a tunnel (from in-memory MetricsStore)
+#[tauri::command]
+pub async fn get_tunnel_metrics(
+    state: State<'_, AppState>,
+    tunnel_id: String,
+) -> Result<Vec<HttpMetric>, String> {
+    Ok(state.get_tunnel_metrics(&tunnel_id).await)
+}
 
-        if backoff_seconds > 0 {
-            info!(
-                "[{}] Waiting {} seconds before reconnecting...",
-                config_id, backoff_seconds
-            );
+/// Clear metrics for a tunnel
+#[tauri::command]
+pub async fn clear_tunnel_metrics(
+    state: State<'_, AppState>,
+    tunnel_id: String,
+) -> Result<(), String> {
+    state.clear_tunnel_metrics(&tunnel_id).await;
+    Ok(())
+}
 
-            tokio::time::sleep(tokio::time::Duration::from_secs(backoff_seconds)).await;
+/// Replay request parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayRequestParams {
+    pub method: String,
+    pub uri: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<String>,
+}
+
+/// Replay response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<String>,
+    pub duration_ms: u64,
+}
+
+/// Replay a captured HTTP request to the local service
+#[tauri::command]
+pub async fn replay_request(
+    state: State<'_, AppState>,
+    tunnel_id: String,
+    request: ReplayRequestParams,
+) -> Result<ReplayResponse, String> {
+    use std::time::Instant;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    // Get tunnel config to find local port
+    let config = TunnelConfig::find_by_id(&tunnel_id)
+        .one(state.db.as_ref())
+        .await
+        .map_err(|e| format!("Failed to find tunnel: {}", e))?
+        .ok_or_else(|| format!("Tunnel not found: {}", tunnel_id))?;
+
+    let local_addr = format!("{}:{}", config.local_host, config.local_port);
+    let start_time = Instant::now();
+
+    // Connect to local service
+    let mut socket = TcpStream::connect(&local_addr)
+        .await
+        .map_err(|e| format!("Failed to connect to {}: {}", local_addr, e))?;
+
+    // Build HTTP request
+    let mut http_request = format!("{} {} HTTP/1.1\r\n", request.method, request.uri);
+
+    // Add headers
+    let mut has_host = false;
+    let mut has_content_length = false;
+    for (name, value) in &request.headers {
+        if name.to_lowercase() == "host" {
+            has_host = true;
         }
-
-        // Check for shutdown
-        if shutdown_rx.try_recv().is_ok() {
-            info!("[{}] Tunnel stopped by request", config_id);
-            let mut manager = tunnel_manager.write().await;
-            manager.update_status(&config_id, TunnelStatus::Disconnected, None, None, None);
-            break;
+        if name.to_lowercase() == "content-length" {
+            has_content_length = true;
         }
+        http_request.push_str(&format!("{}: {}\r\n", name, value));
+    }
 
-        info!(
-            "[{}] Connecting... (attempt {})",
-            config_id,
-            reconnect_attempt + 1
-        );
+    // Add Host header if missing
+    if !has_host {
+        http_request.push_str(&format!("Host: {}\r\n", local_addr));
+    }
 
-        match TunnelClient::connect(config.clone()).await {
-            Ok(client) => {
-                reconnect_attempt = 0;
+    // Add Content-Length if body present and not already set
+    if let Some(ref body) = request.body {
+        if !has_content_length {
+            http_request.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
+    }
 
-                info!("[{}] Connected successfully!", config_id);
+    http_request.push_str("\r\n");
 
-                let public_url = client.public_url().map(|s| s.to_string());
+    // Write request
+    socket
+        .write_all(http_request.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write request: {}", e))?;
 
-                if let Some(url) = &public_url {
-                    info!("[{}] Public URL: {}", config_id, url);
-                }
+    // Write body if present
+    if let Some(ref body) = request.body {
+        socket
+            .write_all(body.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write body: {}", e))?;
+    }
 
-                // Update status to connected
-                {
-                    let mut manager = tunnel_manager.write().await;
-                    manager.update_status(
-                        &config_id,
-                        TunnelStatus::Connected,
-                        public_url.clone(),
-                        None,
-                        None,
-                    );
-                }
+    // Read response
+    let mut response_data = Vec::new();
+    let mut buffer = [0u8; 8192];
 
-                // Wait for tunnel to close or shutdown signal
-                tokio::select! {
-                    result = client.wait() => {
-                        match result {
-                            Ok(_) => {
-                                info!("[{}] Tunnel closed gracefully", config_id);
-                            }
-                            Err(e) => {
-                                error!("[{}] Tunnel error: {}", config_id, e);
+    // Read with timeout
+    let read_future = async {
+        loop {
+            match socket.read(&mut buffer).await {
+                Ok(0) => break,
+                Ok(n) => response_data.extend_from_slice(&buffer[..n]),
+                Err(e) => return Err(format!("Read error: {}", e)),
+            }
+            // If we have enough data and it looks complete, break
+            if response_data.len() > 0 {
+                let response_str = String::from_utf8_lossy(&response_data);
+                // Check if we have a complete response (has \r\n\r\n and content-length matches or chunked encoding ended)
+                if let Some(header_end) = response_str.find("\r\n\r\n") {
+                    let headers_part = &response_str[..header_end];
+                    if let Some(cl_line) = headers_part
+                        .lines()
+                        .find(|l| l.to_lowercase().starts_with("content-length:"))
+                    {
+                        if let Ok(content_length) = cl_line
+                            .split(':')
+                            .nth(1)
+                            .unwrap_or("0")
+                            .trim()
+                            .parse::<usize>()
+                        {
+                            let body_start = header_end + 4;
+                            if response_data.len() >= body_start + content_length {
+                                break;
                             }
                         }
-                    }
-                    _ = &mut shutdown_rx => {
-                        info!("[{}] Shutdown requested", config_id);
-                        let mut manager = tunnel_manager.write().await;
-                        manager.update_status(&config_id, TunnelStatus::Disconnected, None, None, None);
+                    } else if headers_part
+                        .to_lowercase()
+                        .contains("transfer-encoding: chunked")
+                    {
+                        // For chunked, check if we have 0\r\n\r\n
+                        if response_str.contains("\r\n0\r\n") {
+                            break;
+                        }
+                    } else {
+                        // No content-length, assume complete after small delay
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                         break;
                     }
                 }
-
-                info!(
-                    "[{}] Connection lost, attempting to reconnect...",
-                    config_id
-                );
-            }
-            Err(e) => {
-                error!("[{}] Failed to connect: {}", config_id, e);
-
-                // Update status to error
-                {
-                    let mut manager = tunnel_manager.write().await;
-                    manager.update_status(
-                        &config_id,
-                        TunnelStatus::Error,
-                        None,
-                        None,
-                        Some(e.to_string()),
-                    );
-                }
-
-                // Check if non-recoverable
-                if e.is_non_recoverable() {
-                    error!("[{}] Non-recoverable error, stopping tunnel", config_id);
-                    break;
-                }
-
-                reconnect_attempt += 1;
-
-                // Check for shutdown
-                if shutdown_rx.try_recv().is_ok() {
-                    info!("[{}] Tunnel stopped by request", config_id);
-                    let mut manager = tunnel_manager.write().await;
-                    manager.update_status(&config_id, TunnelStatus::Disconnected, None, None, None);
-                    break;
-                }
             }
         }
+        Ok(())
+    };
+
+    tokio::time::timeout(tokio::time::Duration::from_secs(30), read_future)
+        .await
+        .map_err(|_| "Request timed out".to_string())?
+        .map_err(|e| e)?;
+
+    let duration_ms = start_time.elapsed().as_millis() as u64;
+
+    // Parse response
+    let response_str = String::from_utf8_lossy(&response_data);
+    let mut lines = response_str.lines();
+
+    // Parse status line
+    let status = if let Some(status_line) = lines.next() {
+        let parts: Vec<&str> = status_line.split_whitespace().collect();
+        if parts.len() >= 2 {
+            parts[1].parse().unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    // Parse headers
+    let mut headers = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            headers.push((name.trim().to_string(), value.trim().to_string()));
+        }
     }
+
+    // Extract body (everything after \r\n\r\n)
+    let body = if let Some(pos) = response_str.find("\r\n\r\n") {
+        let body_str = &response_str[pos + 4..];
+        if !body_str.is_empty() {
+            Some(body_str.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok(ReplayResponse {
+        status,
+        headers,
+        body,
+        duration_ms,
+    })
 }
 
-/// Build protocol config from database model
-fn build_protocol_config(config: &tunnel_config::Model) -> Result<ProtocolConfig, String> {
-    let local_port = config.local_port as u16;
+/// Get captured requests for a tunnel (from database - historical)
+#[tauri::command]
+pub async fn get_captured_requests(
+    state: State<'_, AppState>,
+    tunnel_id: String,
+) -> Result<Vec<CapturedRequestResponse>, String> {
+    use crate::db::entities::CapturedRequest;
+    use sea_orm::{ColumnTrait, QueryFilter, QueryOrder, QuerySelect};
 
-    match config.protocol.as_str() {
-        "http" => Ok(ProtocolConfig::Http {
-            local_port,
-            subdomain: config.subdomain.clone(),
-            custom_domain: config.custom_domain.clone(),
-        }),
-        "https" => Ok(ProtocolConfig::Https {
-            local_port,
-            subdomain: config.subdomain.clone(),
-            custom_domain: config.custom_domain.clone(),
-        }),
-        "tcp" => Ok(ProtocolConfig::Tcp {
-            local_port,
-            remote_port: None,
-        }),
-        "tls" => Ok(ProtocolConfig::Tls {
-            local_port,
-            sni_hostname: config.custom_domain.clone(),
-        }),
-        other => Err(format!("Unknown protocol: {}", other)),
-    }
+    // Get the tunnel's current localup_id from the manager
+    let localup_id = {
+        let manager = state.tunnel_manager.read().await;
+        manager.get(&tunnel_id).and_then(|t| t.localup_id.clone())
+    };
+
+    // If tunnel is not connected, return empty list
+    let Some(localup_id) = localup_id else {
+        return Ok(vec![]);
+    };
+
+    // Query captured requests by localup_id
+    let requests = CapturedRequest::find()
+        .filter(crate::db::entities::captured_request::Column::LocalupId.eq(&localup_id))
+        .order_by_desc(crate::db::entities::captured_request::Column::CreatedAt)
+        .limit(100)
+        .all(state.db.as_ref())
+        .await
+        .map_err(|e| format!("Failed to get captured requests: {}", e))?;
+
+    Ok(requests
+        .into_iter()
+        .map(|r| CapturedRequestResponse {
+            id: r.id,
+            tunnel_session_id: r.tunnel_session_id,
+            localup_id: r.localup_id,
+            method: r.method,
+            path: r.path,
+            host: r.host,
+            headers: r.headers,
+            body: r.body,
+            status: r.status,
+            response_headers: r.response_headers,
+            response_body: r.response_body,
+            created_at: r.created_at.to_rfc3339(),
+            latency_ms: r.latency_ms,
+        })
+        .collect())
 }

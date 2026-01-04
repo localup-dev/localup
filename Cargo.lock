@@ -3414,7 +3414,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "libc",
  "localup-lib",
+ "png",
  "sea-orm",
  "sea-orm-migration",
  "serde",

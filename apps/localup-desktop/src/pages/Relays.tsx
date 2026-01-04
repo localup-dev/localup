@@ -38,6 +38,7 @@ import {
   XCircle,
   Loader2,
 } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   listRelays,
   addRelay,
@@ -46,7 +47,17 @@ import {
   testRelay,
   type RelayServer,
   type CreateRelayRequest,
+  type TunnelProtocol,
 } from "@/api/relays";
+
+const ALL_PROTOCOLS: TunnelProtocol[] = ["http", "https", "tcp", "tls"];
+
+const PROTOCOL_LABELS: Record<TunnelProtocol, string> = {
+  http: "HTTP",
+  https: "HTTPS",
+  tcp: "TCP",
+  tls: "TLS/SNI",
+};
 
 export function Relays() {
   const [relays, setRelays] = useState<RelayServer[]>([]);
@@ -65,6 +76,7 @@ export function Relays() {
     protocol: "quic",
     insecure: false,
     is_default: false,
+    supported_protocols: [...ALL_PROTOCOLS],
   });
   const [saving, setSaving] = useState(false);
 
@@ -93,6 +105,7 @@ export function Relays() {
       protocol: "quic",
       insecure: false,
       is_default: relays.length === 0, // First relay is default
+      supported_protocols: [...ALL_PROTOCOLS],
     });
     setDialogOpen(true);
   }
@@ -106,8 +119,27 @@ export function Relays() {
       protocol: relay.protocol,
       insecure: relay.insecure,
       is_default: relay.is_default,
+      supported_protocols: relay.supported_protocols || [...ALL_PROTOCOLS],
     });
     setDialogOpen(true);
+  }
+
+  function toggleProtocol(protocol: TunnelProtocol) {
+    const current = formData.supported_protocols || [];
+    if (current.includes(protocol)) {
+      // Don't allow removing all protocols
+      if (current.length > 1) {
+        setFormData({
+          ...formData,
+          supported_protocols: current.filter((p) => p !== protocol),
+        });
+      }
+    } else {
+      setFormData({
+        ...formData,
+        supported_protocols: [...current, protocol],
+      });
+    }
   }
 
   function openDeleteDialog(relay: RelayServer) {
@@ -260,10 +292,18 @@ export function Relays() {
                 </div>
               </CardHeader>
               <CardContent>
-                <div className="flex gap-4 text-sm text-muted-foreground">
-                  <span>Protocol: {relay.protocol.toUpperCase()}</span>
+                <div className="flex flex-wrap gap-4 text-sm text-muted-foreground">
+                  <span>Connection: {relay.protocol.toUpperCase()}</span>
                   {relay.insecure && <Badge variant="destructive">Insecure</Badge>}
                   {relay.jwt_token && <span>Token configured</span>}
+                </div>
+                <div className="flex gap-2 mt-2">
+                  <span className="text-sm text-muted-foreground">Tunnels:</span>
+                  {relay.supported_protocols?.map((protocol) => (
+                    <Badge key={protocol} variant="outline">
+                      {PROTOCOL_LABELS[protocol]}
+                    </Badge>
+                  ))}
                 </div>
               </CardContent>
             </Card>
@@ -338,6 +378,29 @@ export function Relays() {
                   setFormData({ ...formData, is_default: checked })
                 }
               />
+            </div>
+            <div className="grid gap-2">
+              <Label>Supported Tunnel Protocols</Label>
+              <div className="flex flex-wrap gap-4">
+                {ALL_PROTOCOLS.map((protocol) => (
+                  <div key={protocol} className="flex items-center space-x-2">
+                    <Checkbox
+                      id={`protocol-${protocol}`}
+                      checked={formData.supported_protocols?.includes(protocol)}
+                      onCheckedChange={() => toggleProtocol(protocol)}
+                    />
+                    <label
+                      htmlFor={`protocol-${protocol}`}
+                      className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+                    >
+                      {PROTOCOL_LABELS[protocol]}
+                    </label>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Select which tunnel types this relay supports
+              </p>
             </div>
           </div>
           <DialogFooter>

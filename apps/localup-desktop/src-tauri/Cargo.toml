@@ -4,10 +4,16 @@ version = "0.1.0"
 description = "LocalUp Desktop - Cross-platform tunnel management"
 authors = ["LocalUp Team"]
 edition = "2021"
+default-run = "localup-desktop"
 
 [lib]
 name = "localup_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# Daemon binary - runs independently of the GUI app
+[[bin]]
+name = "localup-daemon"
+path = "src/bin/daemon.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -39,6 +45,11 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
+png = "0.17"
+
+# Unix process management (for daemon)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 default = ["custom-protocol"]

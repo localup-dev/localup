@@ -18,12 +18,24 @@ pub struct RelayServerResponse {
     pub protocol: String,
     pub insecure: bool,
     pub is_default: bool,
+    pub supported_protocols: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
 }
 
 impl From<relay_server::Model> for RelayServerResponse {
     fn from(model: relay_server::Model) -> Self {
+        // Parse supported_protocols from JSON string
+        let supported_protocols: Vec<String> = serde_json::from_str(&model.supported_protocols)
+            .unwrap_or_else(|_| {
+                vec![
+                    "http".to_string(),
+                    "https".to_string(),
+                    "tcp".to_string(),
+                    "tls".to_string(),
+                ]
+            });
+
         Self {
             id: model.id,
             name: model.name,
@@ -32,6 +44,7 @@ impl From<relay_server::Model> for RelayServerResponse {
             protocol: model.protocol,
             insecure: model.insecure,
             is_default: model.is_default,
+            supported_protocols,
             created_at: model.created_at.to_rfc3339(),
             updated_at: model.updated_at.to_rfc3339(),
         }
@@ -47,6 +60,7 @@ pub struct CreateRelayRequest {
     pub protocol: Option<String>,
     pub insecure: Option<bool>,
     pub is_default: Option<bool>,
+    pub supported_protocols: Option<Vec<String>>,
 }
 
 /// Request to update a relay
@@ -58,6 +72,7 @@ pub struct UpdateRelayRequest {
     pub protocol: Option<String>,
     pub insecure: Option<bool>,
     pub is_default: Option<bool>,
+    pub supported_protocols: Option<Vec<String>>,
 }
 
 /// List all configured relay servers
@@ -99,6 +114,18 @@ pub async fn add_relay(
         clear_default_relay(&state).await?;
     }
 
+    // Default supported protocols if not specified
+    let supported_protocols = request.supported_protocols.unwrap_or_else(|| {
+        vec![
+            "http".to_string(),
+            "https".to_string(),
+            "tcp".to_string(),
+            "tls".to_string(),
+        ]
+    });
+    let supported_protocols_json = serde_json::to_string(&supported_protocols)
+        .map_err(|e| format!("Failed to serialize protocols: {}", e))?;
+
     let relay = relay_server::ActiveModel {
         id: Set(id),
         name: Set(request.name),
@@ -107,6 +134,7 @@ pub async fn add_relay(
         protocol: Set(request.protocol.unwrap_or_else(|| "quic".to_string())),
         insecure: Set(request.insecure.unwrap_or(false)),
         is_default: Set(request.is_default.unwrap_or(false)),
+        supported_protocols: Set(supported_protocols_json),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -156,6 +184,11 @@ pub async fn update_relay(
     }
     if let Some(is_default) = request.is_default {
         relay.is_default = Set(is_default);
+    }
+    if let Some(supported_protocols) = request.supported_protocols {
+        let supported_protocols_json = serde_json::to_string(&supported_protocols)
+            .map_err(|e| format!("Failed to serialize protocols: {}", e))?;
+        relay.supported_protocols = Set(supported_protocols_json);
     }
 
     relay.updated_at = Set(Utc::now());

@@ -3,6 +3,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { Layout } from "@/components/layout/Layout";
 import { Dashboard } from "@/pages/Dashboard";
 import { Tunnels } from "@/pages/Tunnels";
+import { TunnelDetail } from "@/pages/TunnelDetail";
 import { Relays } from "@/pages/Relays";
 import { Settings } from "@/pages/Settings";
 
@@ -14,6 +15,7 @@ function App() {
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
           <Route path="tunnels" element={<Tunnels />} />
+          <Route path="tunnels/:id" element={<TunnelDetail />} />
           <Route path="relays" element={<Relays />} />
           <Route path="settings" element={<Settings />} />
         </Route>

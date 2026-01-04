@@ -1,14 +1,16 @@
 //! Global application state
 
 use localup_lib::{
-    ExitNodeConfig, ProtocolConfig, TunnelClient, TunnelConfig as ClientTunnelConfig,
+    ExitNodeConfig, HttpMetric, MetricsEvent, MetricsStore, ProtocolConfig, TunnelClient,
+    TunnelConfig as ClientTunnelConfig,
 };
 use sea_orm::{DatabaseConnection, EntityTrait};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::{oneshot, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use super::{TunnelManager, TunnelStatus};
 use crate::db::entities::{RelayServer, TunnelConfig};
@@ -27,6 +29,12 @@ pub struct AppState {
 
     /// Handles for running tunnel tasks (for shutdown)
     pub tunnel_handles: Arc<RwLock<HashMap<String, TunnelHandle>>>,
+
+    /// Metrics stores for each tunnel (for querying metrics)
+    pub tunnel_metrics: Arc<RwLock<HashMap<String, MetricsStore>>>,
+
+    /// Tauri app handle for emitting events
+    pub app_handle: Arc<RwLock<Option<AppHandle>>>,
 }
 
 impl AppState {
@@ -36,7 +44,39 @@ impl AppState {
             db: Arc::new(db),
             tunnel_manager: Arc::new(RwLock::new(TunnelManager::new())),
             tunnel_handles: Arc::new(RwLock::new(HashMap::new())),
+            tunnel_metrics: Arc::new(RwLock::new(HashMap::new())),
+            app_handle: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set the Tauri app handle for event emission
+    pub async fn set_app_handle(&self, handle: AppHandle) {
+        let mut app_handle = self.app_handle.write().await;
+        *app_handle = Some(handle);
+    }
+
+    /// Get metrics for a specific tunnel
+    pub async fn get_tunnel_metrics(&self, tunnel_id: &str) -> Vec<HttpMetric> {
+        let metrics = self.tunnel_metrics.read().await;
+        if let Some(store) = metrics.get(tunnel_id) {
+            store.get_all().await
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Clear metrics for a specific tunnel
+    pub async fn clear_tunnel_metrics(&self, tunnel_id: &str) {
+        let metrics = self.tunnel_metrics.read().await;
+        if let Some(store) = metrics.get(tunnel_id) {
+            store.clear().await;
+        }
+    }
+
+    /// Remove metrics store when tunnel stops
+    pub async fn remove_tunnel_metrics(&self, tunnel_id: &str) {
+        let mut metrics = self.tunnel_metrics.write().await;
+        metrics.remove(tunnel_id);
     }
 
     /// Start all tunnels marked with auto_start=true
@@ -116,6 +156,8 @@ impl AppState {
             // Spawn tunnel task
             let tunnel_manager = self.tunnel_manager.clone();
             let tunnel_handles = self.tunnel_handles.clone();
+            let tunnel_metrics = self.tunnel_metrics.clone();
+            let app_handle = self.app_handle.clone();
             let config_id = tunnel.id.clone();
 
             let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -125,6 +167,8 @@ impl AppState {
                     config_id.clone(),
                     client_config,
                     tunnel_manager,
+                    tunnel_metrics,
+                    app_handle,
                     shutdown_rx,
                 )
                 .await;
@@ -168,11 +212,20 @@ pub fn build_protocol_config(
     }
 }
 
-/// Run a tunnel with reconnection logic
+/// Metrics event payload for Tauri
+#[derive(Clone, serde::Serialize)]
+pub struct TunnelMetricsPayload {
+    pub tunnel_id: String,
+    pub event: MetricsEvent,
+}
+
+/// Run a tunnel with reconnection logic and metrics forwarding
 pub async fn run_tunnel(
     config_id: String,
     config: ClientTunnelConfig,
     tunnel_manager: Arc<RwLock<TunnelManager>>,
+    tunnel_metrics: Arc<RwLock<HashMap<String, MetricsStore>>>,
+    app_handle: Arc<RwLock<Option<AppHandle>>>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     let mut reconnect_attempt = 0u32;
@@ -199,6 +252,8 @@ pub async fn run_tunnel(
             info!("[{}] Tunnel stopped by request", config_id);
             let mut manager = tunnel_manager.write().await;
             manager.update_status(&config_id, TunnelStatus::Disconnected, None, None, None);
+            // Clean up metrics store
+            tunnel_metrics.write().await.remove(&config_id);
             break;
         }
 
@@ -219,6 +274,48 @@ pub async fn run_tunnel(
                 if let Some(url) = &public_url {
                     info!("[{}] Public URL: {}", config_id, url);
                 }
+
+                // Store the metrics store for this tunnel
+                let metrics_store = client.metrics().clone();
+                {
+                    let mut metrics_map = tunnel_metrics.write().await;
+                    metrics_map.insert(config_id.clone(), metrics_store.clone());
+                }
+
+                // Subscribe to metrics events and forward to Tauri
+                let metrics_rx = metrics_store.subscribe();
+                let config_id_for_metrics = config_id.clone();
+                let app_handle_for_metrics = app_handle.clone();
+
+                let metrics_task = tokio::spawn(async move {
+                    let mut rx = metrics_rx;
+                    loop {
+                        match rx.recv().await {
+                            Ok(event) => {
+                                // Emit event to frontend
+                                if let Some(handle) = app_handle_for_metrics.read().await.as_ref() {
+                                    let payload = TunnelMetricsPayload {
+                                        tunnel_id: config_id_for_metrics.clone(),
+                                        event,
+                                    };
+                                    if let Err(e) = handle.emit("tunnel-metrics", &payload) {
+                                        warn!("Failed to emit metrics event: {}", e);
+                                    }
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                debug!(
+                                    "Metrics channel closed for tunnel {}",
+                                    config_id_for_metrics
+                                );
+                                break;
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("Metrics receiver lagged {} messages", n);
+                            }
+                        }
+                    }
+                });
 
                 // Update status to connected
                 {
@@ -248,9 +345,15 @@ pub async fn run_tunnel(
                         info!("[{}] Shutdown requested", config_id);
                         let mut manager = tunnel_manager.write().await;
                         manager.update_status(&config_id, TunnelStatus::Disconnected, None, None, None);
+                        // Clean up metrics
+                        tunnel_metrics.write().await.remove(&config_id);
+                        metrics_task.abort();
                         break;
                     }
                 }
+
+                // Abort metrics task when connection ends
+                metrics_task.abort();
 
                 info!(
                     "[{}] Connection lost, attempting to reconnect...",
@@ -275,6 +378,8 @@ pub async fn run_tunnel(
                 // Check if non-recoverable
                 if e.is_non_recoverable() {
                     error!("[{}] Non-recoverable error, stopping tunnel", config_id);
+                    // Clean up metrics store
+                    tunnel_metrics.write().await.remove(&config_id);
                     break;
                 }
 
@@ -285,6 +390,8 @@ pub async fn run_tunnel(
                     info!("[{}] Tunnel stopped by request", config_id);
                     let mut manager = tunnel_manager.write().await;
                     manager.update_status(&config_id, TunnelStatus::Disconnected, None, None, None);
+                    // Clean up metrics store
+                    tunnel_metrics.write().await.remove(&config_id);
                     break;
                 }
             }
