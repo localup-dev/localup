@@ -575,6 +575,12 @@ mod ipc_tests {
                     IpcRequest::Reload => IpcResponse::Ok {
                         message: Some("Reloaded".to_string()),
                     },
+                    IpcRequest::ReloadTunnel { .. } => IpcResponse::Ok {
+                        message: Some("Tunnel reloaded".to_string()),
+                    },
+                    IpcRequest::Shutdown => IpcResponse::Ok {
+                        message: Some("Shutting down".to_string()),
+                    },
                 };
                 conn.send(&response).await.unwrap();
             }

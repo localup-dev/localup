@@ -1,14 +1,21 @@
 //! IPC (Inter-Process Communication) module for daemon-CLI communication
 //!
-//! Uses Unix domain sockets for local IPC. The daemon listens on a socket
-//! and the CLI connects to query status or send commands.
+//! Uses Unix domain sockets on Unix platforms and named pipes on Windows
+//! for local IPC. The daemon listens on a socket/pipe and the CLI connects
+//! to query status or send commands.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+// Platform-specific imports
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
+
+#[cfg(windows)]
+use tokio::net::{TcpListener, TcpStream};
 
 /// IPC request from CLI to daemon
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -114,7 +121,8 @@ impl std::fmt::Display for TunnelStatusDisplay {
     }
 }
 
-/// Get the path to the daemon socket file
+/// Get the path to the daemon socket file (Unix) or port file (Windows)
+#[cfg(unix)]
 pub fn socket_path() -> PathBuf {
     dirs::home_dir()
         .expect("Failed to get home directory")
@@ -122,11 +130,54 @@ pub fn socket_path() -> PathBuf {
         .join("daemon.sock")
 }
 
+/// On Windows, we use a fixed localhost port stored in a file
+#[cfg(windows)]
+pub fn socket_path() -> PathBuf {
+    dirs::home_dir()
+        .expect("Failed to get home directory")
+        .join(".localup")
+        .join("daemon.port")
+}
+
+/// Default port for Windows IPC (used if port file doesn't exist)
+#[cfg(windows)]
+const DEFAULT_IPC_PORT: u16 = 17845;
+
+/// Read the IPC port from the port file on Windows
+#[cfg(windows)]
+fn read_ipc_port() -> u16 {
+    let port_path = socket_path();
+    if port_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&port_path) {
+            if let Ok(port) = content.trim().parse() {
+                return port;
+            }
+        }
+    }
+    DEFAULT_IPC_PORT
+}
+
+/// Write the IPC port to the port file on Windows
+#[cfg(windows)]
+fn write_ipc_port(port: u16) -> std::io::Result<()> {
+    let port_path = socket_path();
+    if let Some(parent) = port_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&port_path, port.to_string())
+}
+
+// ============================================================================
+// Unix Implementation
+// ============================================================================
+
+#[cfg(unix)]
 /// IPC client for CLI to connect to daemon
 pub struct IpcClient {
     stream: BufReader<UnixStream>,
 }
 
+#[cfg(unix)]
 impl IpcClient {
     /// Connect to the daemon socket
     pub async fn connect() -> Result<Self> {
@@ -184,12 +235,14 @@ impl IpcClient {
     }
 }
 
+#[cfg(unix)]
 /// IPC server for daemon to listen for CLI connections
 pub struct IpcServer {
     listener: UnixListener,
     socket_path: PathBuf,
 }
 
+#[cfg(unix)]
 impl IpcServer {
     /// Bind to the daemon socket
     pub async fn bind() -> Result<Self> {
@@ -244,6 +297,7 @@ impl IpcServer {
     }
 }
 
+#[cfg(unix)]
 impl Drop for IpcServer {
     fn drop(&mut self) {
         // Clean up socket file on shutdown
@@ -253,11 +307,13 @@ impl Drop for IpcServer {
     }
 }
 
+#[cfg(unix)]
 /// A single IPC connection from a client
 pub struct IpcConnection {
     stream: BufReader<UnixStream>,
 }
 
+#[cfg(unix)]
 impl IpcConnection {
     /// Receive a request from the client
     pub async fn recv(&mut self) -> Result<IpcRequest> {
@@ -297,6 +353,188 @@ impl IpcConnection {
         Ok(())
     }
 }
+
+// ============================================================================
+// Windows Implementation (using TCP on localhost)
+// ============================================================================
+
+#[cfg(windows)]
+/// IPC client for CLI to connect to daemon
+pub struct IpcClient {
+    stream: BufReader<TcpStream>,
+}
+
+#[cfg(windows)]
+impl IpcClient {
+    /// Connect to the daemon
+    pub async fn connect() -> Result<Self> {
+        let port = read_ipc_port();
+        let addr = format!("127.0.0.1:{}", port);
+        let stream = TcpStream::connect(&addr)
+            .await
+            .with_context(|| format!("Failed to connect to daemon at {}", addr))?;
+
+        Ok(Self {
+            stream: BufReader::new(stream),
+        })
+    }
+
+    /// Connect to a specific port (for testing)
+    pub async fn connect_to_port(port: u16) -> Result<Self> {
+        let addr = format!("127.0.0.1:{}", port);
+        let stream = TcpStream::connect(&addr)
+            .await
+            .with_context(|| format!("Failed to connect to {}", addr))?;
+
+        Ok(Self {
+            stream: BufReader::new(stream),
+        })
+    }
+
+    /// Send a request and receive a response
+    pub async fn request(&mut self, req: &IpcRequest) -> Result<IpcResponse> {
+        // Serialize request to JSON and send with newline delimiter
+        let mut json = serde_json::to_string(req)?;
+        json.push('\n');
+
+        self.stream
+            .get_mut()
+            .write_all(json.as_bytes())
+            .await
+            .context("Failed to send request")?;
+
+        self.stream
+            .get_mut()
+            .flush()
+            .await
+            .context("Failed to flush request")?;
+
+        // Read response line
+        let mut response_line = String::new();
+        self.stream
+            .read_line(&mut response_line)
+            .await
+            .context("Failed to read response")?;
+
+        // Parse response
+        let response: IpcResponse =
+            serde_json::from_str(&response_line).context("Failed to parse response")?;
+
+        Ok(response)
+    }
+}
+
+#[cfg(windows)]
+/// IPC server for daemon to listen for CLI connections
+pub struct IpcServer {
+    listener: TcpListener,
+    port: u16,
+}
+
+#[cfg(windows)]
+impl IpcServer {
+    /// Bind to the daemon port
+    pub async fn bind() -> Result<Self> {
+        Self::bind_to_port(DEFAULT_IPC_PORT).await
+    }
+
+    /// Bind to a specific port
+    pub async fn bind_to_port(port: u16) -> Result<Self> {
+        let addr = format!("127.0.0.1:{}", port);
+
+        // Try to connect to see if another daemon is running
+        if TcpStream::connect(&addr).await.is_ok() {
+            anyhow::bail!(
+                "Another daemon is already running (port {} is in use)",
+                port
+            );
+        }
+
+        let listener = TcpListener::bind(&addr)
+            .await
+            .with_context(|| format!("Failed to bind to {}", addr))?;
+
+        // Write port to file so clients can find us
+        write_ipc_port(port)?;
+
+        Ok(Self { listener, port })
+    }
+
+    /// Accept an incoming connection
+    pub async fn accept(&self) -> Result<IpcConnection> {
+        let (stream, _) = self.listener.accept().await?;
+        Ok(IpcConnection {
+            stream: BufReader::new(stream),
+        })
+    }
+
+    /// Get the port
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+#[cfg(windows)]
+impl Drop for IpcServer {
+    fn drop(&mut self) {
+        // Clean up port file on shutdown
+        let port_path = socket_path();
+        if port_path.exists() {
+            let _ = std::fs::remove_file(&port_path);
+        }
+    }
+}
+
+#[cfg(windows)]
+/// A single IPC connection from a client
+pub struct IpcConnection {
+    stream: BufReader<TcpStream>,
+}
+
+#[cfg(windows)]
+impl IpcConnection {
+    /// Receive a request from the client
+    pub async fn recv(&mut self) -> Result<IpcRequest> {
+        let mut line = String::new();
+        let bytes_read = self
+            .stream
+            .read_line(&mut line)
+            .await
+            .context("Failed to read request")?;
+
+        if bytes_read == 0 {
+            anyhow::bail!("Connection closed");
+        }
+
+        let request: IpcRequest = serde_json::from_str(&line).context("Failed to parse request")?;
+
+        Ok(request)
+    }
+
+    /// Send a response to the client
+    pub async fn send(&mut self, response: &IpcResponse) -> Result<()> {
+        let mut json = serde_json::to_string(response)?;
+        json.push('\n');
+
+        self.stream
+            .get_mut()
+            .write_all(json.as_bytes())
+            .await
+            .context("Failed to send response")?;
+
+        self.stream
+            .get_mut()
+            .flush()
+            .await
+            .context("Failed to flush response")?;
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Helper functions
+// ============================================================================
 
 /// Format duration in human-readable format
 pub fn format_duration(seconds: u64) -> String {
@@ -511,8 +749,16 @@ mod tests {
     #[test]
     fn test_socket_path() {
         let path = socket_path();
-        assert!(path.ends_with("daemon.sock"));
-        assert!(path.to_string_lossy().contains(".localup"));
+        #[cfg(unix)]
+        {
+            assert!(path.ends_with("daemon.sock"));
+            assert!(path.to_string_lossy().contains(".localup"));
+        }
+        #[cfg(windows)]
+        {
+            assert!(path.ends_with("daemon.port"));
+            assert!(path.to_string_lossy().contains(".localup"));
+        }
     }
 
     #[test]
@@ -545,158 +791,202 @@ mod tests {
         assert_eq!(parsed.last_error, Some("Connection timeout".to_string()));
     }
 
-    #[tokio::test]
-    async fn test_ipc_client_server_roundtrip() {
-        use tempfile::TempDir;
+    // Unix-only integration tests
+    #[cfg(unix)]
+    mod unix_tests {
+        use super::*;
 
-        let temp_dir = TempDir::new().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
+        #[tokio::test]
+        async fn test_ipc_client_server_roundtrip() {
+            use tempfile::TempDir;
 
-        // Start server
-        let server = IpcServer::bind_to(&socket_path).await.unwrap();
+            let temp_dir = TempDir::new().unwrap();
+            let socket_path = temp_dir.path().join("test.sock");
 
-        // Spawn server handler
-        let server_handle = tokio::spawn(async move {
-            let mut conn = server.accept().await.unwrap();
-            let request = conn.recv().await.unwrap();
+            // Start server
+            let server = IpcServer::bind_to(&socket_path).await.unwrap();
 
-            let response = match request {
-                IpcRequest::Ping => IpcResponse::Pong,
-                IpcRequest::GetStatus => IpcResponse::Status {
-                    tunnels: HashMap::new(),
-                },
-                _ => IpcResponse::Error {
-                    message: "Unknown request".to_string(),
-                },
-            };
+            // Spawn server handler
+            let server_handle = tokio::spawn(async move {
+                let mut conn = server.accept().await.unwrap();
+                let request = conn.recv().await.unwrap();
 
-            conn.send(&response).await.unwrap();
-        });
-
-        // Connect client and send request
-        let mut client = IpcClient::connect_to(&socket_path).await.unwrap();
-        let response = client.request(&IpcRequest::Ping).await.unwrap();
-
-        assert_eq!(response, IpcResponse::Pong);
-
-        server_handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_ipc_get_status_roundtrip() {
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().unwrap();
-        let socket_path = temp_dir.path().join("test.sock");
-
-        // Start server
-        let server = IpcServer::bind_to(&socket_path).await.unwrap();
-
-        // Spawn server handler with status data
-        let server_handle = tokio::spawn(async move {
-            let mut conn = server.accept().await.unwrap();
-            let request = conn.recv().await.unwrap();
-
-            if let IpcRequest::GetStatus = request {
-                let mut tunnels = HashMap::new();
-                tunnels.insert(
-                    "api".to_string(),
-                    TunnelStatusInfo {
-                        name: "api".to_string(),
-                        protocol: "http".to_string(),
-                        local_port: 3000,
-                        public_url: Some("https://api.example.com".to_string()),
-                        status: TunnelStatusDisplay::Connected,
-                        uptime_seconds: Some(120),
-                        last_error: None,
+                let response = match request {
+                    IpcRequest::Ping => IpcResponse::Pong,
+                    IpcRequest::GetStatus => IpcResponse::Status {
+                        tunnels: HashMap::new(),
                     },
-                );
+                    _ => IpcResponse::Error {
+                        message: "Unknown request".to_string(),
+                    },
+                };
 
-                conn.send(&IpcResponse::Status { tunnels }).await.unwrap();
-            }
-        });
+                conn.send(&response).await.unwrap();
+            });
 
-        // Connect client and get status
-        let mut client = IpcClient::connect_to(&socket_path).await.unwrap();
-        let response = client.request(&IpcRequest::GetStatus).await.unwrap();
+            // Connect client and send request
+            let mut client = IpcClient::connect_to(&socket_path).await.unwrap();
+            let response = client.request(&IpcRequest::Ping).await.unwrap();
 
-        if let IpcResponse::Status { tunnels } = response {
-            assert_eq!(tunnels.len(), 1);
-            let api = tunnels.get("api").unwrap();
-            assert_eq!(api.name, "api");
-            assert_eq!(api.protocol, "http");
-            assert_eq!(api.local_port, 3000);
-            assert_eq!(api.status, TunnelStatusDisplay::Connected);
-        } else {
-            panic!("Expected Status response");
+            assert_eq!(response, IpcResponse::Pong);
+
+            server_handle.await.unwrap();
         }
 
-        server_handle.await.unwrap();
-    }
+        #[tokio::test]
+        async fn test_ipc_get_status_roundtrip() {
+            use tempfile::TempDir;
 
-    #[tokio::test]
-    async fn test_ipc_stale_socket_cleanup() {
-        use tempfile::TempDir;
+            let temp_dir = TempDir::new().unwrap();
+            let socket_path = temp_dir.path().join("test.sock");
 
-        let temp_dir = TempDir::new().unwrap();
-        let socket_path = temp_dir.path().join("stale.sock");
+            // Start server
+            let server = IpcServer::bind_to(&socket_path).await.unwrap();
 
-        // Create a stale socket file (not a real socket)
-        std::fs::write(&socket_path, "stale").unwrap();
+            // Spawn server handler with status data
+            let server_handle = tokio::spawn(async move {
+                let mut conn = server.accept().await.unwrap();
+                let request = conn.recv().await.unwrap();
 
-        // Server should clean up stale socket and bind successfully
-        let server = IpcServer::bind_to(&socket_path).await.unwrap();
-        assert!(socket_path.exists());
+                if let IpcRequest::GetStatus = request {
+                    let mut tunnels = HashMap::new();
+                    tunnels.insert(
+                        "api".to_string(),
+                        TunnelStatusInfo {
+                            name: "api".to_string(),
+                            protocol: "http".to_string(),
+                            local_port: 3000,
+                            public_url: Some("https://api.example.com".to_string()),
+                            status: TunnelStatusDisplay::Connected,
+                            uptime_seconds: Some(120),
+                            last_error: None,
+                        },
+                    );
 
-        drop(server);
+                    conn.send(&IpcResponse::Status { tunnels }).await.unwrap();
+                }
+            });
 
-        // Socket should be cleaned up on drop
-        assert!(!socket_path.exists());
-    }
+            // Connect client and get status
+            let mut client = IpcClient::connect_to(&socket_path).await.unwrap();
+            let response = client.request(&IpcRequest::GetStatus).await.unwrap();
 
-    #[tokio::test]
-    async fn test_ipc_multiple_requests() {
-        use tempfile::TempDir;
-
-        let temp_dir = TempDir::new().unwrap();
-        let socket_path = temp_dir.path().join("multi.sock");
-
-        let server = IpcServer::bind_to(&socket_path).await.unwrap();
-
-        // Server handles multiple requests on same connection
-        let server_handle = tokio::spawn(async move {
-            let mut conn = server.accept().await.unwrap();
-
-            // Handle first request
-            let req1 = conn.recv().await.unwrap();
-            assert_eq!(req1, IpcRequest::Ping);
-            conn.send(&IpcResponse::Pong).await.unwrap();
-
-            // Handle second request
-            let req2 = conn.recv().await.unwrap();
-            assert_eq!(req2, IpcRequest::Reload);
-            conn.send(&IpcResponse::Ok {
-                message: Some("Reloaded".to_string()),
-            })
-            .await
-            .unwrap();
-        });
-
-        let mut client = IpcClient::connect_to(&socket_path).await.unwrap();
-
-        // Send first request
-        let resp1 = client.request(&IpcRequest::Ping).await.unwrap();
-        assert_eq!(resp1, IpcResponse::Pong);
-
-        // Send second request on same connection
-        let resp2 = client.request(&IpcRequest::Reload).await.unwrap();
-        assert_eq!(
-            resp2,
-            IpcResponse::Ok {
-                message: Some("Reloaded".to_string())
+            if let IpcResponse::Status { tunnels } = response {
+                assert_eq!(tunnels.len(), 1);
+                let api = tunnels.get("api").unwrap();
+                assert_eq!(api.name, "api");
+                assert_eq!(api.protocol, "http");
+                assert_eq!(api.local_port, 3000);
+                assert_eq!(api.status, TunnelStatusDisplay::Connected);
+            } else {
+                panic!("Expected Status response");
             }
-        );
 
-        server_handle.await.unwrap();
+            server_handle.await.unwrap();
+        }
+
+        #[tokio::test]
+        async fn test_ipc_stale_socket_cleanup() {
+            use tempfile::TempDir;
+
+            let temp_dir = TempDir::new().unwrap();
+            let socket_path = temp_dir.path().join("stale.sock");
+
+            // Create a stale socket file (not a real socket)
+            std::fs::write(&socket_path, "stale").unwrap();
+
+            // Server should clean up stale socket and bind successfully
+            let server = IpcServer::bind_to(&socket_path).await.unwrap();
+            assert!(socket_path.exists());
+
+            drop(server);
+
+            // Socket should be cleaned up on drop
+            assert!(!socket_path.exists());
+        }
+
+        #[tokio::test]
+        async fn test_ipc_multiple_requests() {
+            use tempfile::TempDir;
+
+            let temp_dir = TempDir::new().unwrap();
+            let socket_path = temp_dir.path().join("multi.sock");
+
+            let server = IpcServer::bind_to(&socket_path).await.unwrap();
+
+            // Server handles multiple requests on same connection
+            let server_handle = tokio::spawn(async move {
+                let mut conn = server.accept().await.unwrap();
+
+                // Handle first request
+                let req1 = conn.recv().await.unwrap();
+                assert_eq!(req1, IpcRequest::Ping);
+                conn.send(&IpcResponse::Pong).await.unwrap();
+
+                // Handle second request
+                let req2 = conn.recv().await.unwrap();
+                assert_eq!(req2, IpcRequest::Reload);
+                conn.send(&IpcResponse::Ok {
+                    message: Some("Reloaded".to_string()),
+                })
+                .await
+                .unwrap();
+            });
+
+            let mut client = IpcClient::connect_to(&socket_path).await.unwrap();
+
+            // Send first request
+            let resp1 = client.request(&IpcRequest::Ping).await.unwrap();
+            assert_eq!(resp1, IpcResponse::Pong);
+
+            // Send second request on same connection
+            let resp2 = client.request(&IpcRequest::Reload).await.unwrap();
+            assert_eq!(
+                resp2,
+                IpcResponse::Ok {
+                    message: Some("Reloaded".to_string())
+                }
+            );
+
+            server_handle.await.unwrap();
+        }
+    }
+
+    // Windows integration tests
+    #[cfg(windows)]
+    mod windows_tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn test_ipc_client_server_roundtrip() {
+            // Use a random high port to avoid conflicts
+            let port = 19845;
+
+            // Start server
+            let server = IpcServer::bind_to_port(port).await.unwrap();
+
+            // Spawn server handler
+            let server_handle = tokio::spawn(async move {
+                let mut conn = server.accept().await.unwrap();
+                let request = conn.recv().await.unwrap();
+
+                let response = match request {
+                    IpcRequest::Ping => IpcResponse::Pong,
+                    _ => IpcResponse::Error {
+                        message: "Unknown request".to_string(),
+                    },
+                };
+
+                conn.send(&response).await.unwrap();
+            });
+
+            // Connect client and send request
+            let mut client = IpcClient::connect_to_port(port).await.unwrap();
+            let response = client.request(&IpcRequest::Ping).await.unwrap();
+
+            assert_eq!(response, IpcResponse::Pong);
+
+            server_handle.await.unwrap();
+        }
     }
 }
