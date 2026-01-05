@@ -228,13 +228,6 @@ jobs:
             daemon_target: "x86_64-unknown-linux-gnu"
             args: ""
 
-          # Windows AMD64
-          - platform: windows
-            runner: windows-latest
-            rust_target: "x86_64-pc-windows-msvc"
-            daemon_target: "x86_64-pc-windows-msvc"
-            args: ""
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -311,18 +304,6 @@ jobs:
              "apps/localup-desktop/src-tauri/binaries/localup-daemon-${{ matrix.daemon_target }}"
           ls -la apps/localup-desktop/src-tauri/binaries/
 
-      - name: Build daemon binary (Windows)
-        if: matrix.platform == 'windows'
-        env:
-          LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path apps/localup-desktop/src-tauri/binaries
-          cargo build --release --target x86_64-pc-windows-msvc -p localup-cli
-          Copy-Item "target/x86_64-pc-windows-msvc/release/localup.exe" `
-                    "apps/localup-desktop/src-tauri/binaries/localup-daemon-x86_64-pc-windows-msvc.exe"
-          Get-ChildItem apps/localup-desktop/src-tauri/binaries/
-
       # Install frontend dependencies
       - name: Install frontend dependencies
         working-directory: apps/localup-desktop
@@ -369,8 +350,6 @@ jobs:
             apps/localup-desktop/src-tauri/target/release/bundle/**/*.deb
             apps/localup-desktop/src-tauri/target/release/bundle/**/*.AppImage
             apps/localup-desktop/src-tauri/target/release/bundle/**/*.rpm
-            apps/localup-desktop/src-tauri/target/release/bundle/**/*.msi
-            apps/localup-desktop/src-tauri/target/release/bundle/**/*.exe
             apps/localup-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.dmg
             apps/localup-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.app
             apps/localup-desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/**/*.dmg
@@ -400,14 +379,12 @@ jobs:
           find artifacts/ -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "checksums-*.txt" \) \
             -exec cp {} release/ \;
 
-          # Desktop app installers
+          # Desktop app installers (macOS and Linux only)
           find artifacts/tauri-* -type f \( \
             -name "*.dmg" -o \
             -name "*.deb" -o \
             -name "*.AppImage" -o \
-            -name "*.rpm" -o \
-            -name "*.msi" -o \
-            -name "*.exe" \
+            -name "*.rpm" \
           \) -exec cp {} release/ \; 2>/dev/null || true
 
           # Create a combined checksums file
@@ -417,7 +394,7 @@ jobs:
           fi
 
           # Add checksums for desktop apps
-          for f in *.dmg *.deb *.AppImage *.rpm *.msi; do
+          for f in *.dmg *.deb *.AppImage *.rpm; do
             if [ -f "$f" ]; then
               shasum -a 256 "$f" >> SHA256SUMS.txt
             fi
@@ -482,9 +459,6 @@ jobs:
             - **AppImage**: `local-up_${{ steps.get_version.outputs.VERSION }}_amd64.AppImage`
             - **RPM (Fedora/RHEL)**: `local-up-${{ steps.get_version.outputs.VERSION }}-1.x86_64.rpm`
 
-            ### Windows
-            - **MSI Installer**: `LocalUp_${{ steps.get_version.outputs.VERSION }}_x64_en-US.msi`
-
             ---
 
             ## CLI Tool
@@ -538,7 +512,6 @@ jobs:
             release/*.deb
             release/*.AppImage
             release/*.rpm
-            release/*.msi
             release/checksums-*.txt
             release/SHA256SUMS.txt
         env:
