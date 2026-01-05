@@ -165,3 +165,27 @@ pub async fn daemon_delete_tunnel(id: String) -> Result<(), String> {
         .await
         .map_err(|e| format!("Failed to delete tunnel: {}", e))
 }
+
+/// Get daemon logs (last N lines)
+#[tauri::command]
+pub async fn get_daemon_logs(lines: Option<usize>) -> Result<String, String> {
+    let log_path = crate::daemon::log_path();
+    let lines = lines.unwrap_or(100);
+
+    if !log_path.exists() {
+        return Ok(String::new());
+    }
+
+    // Read the log file
+    let content =
+        std::fs::read_to_string(&log_path).map_err(|e| format!("Failed to read logs: {}", e))?;
+
+    // Get last N lines
+    let log_lines: Vec<&str> = content.lines().collect();
+    let start = log_lines.len().saturating_sub(lines);
+    let result = log_lines[start..].join("\n");
+
+    // Strip ANSI escape codes for cleaner display
+    let ansi_regex = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    Ok(ansi_regex.replace_all(&result, "").to_string())
+}

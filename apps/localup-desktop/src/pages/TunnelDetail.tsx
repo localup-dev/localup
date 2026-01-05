@@ -10,6 +10,14 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -18,15 +26,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Separator } from "@/components/ui/separator";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import {
   ArrowLeft,
   Copy,
@@ -46,7 +53,16 @@ import {
   Trash2,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   RotateCcw,
+  Search,
+  X,
+  FileJson,
+  FileText,
+  Binary,
+  Check,
+  Download,
 } from "lucide-react";
 import { toast } from "sonner";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -56,11 +72,9 @@ import {
   stopTunnel,
   getTunnelMetrics,
   clearTunnelMetrics,
-  subscribeToMetrics,
   replayRequest,
   type Tunnel,
   type HttpMetric,
-  type TunnelMetricsPayload,
   type BodyData,
   type ReplayResponse,
 } from "@/api/tunnels";
@@ -149,15 +163,200 @@ function formatBodyData(body: BodyData | null): string {
   }
 }
 
-function headersToObject(headers: [string, string][]): Record<string, string> {
-  const obj: Record<string, string> = {};
-  for (const [key, value] of headers) {
-    obj[key] = value;
-  }
-  return obj;
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
-function RequestDetailDialog({
+function getBodyTypeIcon(contentType: string) {
+  if (contentType.includes("json")) {
+    return <FileJson className="h-4 w-4" />;
+  } else if (contentType.includes("text") || contentType.includes("html") || contentType.includes("xml")) {
+    return <FileText className="h-4 w-4" />;
+  } else {
+    return <Binary className="h-4 w-4" />;
+  }
+}
+
+function CopyButton({ text, label }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-7 px-2"
+      onClick={handleCopy}
+    >
+      {copied ? (
+        <Check className="h-3 w-3 text-green-500" />
+      ) : (
+        <Copy className="h-3 w-3" />
+      )}
+      {label && <span className="ml-1 text-xs">{label}</span>}
+    </Button>
+  );
+}
+
+function HeadersSection({
+  headers,
+  title,
+  defaultOpen = true
+}: {
+  headers: [string, string][];
+  title: string;
+  defaultOpen?: boolean;
+}) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  const headersText = headers.map(([k, v]) => `${k}: ${v}`).join("\n");
+
+  return (
+    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+      <div className="flex items-center justify-between">
+        <CollapsibleTrigger className="flex items-center gap-2 text-sm font-medium hover:underline">
+          {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+          {title}
+          <Badge variant="secondary" className="text-xs">
+            {headers.length}
+          </Badge>
+        </CollapsibleTrigger>
+        <CopyButton text={headersText} />
+      </div>
+      <CollapsibleContent className="mt-2">
+        <div className="rounded-md border bg-muted/30 overflow-hidden">
+          <ScrollArea className="h-[180px]">
+            <table className="w-full text-xs">
+              <tbody>
+                {headers.map(([name, value], idx) => (
+                  <tr key={idx} className="border-b last:border-0 hover:bg-muted/50">
+                    <td className="px-3 py-1.5 font-mono font-medium text-muted-foreground whitespace-nowrap align-top w-1/3">
+                      {name}
+                    </td>
+                    <td className="px-3 py-1.5 font-mono break-all">
+                      {value}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </ScrollArea>
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+function DownloadButton({ content, filename, contentType }: { content: string; filename: string; contentType: string }) {
+  const handleDownload = () => {
+    const blob = new Blob([content], { type: contentType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast.success(`Downloaded ${filename}`);
+  };
+
+  return (
+    <Button variant="ghost" size="sm" className="h-7 px-2" onClick={handleDownload}>
+      <Download className="h-3 w-3" />
+      <span className="ml-1 text-xs">Download</span>
+    </Button>
+  );
+}
+
+function BodySection({
+  body,
+  title = "Body",
+  defaultOpen = true,
+  filename = "response"
+}: {
+  body: BodyData | null;
+  title?: string;
+  defaultOpen?: boolean;
+  filename?: string;
+}) {
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+
+  if (!body) {
+    return (
+      <div className="text-sm text-muted-foreground italic">
+        No body
+      </div>
+    );
+  }
+
+  const formattedBody = formatBodyData(body);
+  const isJson = body.content_type.includes("json") && body.data.type === "Json";
+  const isLarge = body.size > 10 * 1024; // Show download button for bodies > 10KB
+
+  // Determine file extension based on content type
+  const getFileExtension = (ct: string): string => {
+    if (ct.includes("json")) return ".json";
+    if (ct.includes("html")) return ".html";
+    if (ct.includes("xml")) return ".xml";
+    if (ct.includes("javascript")) return ".js";
+    if (ct.includes("css")) return ".css";
+    return ".txt";
+  };
+
+  const downloadFilename = `${filename}${getFileExtension(body.content_type)}`;
+
+  return (
+    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+      <div className="flex items-center justify-between">
+        <CollapsibleTrigger className="flex items-center gap-2 text-sm font-medium hover:underline">
+          {isOpen ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+          {title}
+        </CollapsibleTrigger>
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            {getBodyTypeIcon(body.content_type)}
+            <span>{body.content_type.split(";")[0]}</span>
+            <Separator orientation="vertical" className="h-3" />
+            <span>{formatBytes(body.size)}</span>
+          </div>
+          {body.data.type !== "Binary" && (
+            <>
+              {isLarge && (
+                <DownloadButton
+                  content={formattedBody}
+                  filename={downloadFilename}
+                  contentType={body.content_type}
+                />
+              )}
+              <CopyButton text={formattedBody} />
+            </>
+          )}
+        </div>
+      </div>
+      <CollapsibleContent className="mt-2">
+        <div className="rounded-md border bg-muted/30 overflow-hidden">
+          <ScrollArea className="h-[280px]">
+            <pre className={`p-3 text-xs font-mono whitespace-pre-wrap break-all ${isJson ? "text-emerald-600 dark:text-emerald-400" : ""}`}>
+              {formattedBody}
+            </pre>
+          </ScrollArea>
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+function RequestDetailSidebar({
   request,
   open,
   onOpenChange,
@@ -170,19 +369,24 @@ function RequestDetailDialog({
 }) {
   const [replaying, setReplaying] = useState(false);
   const [replayResult, setReplayResult] = useState<ReplayResponse | null>(null);
+  const [activeTab, setActiveTab] = useState<string>("request");
+
+  // Reset state when sidebar opens with a new request
+  useEffect(() => {
+    if (open && request) {
+      setReplayResult(null);
+      setActiveTab("request");
+    }
+  }, [open, request?.id]);
 
   if (!request) return null;
 
-  const requestHeaders = headersToObject(request.request_headers);
-  const responseHeaders = request.response_headers
-    ? headersToObject(request.response_headers)
-    : {};
+  const host = request.request_headers.find(([k]) => k.toLowerCase() === "host")?.[1] || "";
 
   const handleReplay = async () => {
     setReplaying(true);
     setReplayResult(null);
     try {
-      // Extract body text from BodyData if present
       let bodyText: string | null = null;
       if (request.request_body) {
         bodyText = formatBodyData(request.request_body);
@@ -195,6 +399,7 @@ function RequestDetailDialog({
         body: bodyText,
       });
       setReplayResult(result);
+      setActiveTab("replay");
       toast.success(`Replay completed: ${result.status} (${result.duration_ms}ms)`);
     } catch (error) {
       toast.error("Replay failed", { description: String(error) });
@@ -213,147 +418,205 @@ function RequestDetailDialog({
     }
   };
 
+  // Generate cURL command
+  const generateCurl = () => {
+    const headers = request.request_headers
+      .map(([k, v]) => `-H '${k}: ${v}'`)
+      .join(" \\\n  ");
+    const body = request.request_body ? formatBodyData(request.request_body) : null;
+    const bodyFlag = body ? ` \\\n  -d '${body.replace(/'/g, "'\\''")}'` : "";
+    return `curl -X ${request.method} '${host}${request.uri}' \\\n  ${headers}${bodyFlag}`;
+  };
+
+  if (!open) return null;
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[90vh]">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
+    <div className="w-[500px] flex-shrink-0 border-l bg-background flex flex-col h-full">
+      {/* Header */}
+      <div className="px-6 py-4 border-b flex-shrink-0 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
             {getMethodBadge(request.method)}
-            <span className="font-mono text-sm truncate flex-1">{request.uri}</span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleReplay}
-              disabled={replaying}
-            >
-              {replaying ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <RotateCcw className="h-4 w-4 mr-2" />
-              )}
-              Replay
-            </Button>
-          </DialogTitle>
-          <DialogDescription>
-            <span className="font-mono">{requestHeaders["host"] || requestHeaders["Host"] || ""}</span>
-            {request.duration_ms && <span className="ml-2">({request.duration_ms}ms)</span>}
-          </DialogDescription>
-        </DialogHeader>
-        <Tabs defaultValue={replayResult ? "replay" : "request"} className="w-full">
-          <TabsList className={`grid w-full ${replayResult ? "grid-cols-3" : "grid-cols-2"}`}>
-            <TabsTrigger value="request">
-              <ArrowUpFromLine className="h-4 w-4 mr-2" />
+            <code className="font-mono text-sm bg-muted px-2 py-1 rounded truncate">
+              {request.uri}
+            </code>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 flex-shrink-0"
+            onClick={() => onOpenChange(false)}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        {/* Meta info row */}
+        <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+          <span className="font-mono text-xs">{host}</span>
+          <Separator orientation="vertical" className="h-4" />
+          <span className="flex items-center gap-1">
+            <Clock className="h-3 w-3" />
+            {formatTimestamp(request.timestamp)}
+          </span>
+          {request.duration_ms && (
+            <>
+              <Separator orientation="vertical" className="h-4" />
+              <span>{request.duration_ms}ms</span>
+            </>
+          )}
+          {request.response_status && (
+            <>
+              <Separator orientation="vertical" className="h-4" />
+              {getStatusCodeBadge(request.response_status)}
+            </>
+          )}
+          {request.error && (
+            <Badge className="bg-red-500/10 text-red-500">{request.error}</Badge>
+          )}
+        </div>
+        {/* Action buttons */}
+        <div className="flex items-center gap-2">
+          <CopyButton text={generateCurl()} label="cURL" />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleReplay}
+            disabled={replaying}
+          >
+            {replaying ? (
+              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+            ) : (
+              <RotateCcw className="h-4 w-4 mr-2" />
+            )}
+            Replay
+          </Button>
+        </div>
+      </div>
+
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
+          <TabsList className={`grid w-full flex-shrink-0 mx-6 mt-4 ${replayResult ? "grid-cols-3" : "grid-cols-2"}`} style={{ width: 'calc(100% - 48px)' }}>
+            <TabsTrigger value="request" className="gap-1 text-xs">
+              <ArrowUpFromLine className="h-3 w-3" />
               Request
+              {request.request_body && (
+                <Badge variant="secondary" className="text-[10px] px-1">
+                  {formatBytes(request.request_body.size)}
+                </Badge>
+              )}
             </TabsTrigger>
-            <TabsTrigger value="response">
-              <ArrowDownToLine className="h-4 w-4 mr-2" />
-              Response {request.response_status && getStatusCodeBadge(request.response_status)}
+            <TabsTrigger value="response" className="gap-1 text-xs">
+              <ArrowDownToLine className="h-3 w-3" />
+              Response
+              {request.response_body && (
+                <Badge variant="secondary" className="text-[10px] px-1">
+                  {formatBytes(request.response_body.size)}
+                </Badge>
+              )}
             </TabsTrigger>
             {replayResult && (
-              <TabsTrigger value="replay">
-                <RotateCcw className="h-4 w-4 mr-2" />
-                Replay {getStatusCodeBadge(replayResult.status)}
+              <TabsTrigger value="replay" className="gap-1 text-xs">
+                <RotateCcw className="h-3 w-3" />
+                Replay
+                {getStatusCodeBadge(replayResult.status)}
               </TabsTrigger>
             )}
           </TabsList>
-          <TabsContent value="request" className="space-y-4">
-            <div>
-              <h4 className="text-sm font-medium mb-2">Headers</h4>
-              <ScrollArea className="h-40 rounded-md border p-3 bg-muted/30">
-                <pre className="text-xs font-mono whitespace-pre-wrap">
-                  {JSON.stringify(requestHeaders, null, 2)}
-                </pre>
-              </ScrollArea>
-            </div>
-            {request.request_body && (
-              <div>
-                <h4 className="text-sm font-medium mb-2">
-                  Body
-                  <span className="text-muted-foreground ml-2">
-                    ({request.request_body.content_type}, {request.request_body.size} bytes)
-                  </span>
-                </h4>
-                <ScrollArea className="h-48 rounded-md border p-3 bg-muted/30">
-                  <pre className="text-xs font-mono whitespace-pre-wrap">
-                    {formatBodyData(request.request_body)}
-                  </pre>
-                </ScrollArea>
-              </div>
-            )}
-          </TabsContent>
-          <TabsContent value="response" className="space-y-4">
-            <div>
-              <h4 className="text-sm font-medium mb-2">Status</h4>
-              <div className="flex items-center gap-2">
-                {getStatusCodeBadge(request.response_status)}
-                {request.duration_ms && (
-                  <span className="text-sm text-muted-foreground">
-                    {request.duration_ms}ms
-                  </span>
-                )}
-                {request.error && (
-                  <Badge className="bg-red-500/10 text-red-500">{request.error}</Badge>
-                )}
-              </div>
-            </div>
-            <div>
-              <h4 className="text-sm font-medium mb-2">Headers</h4>
-              <ScrollArea className="h-32 rounded-md border p-3 bg-muted/30">
-                <pre className="text-xs font-mono whitespace-pre-wrap">
-                  {JSON.stringify(responseHeaders, null, 2)}
-                </pre>
-              </ScrollArea>
-            </div>
-            {request.response_body && (
-              <div>
-                <h4 className="text-sm font-medium mb-2">
-                  Body
-                  <span className="text-muted-foreground ml-2">
-                    ({request.response_body.content_type}, {request.response_body.size} bytes)
-                  </span>
-                </h4>
-                <ScrollArea className="h-64 rounded-md border p-3 bg-muted/30">
-                  <pre className="text-xs font-mono whitespace-pre-wrap">
-                    {formatBodyData(request.response_body)}
-                  </pre>
-                </ScrollArea>
-              </div>
-            )}
-          </TabsContent>
-          {replayResult && (
-            <TabsContent value="replay" className="space-y-4">
-              <div>
-                <h4 className="text-sm font-medium mb-2">Status</h4>
-                <div className="flex items-center gap-2">
-                  {getStatusCodeBadge(replayResult.status)}
-                  <span className="text-sm text-muted-foreground">
-                    {replayResult.duration_ms}ms
-                  </span>
-                </div>
-              </div>
-              <div>
-                <h4 className="text-sm font-medium mb-2">Headers</h4>
-                <ScrollArea className="h-32 rounded-md border p-3 bg-muted/30">
-                  <pre className="text-xs font-mono whitespace-pre-wrap">
-                    {JSON.stringify(headersToObject(replayResult.headers), null, 2)}
-                  </pre>
-                </ScrollArea>
-              </div>
-              {replayResult.body && (
-                <div>
-                  <h4 className="text-sm font-medium mb-2">Body</h4>
-                  <ScrollArea className="h-64 rounded-md border p-3 bg-muted/30">
-                    <pre className="text-xs font-mono whitespace-pre-wrap">
-                      {formatJsonBody(replayResult.body)}
-                    </pre>
-                  </ScrollArea>
-                </div>
-              )}
+
+          <ScrollArea className="flex-1 px-6 py-4">
+            <TabsContent value="request" className="space-y-4 m-0">
+              <HeadersSection
+                headers={request.request_headers}
+                title="Request Headers"
+              />
+              <Separator />
+              <BodySection
+                body={request.request_body}
+                title="Request Body"
+                filename={`request-${request.id}`}
+              />
             </TabsContent>
-          )}
+
+            <TabsContent value="response" className="space-y-4 m-0">
+              {/* Response Status Summary */}
+              <div className="flex flex-wrap items-center gap-3 p-3 rounded-lg bg-muted/50 text-sm">
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">Status:</span>
+                  {getStatusCodeBadge(request.response_status)}
+                </div>
+                {request.duration_ms && (
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">Time:</span>
+                    <span>{request.duration_ms}ms</span>
+                  </div>
+                )}
+                {request.response_body && (
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">Size:</span>
+                    <span>{formatBytes(request.response_body.size)}</span>
+                  </div>
+                )}
+              </div>
+
+              <HeadersSection
+                headers={request.response_headers || []}
+                title="Response Headers"
+              />
+              <Separator />
+              <BodySection
+                body={request.response_body}
+                title="Response Body"
+                filename={`response-${request.id}`}
+              />
+            </TabsContent>
+
+            {replayResult && (
+              <TabsContent value="replay" className="space-y-4 m-0">
+                {/* Replay Status Summary */}
+                <div className="flex flex-wrap items-center gap-3 p-3 rounded-lg bg-muted/50 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">Status:</span>
+                    {getStatusCodeBadge(replayResult.status)}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">Time:</span>
+                    <span>{replayResult.duration_ms}ms</span>
+                  </div>
+                </div>
+
+                <HeadersSection
+                  headers={replayResult.headers}
+                  title="Response Headers"
+                />
+                <Separator />
+                {replayResult.body ? (
+                  <Collapsible defaultOpen>
+                    <div className="flex items-center justify-between">
+                      <CollapsibleTrigger className="flex items-center gap-2 text-sm font-medium hover:underline">
+                        <ChevronDown className="h-4 w-4" />
+                        Response Body
+                      </CollapsibleTrigger>
+                      <CopyButton text={replayResult.body} />
+                    </div>
+                    <CollapsibleContent className="mt-2">
+                      <div className="rounded-md border bg-muted/30 overflow-hidden">
+                        <ScrollArea className="h-[200px]">
+                          <pre className="p-3 text-xs font-mono whitespace-pre-wrap break-all text-emerald-600 dark:text-emerald-400">
+                            {formatJsonBody(replayResult.body)}
+                          </pre>
+                        </ScrollArea>
+                      </div>
+                    </CollapsibleContent>
+                  </Collapsible>
+                ) : (
+                  <div className="text-sm text-muted-foreground italic">
+                    No body
+                  </div>
+                )}
+              </TabsContent>
+            )}
+          </ScrollArea>
         </Tabs>
-      </DialogContent>
-    </Dialog>
+    </div>
   );
 }
 
@@ -371,6 +634,11 @@ export function TunnelDetail() {
   const [currentPage, setCurrentPage] = useState(1);
   const metricsRef = useRef<Map<string, HttpMetric>>(new Map());
 
+  // Filter state
+  const [methodFilter, setMethodFilter] = useState<string>("");
+  const [pathFilter, setPathFilter] = useState<string>("");
+  const [statusFilter, setStatusFilter] = useState<string>("");
+
   const loadData = useCallback(async () => {
     if (!id) return;
     try {
@@ -382,10 +650,10 @@ export function TunnelDetail() {
       }
       setTunnel(tunnelData);
 
-      // Load metrics from in-memory store
-      const metricsData = await getTunnelMetrics(id);
-      metricsData.forEach(m => metricsRef.current.set(m.id, m));
-      setMetrics(metricsData);
+      // Load metrics from in-memory store (paginated)
+      const metricsResponse = await getTunnelMetrics(id, 0, 100);
+      metricsResponse.items.forEach(m => metricsRef.current.set(m.id, m));
+      setMetrics(metricsResponse.items);
     } catch (error) {
       toast.error("Failed to load tunnel", {
         description: String(error),
@@ -398,76 +666,30 @@ export function TunnelDetail() {
   useEffect(() => {
     loadData();
 
-    // Poll for tunnel status updates every 2 seconds
+    // Poll for tunnel status and metrics updates every 1 second
+    // This is simpler and more reliable than streaming subscriptions
     const interval = setInterval(async () => {
       if (!id) return;
       try {
+        // Poll tunnel status
         const tunnelData = await getTunnel(id);
         if (tunnelData) {
           setTunnel(tunnelData);
         }
+
+        // Poll metrics from daemon/in-memory store
+        const metricsResponse = await getTunnelMetrics(id, 0, 100);
+        // Update metricsRef with new data, preserving order
+        metricsResponse.items.forEach(m => metricsRef.current.set(m.id, m));
+        // Update state with all metrics sorted by timestamp (newest first)
+        setMetrics(Array.from(metricsRef.current.values()).sort((a, b) => b.timestamp - a.timestamp));
       } catch {
         // Silently ignore polling errors
       }
-    }, 2000);
+    }, 1000);
 
     return () => clearInterval(interval);
   }, [id, loadData]);
-
-  // Subscribe to real-time metrics events
-  useEffect(() => {
-    if (!id) return;
-
-    let unlisten: (() => void) | null = null;
-
-    const subscribe = async () => {
-      unlisten = await subscribeToMetrics((payload: TunnelMetricsPayload) => {
-        // Only process events for this tunnel
-        if (payload.tunnel_id !== id) return;
-
-        const event = payload.event;
-        if (event.type === "request") {
-          // New request - add to map and update state
-          metricsRef.current.set(event.metric.id, event.metric);
-          setMetrics(Array.from(metricsRef.current.values()).sort((a, b) => b.timestamp - a.timestamp));
-        } else if (event.type === "response") {
-          // Update existing request with response data
-          const existing = metricsRef.current.get(event.id);
-          if (existing) {
-            const updated: HttpMetric = {
-              ...existing,
-              response_status: event.status,
-              response_headers: event.headers,
-              response_body: event.body,
-              duration_ms: event.duration_ms,
-            };
-            metricsRef.current.set(event.id, updated);
-            setMetrics(Array.from(metricsRef.current.values()).sort((a, b) => b.timestamp - a.timestamp));
-          }
-        } else if (event.type === "error") {
-          // Update existing request with error
-          const existing = metricsRef.current.get(event.id);
-          if (existing) {
-            const updated: HttpMetric = {
-              ...existing,
-              error: event.error,
-              duration_ms: event.duration_ms,
-            };
-            metricsRef.current.set(event.id, updated);
-            setMetrics(Array.from(metricsRef.current.values()).sort((a, b) => b.timestamp - a.timestamp));
-          }
-        }
-      });
-    };
-
-    subscribe();
-
-    return () => {
-      if (unlisten) {
-        unlisten();
-      }
-    };
-  }, [id]);
 
   const handleStartTunnel = async () => {
     if (!tunnel) return;
@@ -579,17 +801,45 @@ export function TunnelDetail() {
   const isConnecting = tunnel.status.toLowerCase() === "connecting";
   const isRunning = isConnected || isConnecting;
 
-  // Calculate stats from metrics
+  // Filter metrics based on filter state
+  const filteredMetrics = metrics.filter((m) => {
+    // Method filter
+    if (methodFilter && m.method.toUpperCase() !== methodFilter.toUpperCase()) {
+      return false;
+    }
+    // Path filter (case-insensitive contains)
+    if (pathFilter && !m.uri.toLowerCase().includes(pathFilter.toLowerCase())) {
+      return false;
+    }
+    // Status filter
+    if (statusFilter) {
+      const status = m.response_status;
+      if (statusFilter === "2xx" && (status === null || status < 200 || status >= 300)) return false;
+      if (statusFilter === "3xx" && (status === null || status < 300 || status >= 400)) return false;
+      if (statusFilter === "4xx" && (status === null || status < 400 || status >= 500)) return false;
+      if (statusFilter === "5xx" && (status === null || status < 500)) return false;
+      if (statusFilter === "error" && !m.error) return false;
+      if (statusFilter === "pending" && (status !== null || m.error)) return false;
+    }
+    return true;
+  });
+
+  // Calculate stats from all metrics (not filtered)
   const totalRequests = metrics.length;
   const avgLatency = totalRequests > 0
     ? Math.round(metrics.reduce((sum, r) => sum + (r.duration_ms || 0), 0) / totalRequests)
     : 0;
   const errorRequests = metrics.filter((r) => r.response_status && r.response_status >= 400).length;
 
+  // Reset to page 1 when filters change
+  const hasActiveFilter = methodFilter || pathFilter || statusFilter;
+
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-start justify-between">
+    <div className="flex h-[calc(100vh-4rem)]">
+      {/* Main Content */}
+      <div className="flex-1 overflow-auto p-6 space-y-6">
+        {/* Header */}
+        <div className="flex items-start justify-between">
         <div className="flex items-center gap-4">
           <Button
             variant="ghost"
@@ -767,6 +1017,100 @@ export function TunnelDetail() {
             </div>
           ) : (
             <>
+              {/* Filters */}
+              <div className="flex flex-wrap gap-3 mb-4">
+                <Select
+                  value={methodFilter}
+                  onValueChange={(value) => {
+                    setMethodFilter(value === "all" ? "" : value);
+                    setCurrentPage(1);
+                  }}
+                >
+                  <SelectTrigger className="w-[120px]">
+                    <SelectValue placeholder="Method" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Methods</SelectItem>
+                    <SelectItem value="GET">GET</SelectItem>
+                    <SelectItem value="POST">POST</SelectItem>
+                    <SelectItem value="PUT">PUT</SelectItem>
+                    <SelectItem value="PATCH">PATCH</SelectItem>
+                    <SelectItem value="DELETE">DELETE</SelectItem>
+                    <SelectItem value="OPTIONS">OPTIONS</SelectItem>
+                    <SelectItem value="HEAD">HEAD</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <div className="relative flex-1 min-w-[200px] max-w-[300px]">
+                  <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder="Filter by path..."
+                    value={pathFilter}
+                    onChange={(e) => {
+                      setPathFilter(e.target.value);
+                      setCurrentPage(1);
+                    }}
+                    className="pl-8"
+                  />
+                  {pathFilter && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="absolute right-0 top-0 h-full px-2"
+                      onClick={() => {
+                        setPathFilter("");
+                        setCurrentPage(1);
+                      }}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
+
+                <Select
+                  value={statusFilter}
+                  onValueChange={(value) => {
+                    setStatusFilter(value === "all" ? "" : value);
+                    setCurrentPage(1);
+                  }}
+                >
+                  <SelectTrigger className="w-[130px]">
+                    <SelectValue placeholder="Status" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Status</SelectItem>
+                    <SelectItem value="2xx">2xx Success</SelectItem>
+                    <SelectItem value="3xx">3xx Redirect</SelectItem>
+                    <SelectItem value="4xx">4xx Client Error</SelectItem>
+                    <SelectItem value="5xx">5xx Server Error</SelectItem>
+                    <SelectItem value="error">Errors</SelectItem>
+                    <SelectItem value="pending">Pending</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                {hasActiveFilter && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setMethodFilter("");
+                      setPathFilter("");
+                      setStatusFilter("");
+                      setCurrentPage(1);
+                    }}
+                  >
+                    <X className="h-4 w-4 mr-1" />
+                    Clear Filters
+                  </Button>
+                )}
+
+                {hasActiveFilter && (
+                  <span className="text-sm text-muted-foreground self-center">
+                    {filteredMetrics.length} of {metrics.length} requests
+                  </span>
+                )}
+              </div>
+
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -778,7 +1122,7 @@ export function TunnelDetail() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {metrics
+                  {filteredMetrics
                     .slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE)
                     .map((metric) => (
                     <TableRow
@@ -808,10 +1152,10 @@ export function TunnelDetail() {
                 </TableBody>
               </Table>
               {/* Pagination Controls */}
-              {metrics.length > ITEMS_PER_PAGE && (
+              {filteredMetrics.length > ITEMS_PER_PAGE && (
                 <div className="flex items-center justify-between mt-4 pt-4 border-t">
                   <div className="text-sm text-muted-foreground">
-                    Showing {((currentPage - 1) * ITEMS_PER_PAGE) + 1} - {Math.min(currentPage * ITEMS_PER_PAGE, metrics.length)} of {metrics.length} requests
+                    Showing {((currentPage - 1) * ITEMS_PER_PAGE) + 1} - {Math.min(currentPage * ITEMS_PER_PAGE, filteredMetrics.length)} of {filteredMetrics.length} requests
                   </div>
                   <div className="flex items-center gap-2">
                     <Button
@@ -824,8 +1168,8 @@ export function TunnelDetail() {
                       Previous
                     </Button>
                     <div className="flex items-center gap-1">
-                      {Array.from({ length: Math.min(5, Math.ceil(metrics.length / ITEMS_PER_PAGE)) }, (_, i) => {
-                        const totalPages = Math.ceil(metrics.length / ITEMS_PER_PAGE);
+                      {Array.from({ length: Math.min(5, Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE)) }, (_, i) => {
+                        const totalPages = Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE);
                         let pageNum: number;
 
                         if (totalPages <= 5) {
@@ -854,8 +1198,8 @@ export function TunnelDetail() {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() => setCurrentPage(p => Math.min(Math.ceil(metrics.length / ITEMS_PER_PAGE), p + 1))}
-                      disabled={currentPage >= Math.ceil(metrics.length / ITEMS_PER_PAGE)}
+                      onClick={() => setCurrentPage(p => Math.min(Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE), p + 1))}
+                      disabled={currentPage >= Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE)}
                     >
                       Next
                       <ChevronRight className="h-4 w-4 ml-1" />
@@ -867,9 +1211,10 @@ export function TunnelDetail() {
           )}
         </CardContent>
       </Card>
+      </div>
 
-      {/* Request Detail Dialog */}
-      <RequestDetailDialog
+      {/* Request Detail Sidebar */}
+      <RequestDetailSidebar
         request={selectedRequest}
         open={detailDialogOpen}
         onOpenChange={setDetailDialogOpen}

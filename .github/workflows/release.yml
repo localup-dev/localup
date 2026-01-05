@@ -197,10 +197,177 @@ jobs:
           path: release/*
           retention-days: 1
 
+  # Build Tauri desktop app for all platforms
+  build-tauri:
+    name: Build Desktop App (${{ matrix.platform }})
+    needs: build-webapps
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS - Universal binary (Intel + Apple Silicon)
+          - platform: macos
+            runner: macos-14
+            rust_target: "aarch64-apple-darwin,x86_64-apple-darwin"
+            daemon_targets: "aarch64-apple-darwin x86_64-apple-darwin"
+            args: "--target universal-apple-darwin"
+
+          # Linux AMD64
+          - platform: linux
+            runner: ubuntu-22.04
+            rust_target: "x86_64-unknown-linux-gnu"
+            daemon_targets: "x86_64-unknown-linux-gnu"
+            args: ""
+
+          # Windows AMD64
+          - platform: windows
+            runner: windows-latest
+            rust_target: "x86_64-pc-windows-msvc"
+            daemon_targets: "x86_64-pc-windows-msvc"
+            args: ""
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: get_version
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.rust_target }}
+
+      # Linux dependencies for Tauri
+      - name: Install Linux dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      # Cache Rust dependencies
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "tauri-${{ matrix.platform }}"
+          cache-targets: true
+          cache-on-failure: true
+
+      # Build the daemon binary for bundling
+      - name: Build daemon binary (Unix)
+        if: matrix.platform != 'windows'
+        env:
+          LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
+        run: |
+          mkdir -p apps/localup-desktop/src-tauri/binaries
+          for target in ${{ matrix.daemon_targets }}; do
+            cargo build --release --target $target -p localup-cli
+
+            # Determine the suffix for the binary name
+            case "$target" in
+              aarch64-apple-darwin)
+                suffix="-aarch64-apple-darwin"
+                ;;
+              x86_64-apple-darwin)
+                suffix="-x86_64-apple-darwin"
+                ;;
+              x86_64-unknown-linux-gnu)
+                suffix="-x86_64-unknown-linux-gnu"
+                ;;
+              *)
+                suffix=""
+                ;;
+            esac
+
+            cp "target/$target/release/localup" \
+               "apps/localup-desktop/src-tauri/binaries/localup-daemon$suffix"
+          done
+          ls -la apps/localup-desktop/src-tauri/binaries/
+
+      - name: Build daemon binary (Windows)
+        if: matrix.platform == 'windows'
+        env:
+          LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path apps/localup-desktop/src-tauri/binaries
+          cargo build --release --target x86_64-pc-windows-msvc -p localup-cli
+          Copy-Item "target/x86_64-pc-windows-msvc/release/localup.exe" `
+                    "apps/localup-desktop/src-tauri/binaries/localup-daemon-x86_64-pc-windows-msvc.exe"
+          Get-ChildItem apps/localup-desktop/src-tauri/binaries/
+
+      # Install frontend dependencies
+      - name: Install frontend dependencies
+        working-directory: apps/localup-desktop
+        run: bun install
+
+      # Update version in tauri.conf.json
+      - name: Update Tauri version
+        shell: bash
+        run: |
+          cd apps/localup-desktop/src-tauri
+          # Update version in tauri.conf.json
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"${{ steps.get_version.outputs.VERSION }}\"/" tauri.conf.json
+          else
+            sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${{ steps.get_version.outputs.VERSION }}\"/" tauri.conf.json
+          fi
+          cat tauri.conf.json | grep version
+
+      # Build Tauri app
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
+          # macOS signing (optional - requires secrets)
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/localup-desktop
+          args: ${{ matrix.args }}
+
+      # Upload artifacts
+      - name: Upload Tauri artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-${{ matrix.platform }}
+          path: |
+            apps/localup-desktop/src-tauri/target/release/bundle/**/*.dmg
+            apps/localup-desktop/src-tauri/target/release/bundle/**/*.app
+            apps/localup-desktop/src-tauri/target/release/bundle/**/*.deb
+            apps/localup-desktop/src-tauri/target/release/bundle/**/*.AppImage
+            apps/localup-desktop/src-tauri/target/release/bundle/**/*.rpm
+            apps/localup-desktop/src-tauri/target/release/bundle/**/*.msi
+            apps/localup-desktop/src-tauri/target/release/bundle/**/*.exe
+            apps/localup-desktop/src-tauri/target/universal-apple-darwin/release/bundle/**/*.dmg
+            apps/localup-desktop/src-tauri/target/universal-apple-darwin/release/bundle/**/*.app
+          retention-days: 1
+
   # Create GitHub Release with all artifacts
   create-release:
     name: Create GitHub Release
-    needs: build-binaries
+    needs: [build-binaries, build-tauri]
     runs-on: ubuntu-latest
 
     steps:
@@ -215,12 +382,35 @@ jobs:
       - name: Consolidate release files
         run: |
           mkdir -p release
+
+          # CLI binaries
           find artifacts/ -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "checksums-*.txt" \) \
             -exec cp {} release/ \;
 
-          # Create a combined checksums file
-          cat release/checksums-*.txt > release/SHA256SUMS.txt
+          # Desktop app installers
+          find artifacts/tauri-* -type f \( \
+            -name "*.dmg" -o \
+            -name "*.deb" -o \
+            -name "*.AppImage" -o \
+            -name "*.rpm" -o \
+            -name "*.msi" -o \
+            -name "*.exe" \
+          \) -exec cp {} release/ \; 2>/dev/null || true
 
+          # Create a combined checksums file
+          cd release
+          if ls checksums-*.txt 1> /dev/null 2>&1; then
+            cat checksums-*.txt > SHA256SUMS.txt
+          fi
+
+          # Add checksums for desktop apps
+          for f in *.dmg *.deb *.AppImage *.rpm *.msi; do
+            if [ -f "$f" ]; then
+              shasum -a 256 "$f" >> SHA256SUMS.txt
+            fi
+          done
+
+          cd ..
           ls -lah release/
 
       - name: Extract version from tag
@@ -266,9 +456,26 @@ jobs:
             ${{ steps.get_version.outputs.IS_PRERELEASE == 'false' && 'brew install localup' || '' }}
             ```
 
-            ### Direct Download
+            ## Desktop App
 
-            Download the appropriate binary for your platform:
+            Download the LocalUp Desktop app for your platform:
+
+            ### macOS
+            - **Universal (Intel + Apple Silicon)**: `LocalUp_${{ steps.get_version.outputs.VERSION }}_universal.dmg`
+
+            ### Linux
+            - **Debian/Ubuntu**: `local-up_${{ steps.get_version.outputs.VERSION }}_amd64.deb`
+            - **AppImage**: `local-up_${{ steps.get_version.outputs.VERSION }}_amd64.AppImage`
+            - **RPM (Fedora/RHEL)**: `local-up-${{ steps.get_version.outputs.VERSION }}-1.x86_64.rpm`
+
+            ### Windows
+            - **MSI Installer**: `LocalUp_${{ steps.get_version.outputs.VERSION }}_x64_en-US.msi`
+
+            ---
+
+            ## CLI Tool
+
+            Download the command-line tool for your platform:
 
             ### Linux
             - **AMD64**: `localup-linux-amd64.tar.gz`
@@ -280,6 +487,8 @@ jobs:
 
             ### Windows
             - **AMD64**: `localup-windows-amd64.zip`
+
+            ---
 
             ### Verify Downloads
 
@@ -311,6 +520,11 @@ jobs:
           files: |
             release/*.tar.gz
             release/*.zip
+            release/*.dmg
+            release/*.deb
+            release/*.AppImage
+            release/*.rpm
+            release/*.msi
             release/checksums-*.txt
             release/SHA256SUMS.txt
         env:

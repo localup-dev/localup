@@ -2,6 +2,7 @@
 //!
 //! Messages are JSON-encoded with a length prefix (4 bytes, big-endian).
 
+use localup_lib::{HttpMetric, MetricsEvent};
 use serde::{Deserialize, Serialize};
 
 /// Request from client to daemon
@@ -49,13 +50,29 @@ pub enum DaemonRequest {
     /// Delete a tunnel (will stop if running)
     DeleteTunnel { id: String },
 
+    /// Get metrics for a tunnel
+    GetTunnelMetrics {
+        id: String,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    },
+
+    /// Clear metrics for a tunnel
+    ClearTunnelMetrics { id: String },
+
+    /// Subscribe to metrics events for a tunnel (streaming)
+    SubscribeMetrics { id: String },
+
+    /// Unsubscribe from metrics events
+    UnsubscribeMetrics { id: String },
+
     /// Shutdown the daemon
     Shutdown,
 }
 
 /// Response from daemon to client
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", content = "data")]
 pub enum DaemonResponse {
     /// Success with no data
     Ok,
@@ -75,6 +92,23 @@ pub enum DaemonResponse {
 
     /// List of tunnels
     Tunnels(Vec<TunnelInfo>),
+
+    /// Metrics response with pagination
+    Metrics {
+        items: Vec<HttpMetric>,
+        total: usize,
+        offset: usize,
+        limit: usize,
+    },
+
+    /// Real-time metrics event (streamed)
+    MetricsEvent {
+        tunnel_id: String,
+        event: MetricsEvent,
+    },
+
+    /// Subscription started successfully
+    Subscribed { id: String },
 }
 
 /// Tunnel information from daemon

@@ -2,15 +2,15 @@
 //!
 //! The daemon runs as a separate process and manages tunnels independently.
 
-use localup_lib::{ExitNodeConfig, ProtocolConfig, TunnelClient, TunnelConfig};
+use localup_lib::{ExitNodeConfig, MetricsStore, ProtocolConfig, TunnelClient, TunnelConfig};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::{broadcast, oneshot, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use super::protocol::{DaemonRequest, DaemonResponse, TunnelInfo};
 use super::socket_path;
@@ -20,6 +20,8 @@ struct RunningTunnel {
     info: TunnelInfo,
     handle: JoinHandle<()>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Metrics store for this tunnel
+    metrics: Option<MetricsStore>,
 }
 
 /// Daemon service that manages tunnels
@@ -179,6 +181,7 @@ impl DaemonService {
                         info,
                         handle,
                         shutdown_tx: Some(shutdown_tx),
+                        metrics: None, // Will be set once connected
                     },
                 );
             }
@@ -233,7 +236,15 @@ async fn handle_connection(
         // Parse request
         let request: DaemonRequest = serde_json::from_slice(&msg_buf)?;
 
-        // Handle request
+        // Check if this is a subscribe request - needs special handling
+        if let DaemonRequest::SubscribeMetrics { id } = request {
+            // Handle streaming subscription
+            handle_metrics_subscription(&mut stream, &tunnels, &id).await?;
+            // After subscription ends, continue handling requests
+            continue;
+        }
+
+        // Handle regular request
         let response = handle_request(request, &tunnels, &version, uptime).await;
 
         // Send response
@@ -246,6 +257,152 @@ async fn handle_connection(
     Ok(())
 }
 
+/// Send a response to the client
+async fn send_response(
+    stream: &mut tokio::net::UnixStream,
+    response: &DaemonResponse,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let response_bytes = serde_json::to_vec(response)?;
+    let response_len = (response_bytes.len() as u32).to_be_bytes();
+    stream.write_all(&response_len).await?;
+    stream.write_all(&response_bytes).await?;
+    Ok(())
+}
+
+/// Handle metrics subscription - streams events until client disconnects or unsubscribes
+async fn handle_metrics_subscription(
+    stream: &mut tokio::net::UnixStream,
+    tunnels: &Arc<RwLock<HashMap<String, RunningTunnel>>>,
+    tunnel_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("[{}] Metrics subscription requested", tunnel_id);
+
+    // Get the metrics store for this tunnel
+    let metrics_receiver = {
+        let tunnels_read = tunnels.read().await;
+        if let Some(tunnel) = tunnels_read.get(tunnel_id) {
+            if let Some(metrics) = &tunnel.metrics {
+                Some(metrics.subscribe())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    let mut receiver = match metrics_receiver {
+        Some(rx) => rx,
+        None => {
+            // Tunnel not found or no metrics - send error and return
+            let response = DaemonResponse::Error {
+                message: format!("Tunnel not found or not connected: {}", tunnel_id),
+            };
+            send_response(stream, &response).await?;
+            return Ok(());
+        }
+    };
+
+    // Send subscription confirmation
+    let response = DaemonResponse::Subscribed {
+        id: tunnel_id.to_string(),
+    };
+    send_response(stream, &response).await?;
+    info!("[{}] Metrics subscription started", tunnel_id);
+
+    // Split the stream for concurrent read/write
+    let (read_half, mut write_half) = stream.split();
+    let mut read_half = tokio::io::BufReader::new(read_half);
+
+    // Stream events until client disconnects or sends UnsubscribeMetrics
+    loop {
+        tokio::select! {
+            // Check for incoming messages (UnsubscribeMetrics or client disconnect)
+            result = read_message(&mut read_half) => {
+                match result {
+                    Ok(Some(DaemonRequest::UnsubscribeMetrics { id })) if id == tunnel_id => {
+                        info!("[{}] Unsubscribe request received", tunnel_id);
+                        let response = DaemonResponse::Ok;
+                        let response_bytes = serde_json::to_vec(&response)?;
+                        let response_len = (response_bytes.len() as u32).to_be_bytes();
+                        write_half.write_all(&response_len).await?;
+                        write_half.write_all(&response_bytes).await?;
+                        break;
+                    }
+                    Ok(None) => {
+                        // Client disconnected
+                        info!("[{}] Client disconnected during subscription", tunnel_id);
+                        break;
+                    }
+                    Ok(Some(other)) => {
+                        // Unexpected request during subscription
+                        warn!("[{}] Unexpected request during subscription: {:?}", tunnel_id, other);
+                    }
+                    Err(e) => {
+                        error!("[{}] Error reading during subscription: {}", tunnel_id, e);
+                        break;
+                    }
+                }
+            }
+
+            // Receive metrics events from the broadcast channel
+            result = receiver.recv() => {
+                match result {
+                    Ok(event) => {
+                        debug!("[{}] Forwarding metrics event", tunnel_id);
+                        let response = DaemonResponse::MetricsEvent {
+                            tunnel_id: tunnel_id.to_string(),
+                            event,
+                        };
+                        let response_bytes = serde_json::to_vec(&response)?;
+                        let response_len = (response_bytes.len() as u32).to_be_bytes();
+                        if let Err(e) = write_half.write_all(&response_len).await {
+                            error!("[{}] Error writing metrics event length: {}", tunnel_id, e);
+                            break;
+                        }
+                        if let Err(e) = write_half.write_all(&response_bytes).await {
+                            error!("[{}] Error writing metrics event: {}", tunnel_id, e);
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("[{}] Metrics subscriber lagged {} events", tunnel_id, n);
+                        // Continue receiving
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        info!("[{}] Metrics channel closed (tunnel disconnected?)", tunnel_id);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    info!("[{}] Metrics subscription ended", tunnel_id);
+    Ok(())
+}
+
+/// Read a single message from the stream, returns None if client disconnected
+async fn read_message<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<DaemonRequest>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut len_buf = [0u8; 4];
+    match reader.read_exact(&mut len_buf).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Ok(None);
+        }
+        Err(e) => return Err(e.into()),
+    }
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut msg_buf = vec![0u8; len];
+    reader.read_exact(&mut msg_buf).await?;
+
+    let request: DaemonRequest = serde_json::from_slice(&msg_buf)?;
+    Ok(Some(request))
+}
+
 /// Handle a single request
 async fn handle_request(
     request: DaemonRequest,
@@ -256,6 +413,7 @@ async fn handle_request(
     match request {
         DaemonRequest::Ping => {
             let tunnel_count = tunnels.read().await.len();
+            info!("Ping received, responding with {} tunnels", tunnel_count);
             DaemonResponse::Pong {
                 version: version.to_string(),
                 uptime_seconds: uptime,
@@ -265,6 +423,7 @@ async fn handle_request(
 
         DaemonRequest::ListTunnels => {
             let tunnels = tunnels.read().await;
+            info!("ListTunnels received, returning {} tunnels", tunnels.len());
             let list: Vec<TunnelInfo> = tunnels.values().map(|t| t.info.clone()).collect();
             DaemonResponse::Tunnels(list)
         }
@@ -372,6 +531,7 @@ async fn handle_request(
                         info,
                         handle,
                         shutdown_tx: Some(shutdown_tx),
+                        metrics: None, // Will be set once connected
                     },
                 );
             }
@@ -388,17 +548,21 @@ async fn handle_request(
         }
 
         DaemonRequest::StopTunnel { id } => {
+            info!("Received stop request for tunnel: {}", id);
             let mut tunnels_write = tunnels.write().await;
             if let Some(mut tunnel) = tunnels_write.remove(&id) {
+                info!("Stopping tunnel: {} (status: {})", id, tunnel.info.status);
                 // Send shutdown signal
                 if let Some(tx) = tunnel.shutdown_tx.take() {
                     let _ = tx.send(());
                 }
                 // Abort the task
                 tunnel.handle.abort();
+                info!("Tunnel stopped successfully: {}", id);
 
                 DaemonResponse::Ok
             } else {
+                info!("Tunnel not found for stop request: {}", id);
                 DaemonResponse::Error {
                     message: format!("Tunnel not found: {}", id),
                 }
@@ -433,6 +597,71 @@ async fn handle_request(
             } else {
                 // Tunnel wasn't running, that's fine
                 DaemonResponse::Ok
+            }
+        }
+
+        DaemonRequest::GetTunnelMetrics { id, offset, limit } => {
+            let tunnels_read = tunnels.read().await;
+            if let Some(tunnel) = tunnels_read.get(&id) {
+                if let Some(metrics) = &tunnel.metrics {
+                    let offset = offset.unwrap_or(0);
+                    let limit = limit.unwrap_or(100);
+                    // Need to release the lock before awaiting
+                    let metrics = metrics.clone();
+                    drop(tunnels_read);
+                    let total = metrics.count().await;
+                    let items = metrics.get_paginated(offset, limit).await;
+                    DaemonResponse::Metrics {
+                        items,
+                        total,
+                        offset,
+                        limit,
+                    }
+                } else {
+                    DaemonResponse::Metrics {
+                        items: Vec::new(),
+                        total: 0,
+                        offset: offset.unwrap_or(0),
+                        limit: limit.unwrap_or(100),
+                    }
+                }
+            } else {
+                DaemonResponse::Error {
+                    message: format!("Tunnel not found: {}", id),
+                }
+            }
+        }
+
+        DaemonRequest::ClearTunnelMetrics { id } => {
+            let tunnels_read = tunnels.read().await;
+            if let Some(tunnel) = tunnels_read.get(&id) {
+                if let Some(metrics) = &tunnel.metrics {
+                    let metrics = metrics.clone();
+                    drop(tunnels_read);
+                    metrics.clear().await;
+                    DaemonResponse::Ok
+                } else {
+                    DaemonResponse::Ok
+                }
+            } else {
+                DaemonResponse::Error {
+                    message: format!("Tunnel not found: {}", id),
+                }
+            }
+        }
+
+        DaemonRequest::SubscribeMetrics { .. } => {
+            // This should be handled in handle_connection, not here
+            // If we reach here, something went wrong
+            DaemonResponse::Error {
+                message: "SubscribeMetrics should be handled in streaming context".to_string(),
+            }
+        }
+
+        DaemonRequest::UnsubscribeMetrics { .. } => {
+            // This should only be sent during an active subscription
+            DaemonResponse::Error {
+                message: "No active subscription to unsubscribe from".to_string(),
             }
         }
 
@@ -508,6 +737,11 @@ async fn run_tunnel_task(
                     info!("[{}] Public URL: {}", tunnel_id, url);
                 }
 
+                // Store metrics store for this tunnel
+                let metrics_store = client.metrics().clone();
+                set_tunnel_metrics(&tunnels, &tunnel_id, metrics_store).await;
+                info!("[{}] Metrics store attached", tunnel_id);
+
                 // Update status to connected
                 update_tunnel_status(&tunnels, &tunnel_id, "connected", public_url.clone(), None)
                     .await;
@@ -575,5 +809,17 @@ async fn update_tunnel_status(
         tunnel.info.status = status.to_string();
         tunnel.info.public_url = public_url;
         tunnel.info.error_message = error_message;
+    }
+}
+
+/// Set metrics store for a tunnel
+async fn set_tunnel_metrics(
+    tunnels: &Arc<RwLock<HashMap<String, RunningTunnel>>>,
+    tunnel_id: &str,
+    metrics: MetricsStore,
+) {
+    let mut tunnels = tunnels.write().await;
+    if let Some(tunnel) = tunnels.get_mut(tunnel_id) {
+        tunnel.metrics = Some(metrics);
     }
 }

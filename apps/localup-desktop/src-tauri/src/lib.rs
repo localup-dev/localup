@@ -90,6 +90,34 @@ pub fn run() {
                                 uptime,
                                 count
                             );
+                            // Sync tunnel states from daemon to local state
+                            if count > 0 {
+                                tracing::info!("Syncing {} tunnel(s) from daemon...", count);
+                                if let Ok(tunnels) = client.list_tunnels().await {
+                                    let mut manager = app_state.tunnel_manager.write().await;
+                                    for tunnel in tunnels {
+                                        let status = match tunnel.status.as_str() {
+                                            "connected" => state::tunnel_manager::TunnelStatus::Connected,
+                                            "connecting" => state::tunnel_manager::TunnelStatus::Connecting,
+                                            "error" => state::tunnel_manager::TunnelStatus::Error,
+                                            _ => state::tunnel_manager::TunnelStatus::Disconnected,
+                                        };
+                                        manager.update_status(
+                                            &tunnel.id,
+                                            status,
+                                            tunnel.public_url.clone(),
+                                            tunnel.localup_id.clone(),
+                                            tunnel.error_message.clone(),
+                                        );
+                                        tracing::info!(
+                                            "Synced tunnel {} ({}) - status: {}",
+                                            tunnel.id,
+                                            tunnel.name,
+                                            tunnel.status
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::warn!("Daemon ping failed: {}", e);
@@ -144,6 +172,7 @@ pub fn run() {
             commands::clear_tunnel_metrics,
             commands::get_captured_requests,
             commands::replay_request,
+            commands::subscribe_daemon_metrics,
             // Relay commands
             commands::list_relays,
             commands::get_relay,
@@ -164,6 +193,7 @@ pub fn run() {
             commands::daemon_start_tunnel,
             commands::daemon_stop_tunnel,
             commands::daemon_delete_tunnel,
+            commands::get_daemon_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

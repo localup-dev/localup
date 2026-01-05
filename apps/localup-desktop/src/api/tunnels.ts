@@ -170,11 +170,27 @@ export interface TunnelMetricsPayload {
   event: MetricsEvent;
 }
 
+/** Paginated metrics response */
+export interface PaginatedMetricsResponse {
+  items: HttpMetric[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
 /**
- * Get real-time metrics for a tunnel (from in-memory store)
+ * Get real-time metrics for a tunnel with pagination (from in-memory store)
  */
-export async function getTunnelMetrics(tunnelId: string): Promise<HttpMetric[]> {
-  return invoke<HttpMetric[]>("get_tunnel_metrics", { tunnelId });
+export async function getTunnelMetrics(
+  tunnelId: string,
+  offset?: number,
+  limit?: number
+): Promise<PaginatedMetricsResponse> {
+  return invoke<PaginatedMetricsResponse>("get_tunnel_metrics", {
+    tunnelId,
+    offset,
+    limit,
+  });
 }
 
 /**
@@ -218,6 +234,35 @@ export async function subscribeToMetrics(
   callback: (payload: TunnelMetricsPayload) => void
 ): Promise<UnlistenFn> {
   return listen<TunnelMetricsPayload>("tunnel-metrics", (event) => {
+    callback(event.payload);
+  });
+}
+
+/**
+ * Subscribe to daemon metrics for a specific tunnel.
+ * This starts a background task that forwards metrics from the daemon to the frontend.
+ * The events will be received via the subscribeToMetrics listener.
+ */
+export async function subscribeDaemonMetrics(tunnelId: string): Promise<void> {
+  return invoke("subscribe_daemon_metrics", { tunnelId });
+}
+
+/**
+ * Subscription ended payload
+ */
+export interface SubscriptionEndedPayload {
+  tunnel_id: string;
+}
+
+/**
+ * Subscribe to the subscription-ended event.
+ * This is called when the daemon metrics subscription ends (e.g., tunnel reconnects).
+ * Returns an unsubscribe function.
+ */
+export async function subscribeToSubscriptionEnded(
+  callback: (payload: SubscriptionEndedPayload) => void
+): Promise<UnlistenFn> {
+  return listen<SubscriptionEndedPayload>("tunnel-metrics-subscription-ended", (event) => {
     callback(event.payload);
   });
 }

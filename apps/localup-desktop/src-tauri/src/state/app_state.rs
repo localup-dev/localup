@@ -65,6 +65,23 @@ impl AppState {
         }
     }
 
+    /// Get metrics for a specific tunnel with pagination
+    pub async fn get_tunnel_metrics_paginated(
+        &self,
+        tunnel_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<HttpMetric>, usize) {
+        let metrics = self.tunnel_metrics.read().await;
+        if let Some(store) = metrics.get(tunnel_id) {
+            let total = store.count().await;
+            let items = store.get_paginated(offset, limit).await;
+            (items, total)
+        } else {
+            (Vec::new(), 0)
+        }
+    }
+
     /// Clear metrics for a specific tunnel
     pub async fn clear_tunnel_metrics(&self, tunnel_id: &str) {
         let metrics = self.tunnel_metrics.read().await;

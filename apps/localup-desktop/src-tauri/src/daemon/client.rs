@@ -1,12 +1,20 @@
 //! Daemon client for communicating with the daemon service
 
+use localup_lib::HttpMetric;
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tracing::{error, info};
+use tracing::info;
 
 use super::protocol::{DaemonRequest, DaemonResponse, TunnelInfo};
 use super::{pid_path, socket_path};
+
+/// Default timeout for daemon operations
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Longer timeout for operations that may take time (like starting tunnels)
+const LONG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Client for communicating with the daemon
 pub struct DaemonClient {
@@ -209,8 +217,27 @@ impl DaemonClient {
         Ok(())
     }
 
-    /// Send a request and get a response
+    /// Send a request and get a response with default timeout
     pub async fn send(&mut self, request: DaemonRequest) -> Result<DaemonResponse, DaemonError> {
+        self.send_with_timeout(request, DEFAULT_TIMEOUT).await
+    }
+
+    /// Send a request and get a response with custom timeout
+    pub async fn send_with_timeout(
+        &mut self,
+        request: DaemonRequest,
+        timeout: Duration,
+    ) -> Result<DaemonResponse, DaemonError> {
+        tokio::time::timeout(timeout, self.send_internal(request))
+            .await
+            .map_err(|_| DaemonError::Timeout)?
+    }
+
+    /// Internal send implementation without timeout
+    async fn send_internal(
+        &mut self,
+        request: DaemonRequest,
+    ) -> Result<DaemonResponse, DaemonError> {
         // Serialize request
         let request_bytes = serde_json::to_vec(&request)
             .map_err(|e| DaemonError::SerializationFailed(e.to_string()))?;
@@ -284,7 +311,7 @@ impl DaemonClient {
         }
     }
 
-    /// Start a tunnel
+    /// Start a tunnel (uses longer timeout as this may take time)
     pub async fn start_tunnel(
         &mut self,
         id: &str,
@@ -298,17 +325,20 @@ impl DaemonClient {
         custom_domain: Option<&str>,
     ) -> Result<TunnelInfo, DaemonError> {
         match self
-            .send(DaemonRequest::StartTunnel {
-                id: id.to_string(),
-                name: name.to_string(),
-                relay_address: relay_address.to_string(),
-                auth_token: auth_token.to_string(),
-                local_host: local_host.to_string(),
-                local_port,
-                protocol: protocol.to_string(),
-                subdomain: subdomain.map(|s| s.to_string()),
-                custom_domain: custom_domain.map(|s| s.to_string()),
-            })
+            .send_with_timeout(
+                DaemonRequest::StartTunnel {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    relay_address: relay_address.to_string(),
+                    auth_token: auth_token.to_string(),
+                    local_host: local_host.to_string(),
+                    local_port,
+                    protocol: protocol.to_string(),
+                    subdomain: subdomain.map(|s| s.to_string()),
+                    custom_domain: custom_domain.map(|s| s.to_string()),
+                },
+                LONG_TIMEOUT,
+            )
             .await?
         {
             DaemonResponse::Tunnel(tunnel) => Ok(tunnel),
@@ -338,6 +368,179 @@ impl DaemonClient {
             DaemonResponse::Ok => Ok(()),
             DaemonResponse::Error { message } => Err(DaemonError::ServerError(message)),
             _ => Err(DaemonError::UnexpectedResponse),
+        }
+    }
+
+    /// Get metrics for a tunnel with pagination
+    pub async fn get_tunnel_metrics(
+        &mut self,
+        id: &str,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<(Vec<HttpMetric>, usize), DaemonError> {
+        match self
+            .send(DaemonRequest::GetTunnelMetrics {
+                id: id.to_string(),
+                offset,
+                limit,
+            })
+            .await?
+        {
+            DaemonResponse::Metrics { items, total, .. } => Ok((items, total)),
+            DaemonResponse::Error { message } => Err(DaemonError::ServerError(message)),
+            _ => Err(DaemonError::UnexpectedResponse),
+        }
+    }
+
+    /// Clear metrics for a tunnel
+    pub async fn clear_tunnel_metrics(&mut self, id: &str) -> Result<(), DaemonError> {
+        match self
+            .send(DaemonRequest::ClearTunnelMetrics { id: id.to_string() })
+            .await?
+        {
+            DaemonResponse::Ok => Ok(()),
+            DaemonResponse::Error { message } => Err(DaemonError::ServerError(message)),
+            _ => Err(DaemonError::UnexpectedResponse),
+        }
+    }
+
+    /// Subscribe to metrics for a tunnel
+    /// Returns a subscription that can be used to receive streaming events
+    pub async fn subscribe_metrics(self, id: &str) -> Result<MetricsSubscription, DaemonError> {
+        MetricsSubscription::new(self.stream, id.to_string()).await
+    }
+}
+
+/// Subscription to tunnel metrics events
+pub struct MetricsSubscription {
+    stream: UnixStream,
+    tunnel_id: String,
+}
+
+impl MetricsSubscription {
+    /// Create a new metrics subscription
+    async fn new(mut stream: UnixStream, tunnel_id: String) -> Result<Self, DaemonError> {
+        // Send subscribe request
+        let request = DaemonRequest::SubscribeMetrics {
+            id: tunnel_id.clone(),
+        };
+        let request_bytes = serde_json::to_vec(&request)
+            .map_err(|e| DaemonError::SerializationFailed(e.to_string()))?;
+
+        // Write length prefix
+        let len = (request_bytes.len() as u32).to_be_bytes();
+        stream
+            .write_all(&len)
+            .await
+            .map_err(|e| DaemonError::SendFailed(e.to_string()))?;
+
+        // Write request
+        stream
+            .write_all(&request_bytes)
+            .await
+            .map_err(|e| DaemonError::SendFailed(e.to_string()))?;
+
+        // Read response
+        let mut len_buf = [0u8; 4];
+        stream
+            .read_exact(&mut len_buf)
+            .await
+            .map_err(|e| DaemonError::ReceiveFailed(e.to_string()))?;
+        let len = u32::from_be_bytes(len_buf) as usize;
+
+        let mut response_buf = vec![0u8; len];
+        stream
+            .read_exact(&mut response_buf)
+            .await
+            .map_err(|e| DaemonError::ReceiveFailed(e.to_string()))?;
+
+        let response: DaemonResponse = serde_json::from_slice(&response_buf)
+            .map_err(|e| DaemonError::DeserializationFailed(e.to_string()))?;
+
+        match response {
+            DaemonResponse::Subscribed { id } => {
+                info!("Subscribed to metrics for tunnel: {}", id);
+                Ok(Self { stream, tunnel_id })
+            }
+            DaemonResponse::Error { message } => Err(DaemonError::ServerError(message)),
+            _ => Err(DaemonError::UnexpectedResponse),
+        }
+    }
+
+    /// Get the tunnel ID this subscription is for
+    pub fn tunnel_id(&self) -> &str {
+        &self.tunnel_id
+    }
+
+    /// Receive the next metrics event
+    /// Returns None if the subscription ended
+    pub async fn recv(&mut self) -> Option<localup_lib::MetricsEvent> {
+        // Read response length
+        let mut len_buf = [0u8; 4];
+        if self.stream.read_exact(&mut len_buf).await.is_err() {
+            return None;
+        }
+        let len = u32::from_be_bytes(len_buf) as usize;
+
+        // Read response
+        let mut response_buf = vec![0u8; len];
+        if self.stream.read_exact(&mut response_buf).await.is_err() {
+            return None;
+        }
+
+        // Deserialize response
+        let response: DaemonResponse = match serde_json::from_slice(&response_buf) {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+
+        match response {
+            DaemonResponse::MetricsEvent { event, .. } => Some(event),
+            DaemonResponse::Ok => {
+                // Unsubscribe confirmed
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Unsubscribe from metrics
+    pub async fn unsubscribe(mut self) -> Result<(), DaemonError> {
+        let request = DaemonRequest::UnsubscribeMetrics {
+            id: self.tunnel_id.clone(),
+        };
+        let request_bytes = serde_json::to_vec(&request)
+            .map_err(|e| DaemonError::SerializationFailed(e.to_string()))?;
+
+        // Write length prefix
+        let len = (request_bytes.len() as u32).to_be_bytes();
+        self.stream
+            .write_all(&len)
+            .await
+            .map_err(|e| DaemonError::SendFailed(e.to_string()))?;
+
+        // Write request
+        self.stream
+            .write_all(&request_bytes)
+            .await
+            .map_err(|e| DaemonError::SendFailed(e.to_string()))?;
+
+        // Read response (but don't wait forever)
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut len_buf = [0u8; 4];
+            self.stream.read_exact(&mut len_buf).await?;
+            let len = u32::from_be_bytes(len_buf) as usize;
+
+            let mut response_buf = vec![0u8; len];
+            self.stream.read_exact(&mut response_buf).await?;
+            Ok::<_, std::io::Error>(response_buf)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(DaemonError::ReceiveFailed(e.to_string())),
+            Err(_) => Ok(()), // Timeout is fine, we're closing anyway
         }
     }
 }
@@ -396,4 +599,7 @@ pub enum DaemonError {
 
     #[error("Unexpected response")]
     UnexpectedResponse,
+
+    #[error("Request timed out")]
+    Timeout,
 }

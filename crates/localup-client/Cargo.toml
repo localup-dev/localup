@@ -61,6 +61,9 @@ problem_details = { workspace = true }
 # Metrics
 hdrhistogram = "7.5"
 
+# Compression
+flate2 = "1.0"
+
 # Static asset embedding
 rust-embed = "8.5"
 mime_guess = "2.0"

@@ -25,6 +25,310 @@ struct HttpRequestData {
     body: Option<Vec<u8>>,
 }
 
+/// Response capture for accumulating response data in transparent streaming mode
+/// Always captures headers and status code. Only captures body for text-based content.
+/// Uses streaming decompression to avoid memory spikes.
+struct ResponseCapture {
+    /// Status code (captured from first chunk)
+    status: u16,
+    /// Response headers (captured from first chunk)
+    headers: Vec<(String, String)>,
+    /// Decompressed body data (only for text content types)
+    body_data: Vec<u8>,
+    /// Whether we've parsed the first chunk
+    first_chunk_parsed: bool,
+    /// Whether we should capture body (based on Content-Type)
+    should_capture_body: bool,
+    /// Whether response has been finalized
+    finalized: bool,
+    /// Maximum body bytes to capture (512KB limit for text content)
+    max_body_size: usize,
+    /// Content encoding (gzip, deflate, br, etc.)
+    content_encoding: Option<String>,
+    /// Transfer encoding (chunked, etc.)
+    transfer_encoding: Option<String>,
+    /// Compressed data buffer (for gzip which needs full data to decompress)
+    compressed_buffer: Vec<u8>,
+    /// Buffer for chunked decoding (accumulates until we have a complete chunk)
+    chunk_buffer: Vec<u8>,
+    /// Are we currently reading chunk data (vs chunk size line)?
+    in_chunk_data: bool,
+    /// Remaining bytes in current chunk
+    chunk_remaining: usize,
+}
+
+impl ResponseCapture {
+    const DEFAULT_MAX_BODY_SIZE: usize = 512 * 1024; // 512KB for text content
+
+    fn new() -> Self {
+        Self {
+            status: 0,
+            headers: Vec::new(),
+            body_data: Vec::new(),
+            first_chunk_parsed: false,
+            should_capture_body: false,
+            finalized: false,
+            max_body_size: Self::DEFAULT_MAX_BODY_SIZE,
+            content_encoding: None,
+            transfer_encoding: None,
+            compressed_buffer: Vec::new(),
+            chunk_buffer: Vec::new(),
+            in_chunk_data: false,
+            chunk_remaining: 0,
+        }
+    }
+
+    /// Check if using chunked transfer encoding
+    fn is_chunked(&self) -> bool {
+        self.transfer_encoding
+            .as_ref()
+            .map(|te| te.contains("chunked"))
+            .unwrap_or(false)
+    }
+
+    /// Check if content type is text-based (JSON, HTML, XML, text, etc.)
+    fn is_text_content_type(content_type: &str) -> bool {
+        let ct = content_type.to_lowercase();
+        ct.contains("json")
+            || ct.contains("html")
+            || ct.contains("xml")
+            || ct.contains("text/")
+            || ct.contains("javascript")
+            || ct.contains("css")
+            || ct.contains("form-urlencoded")
+    }
+
+    /// Decode chunked transfer encoding and return the actual body data
+    /// Returns decoded chunks ready for decompression/storage
+    fn decode_chunked(&mut self, data: &[u8]) -> Vec<u8> {
+        let mut decoded = Vec::new();
+        let mut pos = 0;
+
+        // Add incoming data to our buffer
+        self.chunk_buffer.extend_from_slice(data);
+
+        while pos < self.chunk_buffer.len() {
+            if self.in_chunk_data {
+                // Reading chunk data
+                let available = self.chunk_buffer.len() - pos;
+                let to_read = available.min(self.chunk_remaining);
+                decoded.extend_from_slice(&self.chunk_buffer[pos..pos + to_read]);
+                pos += to_read;
+                self.chunk_remaining -= to_read;
+
+                if self.chunk_remaining == 0 {
+                    // Chunk complete, expect \r\n
+                    self.in_chunk_data = false;
+                    // Skip trailing \r\n after chunk data
+                    if pos + 2 <= self.chunk_buffer.len()
+                        && &self.chunk_buffer[pos..pos + 2] == b"\r\n"
+                    {
+                        pos += 2;
+                    }
+                }
+            } else {
+                // Reading chunk size line
+                if let Some(line_end) = self.chunk_buffer[pos..]
+                    .windows(2)
+                    .position(|w| w == b"\r\n")
+                {
+                    let line = &self.chunk_buffer[pos..pos + line_end];
+                    // Parse hex chunk size (may have extensions after ;)
+                    let size_str = std::str::from_utf8(line)
+                        .ok()
+                        .and_then(|s| s.split(';').next())
+                        .unwrap_or("");
+                    let chunk_size = usize::from_str_radix(size_str.trim(), 16).unwrap_or(0);
+
+                    pos += line_end + 2; // Skip past \r\n
+
+                    if chunk_size == 0 {
+                        // Final chunk - we're done
+                        break;
+                    }
+
+                    self.chunk_remaining = chunk_size;
+                    self.in_chunk_data = true;
+                } else {
+                    // Need more data to complete the line
+                    break;
+                }
+            }
+        }
+
+        // Remove processed data from buffer
+        if pos > 0 {
+            self.chunk_buffer = self.chunk_buffer[pos..].to_vec();
+        }
+
+        decoded
+    }
+
+    /// Append body data - buffers compressed data for later decompression
+    fn decompress_and_append(&mut self, data: &[u8]) {
+        // Check if we need to decompress
+        let needs_decompression = matches!(
+            self.content_encoding.as_deref(),
+            Some("gzip") | Some("deflate")
+        );
+
+        if needs_decompression {
+            // Buffer compressed data (will decompress in finalize)
+            let remaining = self.max_body_size - self.compressed_buffer.len();
+            let to_append = data.len().min(remaining);
+            if to_append > 0 {
+                self.compressed_buffer.extend_from_slice(&data[..to_append]);
+            }
+        } else {
+            // No compression - append directly to body_data
+            let remaining = self.max_body_size - self.body_data.len();
+            let to_append = data.len().min(remaining);
+            if to_append > 0 {
+                self.body_data.extend_from_slice(&data[..to_append]);
+            }
+        }
+    }
+
+    /// Process body data: decode chunked encoding if needed, then decompress
+    fn process_body_data(&mut self, data: &[u8]) {
+        if self.is_chunked() {
+            // Decode chunked transfer encoding first
+            let decoded = self.decode_chunked(data);
+            if !decoded.is_empty() {
+                self.decompress_and_append(&decoded);
+            }
+        } else {
+            // Direct body data
+            self.decompress_and_append(data);
+        }
+    }
+
+    fn append(&mut self, chunk: &[u8]) {
+        if !self.first_chunk_parsed {
+            self.first_chunk_parsed = true;
+
+            // Parse the first chunk for status and headers
+            let text = String::from_utf8_lossy(chunk);
+            let mut lines = text.lines();
+
+            // Parse status line: HTTP/1.x STATUS REASON
+            if let Some(status_line) = lines.next() {
+                let parts: Vec<&str> = status_line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    self.status = parts[1].parse().unwrap_or(0);
+                }
+            }
+
+            // Parse headers
+            for line in lines {
+                if line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    let header_name = name.trim().to_string();
+                    let header_value = value.trim().to_string();
+
+                    // Check Content-Type to decide if we should capture body
+                    if header_name.eq_ignore_ascii_case("content-type") {
+                        self.should_capture_body = Self::is_text_content_type(&header_value);
+                    }
+
+                    // Track Content-Encoding for decompression
+                    if header_name.eq_ignore_ascii_case("content-encoding") {
+                        self.content_encoding = Some(header_value.to_lowercase());
+                    }
+
+                    // Track Transfer-Encoding for chunked decoding
+                    if header_name.eq_ignore_ascii_case("transfer-encoding") {
+                        self.transfer_encoding = Some(header_value.to_lowercase());
+                    }
+
+                    self.headers.push((header_name, header_value));
+                }
+            }
+
+            // If we should capture body, extract it from this chunk
+            if self.should_capture_body {
+                if let Some(header_end) = chunk.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let body_start = header_end + 4;
+                    if body_start < chunk.len() {
+                        let body_part = &chunk[body_start..];
+                        self.process_body_data(body_part);
+                    }
+                }
+            }
+        } else if self.should_capture_body && self.body_data.len() < self.max_body_size {
+            // Continue capturing body chunks
+            self.process_body_data(chunk);
+        }
+    }
+
+    fn finalize(&self) -> (u16, Vec<(String, String)>, Option<Vec<u8>>) {
+        // Decompress if we have compressed data buffered
+        let body = if self.should_capture_body {
+            if !self.compressed_buffer.is_empty() {
+                // Decompress the buffered data
+                match self.content_encoding.as_deref() {
+                    Some("gzip") => {
+                        use flate2::read::GzDecoder;
+                        use std::io::Read;
+                        let mut decoder = GzDecoder::new(&self.compressed_buffer[..]);
+                        let mut decompressed = Vec::new();
+                        match decoder.read_to_end(&mut decompressed) {
+                            Ok(_) => {
+                                debug!(
+                                    "Gzip decompressed {} bytes to {} bytes",
+                                    self.compressed_buffer.len(),
+                                    decompressed.len()
+                                );
+                                Some(decompressed)
+                            }
+                            Err(e) => {
+                                debug!("Gzip decompression failed: {}", e);
+                                // Return raw compressed data as fallback
+                                Some(self.compressed_buffer.clone())
+                            }
+                        }
+                    }
+                    Some("deflate") => {
+                        use flate2::read::DeflateDecoder;
+                        use std::io::Read;
+                        let mut decoder = DeflateDecoder::new(&self.compressed_buffer[..]);
+                        let mut decompressed = Vec::new();
+                        match decoder.read_to_end(&mut decompressed) {
+                            Ok(_) => {
+                                debug!(
+                                    "Deflate decompressed {} bytes to {} bytes",
+                                    self.compressed_buffer.len(),
+                                    decompressed.len()
+                                );
+                                Some(decompressed)
+                            }
+                            Err(e) => {
+                                debug!("Deflate decompression failed: {}", e);
+                                Some(self.compressed_buffer.clone())
+                            }
+                        }
+                    }
+                    _ => {
+                        // Shouldn't happen, but return compressed data
+                        Some(self.compressed_buffer.clone())
+                    }
+                }
+            } else if !self.body_data.is_empty() {
+                // Uncompressed data
+                Some(self.body_data.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        (self.status, self.headers.clone(), body)
+    }
+}
+
 /// Generate a short unique ID from stream_id (8 characters)
 fn generate_short_id(stream_id: u32) -> String {
     use std::hash::{Hash, Hasher};
@@ -851,18 +1155,18 @@ impl TunnelConnection {
             }
         };
 
-        // Parse HTTP request from initial_data for metrics
-        let (method, uri, headers) = Self::parse_http_request(&initial_data);
+        // Parse HTTP request from initial_data for metrics (including body)
+        let req = Self::parse_http_request(&initial_data);
         let short_stream_id = generate_short_id(stream_id);
 
-        // Record request in metrics
+        // Record request in metrics with body if present
         let metric_id = metrics
             .record_request(
                 short_stream_id,
-                method.clone(),
-                uri.clone(),
-                headers.clone(),
-                None, // Body is mixed in with request in transparent mode
+                req.method.clone(),
+                req.uri.clone(),
+                req.headers.clone(),
+                req.body,
             )
             .await;
 
@@ -943,47 +1247,47 @@ impl TunnelConnection {
         let (mut local_read, mut local_write) = local_socket.into_split();
         let (mut quic_send, mut quic_recv) = stream.split();
 
-        // Shared state for capturing response status
-        let response_captured = Arc::new(tokio::sync::Mutex::new(false));
-        let response_captured_clone = response_captured.clone();
+        // Shared state for capturing response
+        let response_data = Arc::new(tokio::sync::Mutex::new(ResponseCapture::new()));
+        let response_data_clone = response_data.clone();
         let metrics_clone = metrics.clone();
         let metric_id_clone = metric_id.clone();
 
         // Task: Local → Tunnel (read from local server, send to tunnel)
         let local_to_tunnel = tokio::spawn(async move {
             let mut buffer = vec![0u8; 16384];
-            let mut first_response = true;
             loop {
                 match local_read.read(&mut buffer).await {
                     Ok(0) => {
                         debug!("Local HTTP server closed connection (stream {})", stream_id);
+
+                        // Finalize response capture when connection closes
+                        let mut capture = response_data_clone.lock().await;
+                        if !capture.finalized {
+                            capture.finalized = true;
+                            let (status, headers, body) = capture.finalize();
+                            let duration_ms = start_time.elapsed().as_millis() as u64;
+                            metrics_clone
+                                .record_response(
+                                    &metric_id_clone,
+                                    status,
+                                    headers,
+                                    body,
+                                    duration_ms,
+                                )
+                                .await;
+                        }
+
                         let _ = quic_send
                             .send_message(&TunnelMessage::HttpStreamClose { stream_id })
                             .await;
                         break;
                     }
                     Ok(n) => {
-                        // On first response chunk, try to parse status code for metrics
-                        if first_response {
-                            first_response = false;
-                            let mut captured = response_captured_clone.lock().await;
-                            if !*captured {
-                                *captured = true;
-                                drop(captured);
-
-                                let (status, resp_headers) =
-                                    Self::parse_http_response(&buffer[..n]);
-                                let duration_ms = start_time.elapsed().as_millis() as u64;
-                                metrics_clone
-                                    .record_response(
-                                        &metric_id_clone,
-                                        status,
-                                        resp_headers,
-                                        None, // Body not captured in transparent mode
-                                        duration_ms,
-                                    )
-                                    .await;
-                            }
+                        // Accumulate response data for metrics capture
+                        {
+                            let mut capture = response_data_clone.lock().await;
+                            capture.append(&buffer[..n]);
                         }
 
                         debug!(
@@ -1054,8 +1358,8 @@ impl TunnelConnection {
         let _ = tokio::join!(local_to_tunnel, localup_to_local);
 
         // Record error if no response was captured (connection closed without response)
-        let captured = response_captured.lock().await;
-        if !*captured {
+        let capture = response_data.lock().await;
+        if !capture.finalized {
             let duration_ms = start_time.elapsed().as_millis() as u64;
             metrics
                 .record_error(
@@ -1069,8 +1373,14 @@ impl TunnelConnection {
         debug!("Transparent HTTP stream {} ended", stream_id);
     }
 
-    /// Parse HTTP request line and headers from raw bytes
-    fn parse_http_request(data: &[u8]) -> (String, String, Vec<(String, String)>) {
+    /// Parse HTTP request line, headers, and body from raw bytes
+    fn parse_http_request(data: &[u8]) -> HttpRequestData {
+        // Helper to find subsequence in byte slice
+        fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack
+                .windows(needle.len())
+                .position(|window| window == needle)
+        }
         let text = String::from_utf8_lossy(data);
         let mut lines = text.lines();
 
@@ -1097,38 +1407,24 @@ impl TunnelConnection {
             }
         }
 
-        (method, uri, headers)
-    }
-
-    /// Parse HTTP response status line and headers from raw bytes
-    fn parse_http_response(data: &[u8]) -> (u16, Vec<(String, String)>) {
-        let text = String::from_utf8_lossy(data);
-        let mut lines = text.lines();
-
-        // Parse status line: HTTP/1.x STATUS REASON
-        let status = if let Some(status_line) = lines.next() {
-            let parts: Vec<&str> = status_line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                parts[1].parse().unwrap_or(0)
+        // Extract body (everything after \r\n\r\n)
+        let body = if let Some(header_end) = find_subsequence(data, b"\r\n\r\n") {
+            let body_start = header_end + 4;
+            if body_start < data.len() {
+                Some(data[body_start..].to_vec())
             } else {
-                0
+                None
             }
         } else {
-            0
+            None
         };
 
-        // Parse headers
-        let mut headers = Vec::new();
-        for line in lines {
-            if line.is_empty() {
-                break; // End of headers
-            }
-            if let Some((name, value)) = line.split_once(':') {
-                headers.push((name.trim().to_string(), value.trim().to_string()));
-            }
+        HttpRequestData {
+            method,
+            uri,
+            headers,
+            body,
         }
-
-        (status, headers)
     }
 
     async fn handle_tcp_stream(
