@@ -207,25 +207,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # macOS - Universal binary (Intel + Apple Silicon)
-          - platform: macos
+          # macOS Apple Silicon (ARM64)
+          - platform: macos-arm64
             runner: macos-14
-            rust_target: "aarch64-apple-darwin,x86_64-apple-darwin"
-            daemon_targets: "aarch64-apple-darwin x86_64-apple-darwin"
-            args: "--target universal-apple-darwin"
+            rust_target: "aarch64-apple-darwin"
+            daemon_target: "aarch64-apple-darwin"
+            args: "--target aarch64-apple-darwin"
+
+          # macOS Intel (AMD64)
+          - platform: macos-amd64
+            runner: macos-14
+            rust_target: "x86_64-apple-darwin"
+            daemon_target: "x86_64-apple-darwin"
+            args: "--target x86_64-apple-darwin"
 
           # Linux AMD64
           - platform: linux
             runner: ubuntu-22.04
             rust_target: "x86_64-unknown-linux-gnu"
-            daemon_targets: "x86_64-unknown-linux-gnu"
+            daemon_target: "x86_64-unknown-linux-gnu"
             args: ""
 
           # Windows AMD64
           - platform: windows
             runner: windows-latest
             rust_target: "x86_64-pc-windows-msvc"
-            daemon_targets: "x86_64-pc-windows-msvc"
+            daemon_target: "x86_64-pc-windows-msvc"
             args: ""
 
     steps:
@@ -245,12 +252,22 @@ jobs:
           name: webapps
           path: webapps/
 
-      - name: Verify webapp artifacts
+      - name: Verify webapp artifacts (Unix)
+        if: matrix.platform != 'windows'
         run: |
           echo "Checking webapp artifacts..."
           ls -la webapps/
           ls -la webapps/dashboard/dist/ || echo "Dashboard dist not found"
           ls -la webapps/exit-node-portal/dist/ || echo "Portal dist not found"
+
+      - name: Verify webapp artifacts (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          Write-Host "Checking webapp artifacts..."
+          Get-ChildItem -Path webapps -Recurse | Select-Object -First 20
+          if (Test-Path webapps/dashboard/dist) { Get-ChildItem webapps/dashboard/dist } else { Write-Host "Dashboard dist not found" }
+          if (Test-Path webapps/exit-node-portal/dist) { Get-ChildItem webapps/exit-node-portal/dist } else { Write-Host "Portal dist not found" }
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
@@ -289,28 +306,9 @@ jobs:
           LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
         run: |
           mkdir -p apps/localup-desktop/src-tauri/binaries
-          for target in ${{ matrix.daemon_targets }}; do
-            cargo build --release --target $target -p localup-cli
-
-            # Determine the suffix for the binary name
-            case "$target" in
-              aarch64-apple-darwin)
-                suffix="-aarch64-apple-darwin"
-                ;;
-              x86_64-apple-darwin)
-                suffix="-x86_64-apple-darwin"
-                ;;
-              x86_64-unknown-linux-gnu)
-                suffix="-x86_64-unknown-linux-gnu"
-                ;;
-              *)
-                suffix=""
-                ;;
-            esac
-
-            cp "target/$target/release/localup" \
-               "apps/localup-desktop/src-tauri/binaries/localup-daemon$suffix"
-          done
+          cargo build --release --target ${{ matrix.daemon_target }} -p localup-cli
+          cp "target/${{ matrix.daemon_target }}/release/localup" \
+             "apps/localup-desktop/src-tauri/binaries/localup-daemon-${{ matrix.daemon_target }}"
           ls -la apps/localup-desktop/src-tauri/binaries/
 
       - name: Build daemon binary (Windows)
@@ -373,8 +371,10 @@ jobs:
             apps/localup-desktop/src-tauri/target/release/bundle/**/*.rpm
             apps/localup-desktop/src-tauri/target/release/bundle/**/*.msi
             apps/localup-desktop/src-tauri/target/release/bundle/**/*.exe
-            apps/localup-desktop/src-tauri/target/universal-apple-darwin/release/bundle/**/*.dmg
-            apps/localup-desktop/src-tauri/target/universal-apple-darwin/release/bundle/**/*.app
+            apps/localup-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.dmg
+            apps/localup-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/**/*.app
+            apps/localup-desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/**/*.dmg
+            apps/localup-desktop/src-tauri/target/x86_64-apple-darwin/release/bundle/**/*.app
           retention-days: 1
 
   # Create GitHub Release with all artifacts
@@ -474,7 +474,8 @@ jobs:
             Download the LocalUp Desktop app for your platform:
 
             ### macOS
-            - **Universal (Intel + Apple Silicon)**: `LocalUp_${{ steps.get_version.outputs.VERSION }}_universal.dmg`
+            - **Apple Silicon (M1/M2/M3)**: `LocalUp_${{ steps.get_version.outputs.VERSION }}_aarch64.dmg`
+            - **Intel**: `LocalUp_${{ steps.get_version.outputs.VERSION }}_x64.dmg`
 
             ### Linux
             - **Debian/Ubuntu**: `local-up_${{ steps.get_version.outputs.VERSION }}_amd64.deb`
