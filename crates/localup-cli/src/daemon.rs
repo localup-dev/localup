@@ -93,7 +93,7 @@ impl Daemon {
         // Start IPC server
         let ipc_server = match IpcServer::bind().await {
             Ok(server) => {
-                info!("IPC server listening at {:?}", server.path());
+                info!("IPC server listening at {}", server.endpoint());
                 Some(server)
             }
             Err(e) => {

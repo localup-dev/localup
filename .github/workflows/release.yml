@@ -239,6 +239,19 @@ jobs:
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
+      - name: Download webapp artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: webapps
+          path: webapps/
+
+      - name: Verify webapp artifacts
+        run: |
+          echo "Checking webapp artifacts..."
+          ls -la webapps/
+          ls -la webapps/dashboard/dist/ || echo "Dashboard dist not found"
+          ls -la webapps/exit-node-portal/dist/ || echo "Portal dist not found"
+
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:

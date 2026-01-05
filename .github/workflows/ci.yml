@@ -83,17 +83,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Build dashboard webapp
-        run: |
-          cd webapps/dashboard
-          bun install
-          bun run build
-
       - name: Download webapp artifacts
         uses: actions/download-artifact@v4
         with:
@@ -127,16 +116,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Download webapp artifacts
+        uses: actions/download-artifact@v4
         with:
-          bun-version: latest
-
-      - name: Build dashboard webapp
-        run: |
-          cd webapps/dashboard
-          bun install
-          bun run build
+          name: webapps-ci
+          path: webapps/
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -166,16 +150,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Build dashboard webapp
-        run: |
-          cd webapps/dashboard
-          bun install
-          bun run build
       - name: Download webapp artifacts
         uses: actions/download-artifact@v4
         with:
@@ -199,12 +173,18 @@ jobs:
 
   cli-e2e:
     name: CLI E2E Tests
-    needs: build
+    needs: [build, build-webapps]
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Download webapp artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: webapps-ci
+          path: webapps/
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

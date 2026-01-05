@@ -295,6 +295,11 @@ impl IpcServer {
     pub fn path(&self) -> &std::path::Path {
         &self.socket_path
     }
+
+    /// Get a displayable endpoint string (cross-platform compatible)
+    pub fn endpoint(&self) -> String {
+        self.socket_path.display().to_string()
+    }
 }
 
 #[cfg(unix)]
@@ -471,6 +476,11 @@ impl IpcServer {
     /// Get the port
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Get a displayable endpoint string (cross-platform compatible)
+    pub fn endpoint(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
     }
 }
 
