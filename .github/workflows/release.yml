@@ -171,10 +171,156 @@ jobs:
           path: release/*
           retention-days: 1
 
+  # Build Tauri desktop app for all platforms
+  build-tauri:
+    name: Build Desktop App (${{ matrix.platform }})
+    needs: build-webapps
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS ARM64 (Apple Silicon)
+          - platform: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            daemon_target: aarch64-apple-darwin
+            bundle_targets: dmg
+
+          # macOS AMD64 (Intel)
+          - platform: macos-amd64
+            os: macos-14
+            target: x86_64-apple-darwin
+            daemon_target: x86_64-apple-darwin
+            bundle_targets: dmg
+
+          # Linux AMD64
+          - platform: linux-amd64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            daemon_target: x86_64-unknown-linux-gnu
+            bundle_targets: appimage,deb
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      # Linux dependencies for Tauri
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "tauri-${{ matrix.platform }}"
+          cache-targets: true
+          cache-on-failure: true
+
+      # Build the daemon binary first (required by Tauri as external binary)
+      - name: Build daemon binary
+        env:
+          LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
+        run: |
+          cargo build --release --target ${{ matrix.daemon_target }} \
+            -p localup-desktop --bin localup-daemon
+
+          # Copy daemon binary to Tauri binaries directory with correct naming
+          mkdir -p apps/localup-desktop/src-tauri/binaries
+          cp target/${{ matrix.daemon_target }}/release/localup-daemon \
+            apps/localup-desktop/src-tauri/binaries/localup-daemon-${{ matrix.daemon_target }}
+
+      # Install frontend dependencies
+      - name: Install frontend dependencies
+        working-directory: apps/localup-desktop
+        run: bun install
+
+      # Build Tauri app
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: apps/localup-desktop
+          tauriScript: bun run tauri
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundle_targets }}
+
+      # Collect and rename artifacts for upload
+      - name: Collect artifacts
+        run: |
+          mkdir -p release
+
+          # macOS DMG
+          if [ -f "apps/localup-desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/"*.dmg ]; then
+            for f in apps/localup-desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg; do
+              cp "$f" "release/LocalUp-${{ matrix.platform }}.dmg"
+            done
+          fi
+
+          # Linux AppImage
+          if [ -f "apps/localup-desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/"*.AppImage ]; then
+            for f in apps/localup-desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage; do
+              cp "$f" "release/LocalUp-${{ matrix.platform }}.AppImage"
+            done
+          fi
+
+          # Linux deb
+          if [ -f "apps/localup-desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/"*.deb ]; then
+            for f in apps/localup-desktop/src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb; do
+              cp "$f" "release/LocalUp-${{ matrix.platform }}.deb"
+            done
+          fi
+
+          # Create checksums for desktop artifacts
+          cd release
+          if ls *.dmg *.AppImage *.deb 1> /dev/null 2>&1; then
+            shasum -a 256 *.dmg *.AppImage *.deb 2>/dev/null > checksums-desktop-${{ matrix.platform }}.txt || true
+          fi
+
+          ls -lah
+
+      - name: Upload Tauri artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: release/*
+          retention-days: 1
+
   # Create GitHub Release with all artifacts
   create-release:
     name: Create GitHub Release
-    needs: [build-binaries]
+    needs: [build-binaries, build-tauri]
     runs-on: ubuntu-latest
 
     steps:
@@ -192,6 +338,10 @@ jobs:
 
           # CLI binaries
           find artifacts/ -type f \( -name "*.tar.gz" -o -name "checksums-*.txt" \) \
+            -exec cp {} release/ \;
+
+          # Desktop app artifacts (DMG, AppImage, deb)
+          find artifacts/ -type f \( -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) \
             -exec cp {} release/ \;
 
           # Create a combined checksums file
@@ -224,7 +374,21 @@ jobs:
           prerelease: ${{ steps.get_version.outputs.IS_PRERELEASE }}
           generate_release_notes: true
           body: |
-            ## Installation
+            ## Desktop App
+
+            Download the LocalUp desktop application for GUI-based tunnel management:
+
+            ### macOS
+            - **Apple Silicon (M1/M2/M3)**: `LocalUp-macos-arm64.dmg`
+            - **Intel**: `LocalUp-macos-amd64.dmg`
+
+            ### Linux
+            - **AppImage (Universal)**: `LocalUp-linux-amd64.AppImage`
+            - **Debian/Ubuntu**: `LocalUp-linux-amd64.deb`
+
+            ---
+
+            ## CLI Tool
 
             ### Homebrew (macOS/Linux)
 
@@ -246,35 +410,33 @@ jobs:
             ${{ steps.get_version.outputs.IS_PRERELEASE == 'false' && 'brew install localup' || '' }}
             ```
 
-            ---
-
-            ## CLI Tool
+            ### Manual Download
 
             Download the command-line tool for your platform:
 
-            ### Linux
+            #### Linux
             - **AMD64**: `localup-linux-amd64.tar.gz`
             - **ARM64**: `localup-linux-arm64.tar.gz`
 
-            ### macOS
+            #### macOS
             - **Intel (AMD64)**: `localup-macos-amd64.tar.gz`
             - **Apple Silicon (ARM64)**: `localup-macos-arm64.tar.gz`
 
             ---
 
-            ### Verify Downloads
+            ## Verify Downloads
 
             All archives include SHA256 checksums. Verify your download:
 
             ```bash
-            sha256sum -c checksums-<platform>.txt
+            sha256sum -c SHA256SUMS.txt
 
-            # Or check against combined checksums
-            sha256sum localup-<platform>-<arch>.tar.gz
-            grep localup-<platform>-<arch> SHA256SUMS.txt
+            # Or check individual file
+            shasum -a 256 <filename>
+            grep <filename> SHA256SUMS.txt
             ```
 
-            ### Extract and Install
+            ## Install CLI
 
             ```bash
             tar -xzf localup-<platform>-<arch>.tar.gz
@@ -283,68 +445,71 @@ jobs:
             ```
           files: |
             release/*.tar.gz
+            release/*.dmg
+            release/*.AppImage
+            release/*.deb
             release/checksums-*.txt
             release/SHA256SUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Build and push Docker image to GHCR
-  docker-publish:
-    name: Publish Docker Image to GHCR
-    needs: create-release
-    runs-on: ubuntu-latest
+  # docker-publish:
+  #   name: Publish Docker Image to GHCR
+  #   needs: create-release
+  #   runs-on: ubuntu-latest
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+  #     - name: Set up Docker Buildx
+  #       uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+  #     - name: Log in to Container Registry
+  #       uses: docker/login-action@v3
+  #       with:
+  #         registry: ${{ env.REGISTRY }}
+  #         username: ${{ github.actor }}
+  #         password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,prefix=sha-
-            type=raw,value=latest
+  #     - name: Extract metadata
+  #       id: meta
+  #       uses: docker/metadata-action@v5
+  #       with:
+  #         images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+  #         tags: |
+  #           type=semver,pattern={{version}}
+  #           type=semver,pattern={{major}}.{{minor}}
+  #           type=semver,pattern={{major}}
+  #           type=sha,prefix=sha-
+  #           type=raw,value=latest
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+  #     - name: Build and push Docker image
+  #       uses: docker/build-push-action@v5
+  #       with:
+  #         context: .
+  #         file: ./Dockerfile
+  #         push: true
+  #         tags: ${{ steps.meta.outputs.tags }}
+  #         labels: ${{ steps.meta.outputs.labels }}
+  #         cache-from: type=gha
+  #         cache-to: type=gha,mode=max
 
-      - name: Test Docker image
-        run: |
-          echo "Testing Docker image..."
-          docker build -f Dockerfile -t localup:test .
-          docker run --rm localup:test --version
-          docker run --rm localup:test --help
+  #     - name: Test Docker image
+  #       run: |
+  #         echo "Testing Docker image..."
+  #         docker build -f Dockerfile -t localup:test .
+  #         docker run --rm localup:test --version
+  #         docker run --rm localup:test --help
 
-      - name: Print image details
-        run: |
-          echo "## Docker Image Published to GHCR ✅"
-          echo ""
-          echo "### Build Metadata"
-          echo "**Images:**"
-          echo "${{ steps.meta.outputs.tags }}"
-          echo ""
-          echo "**Labels:**"
-          echo "${{ steps.meta.outputs.labels }}"
+  #     - name: Print image details
+  #       run: |
+  #         echo "## Docker Image Published to GHCR ✅"
+  #         echo ""
+  #         echo "### Build Metadata"
+  #         echo "**Images:**"
+  #         echo "${{ steps.meta.outputs.tags }}"
+  #         echo ""
+  #         echo "**Labels:**"
+  #         echo "${{ steps.meta.outputs.labels }}"
