@@ -185,21 +185,18 @@ jobs:
           - platform: macos-arm64
             os: macos-14
             target: aarch64-apple-darwin
-            daemon_target: aarch64-apple-darwin
             bundle_targets: dmg
 
           # macOS AMD64 (Intel)
           - platform: macos-amd64
             os: macos-14
             target: x86_64-apple-darwin
-            daemon_target: x86_64-apple-darwin
             bundle_targets: dmg
 
           # Linux AMD64
           - platform: linux-amd64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            daemon_target: x86_64-unknown-linux-gnu
             bundle_targets: appimage,deb
 
     steps:
@@ -244,23 +241,6 @@ jobs:
           cache-targets: true
           cache-on-failure: true
 
-      # Build the daemon binary first (required by Tauri as external binary)
-      - name: Build daemon binary
-        env:
-          LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
-        run: |
-          cargo build --release --target ${{ matrix.daemon_target }} \
-            -p localup-desktop --bin localup-daemon
-
-          # Copy daemon binary to Tauri binaries directory with correct naming
-          # Tauri looks for binaries relative to src-tauri directory
-          mkdir -p apps/localup-desktop/src-tauri/binaries
-          cp target/${{ matrix.daemon_target }}/release/localup-daemon \
-            apps/localup-desktop/src-tauri/binaries/localup-daemon-${{ matrix.daemon_target }}
-
-          # Verify the binary exists
-          ls -la apps/localup-desktop/src-tauri/binaries/
-
       # Install frontend dependencies and build frontend
       - name: Install frontend dependencies
         working-directory: apps/localup-desktop
@@ -268,17 +248,12 @@ jobs:
           bun install
           bun run build
 
-      # Build Tauri app manually (more control than tauri-action)
+      # Build Tauri app
       - name: Build Tauri app
         working-directory: apps/localup-desktop
         env:
           LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
         run: |
-          # Verify daemon binary exists before building
-          echo "Checking for daemon binary..."
-          ls -la src-tauri/binaries/
-
-          # Build Tauri app
           bun run tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle_targets }}
 
       # Collect and rename artifacts for upload
