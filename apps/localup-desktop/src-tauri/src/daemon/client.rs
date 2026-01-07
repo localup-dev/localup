@@ -4,11 +4,11 @@ use localup_lib::HttpMetric;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixStream;
+use tokio::net::TcpStream;
 use tracing::info;
 
 use super::protocol::{DaemonRequest, DaemonResponse, TunnelInfo};
-use super::{pid_path, socket_path};
+use super::{daemon_addr, ensure_localup_dir, pid_path};
 
 /// Default timeout for daemon operations
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -18,15 +18,15 @@ const LONG_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Client for communicating with the daemon
 pub struct DaemonClient {
-    stream: UnixStream,
+    stream: TcpStream,
 }
 
 impl DaemonClient {
     /// Connect to the daemon
     pub async fn connect() -> Result<Self, DaemonError> {
-        let socket_path = socket_path();
+        let addr = daemon_addr();
 
-        let stream = UnixStream::connect(&socket_path)
+        let stream = TcpStream::connect(&addr)
             .await
             .map_err(|e| DaemonError::ConnectionFailed(e.to_string()))?;
 
@@ -59,12 +59,8 @@ impl DaemonClient {
 
     /// Start the daemon process
     pub fn start_daemon() -> Result<Child, DaemonError> {
-        // Create the .localup directory if needed
-        let socket_path = socket_path();
-        if let Some(parent) = socket_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| DaemonError::StartupFailed(e.to_string()))?;
-        }
+        // Create the localup directory if needed
+        ensure_localup_dir().map_err(|e| DaemonError::StartupFailed(e.to_string()))?;
 
         // Find the daemon binary
         let daemon_path = Self::find_daemon_binary()?;
@@ -97,15 +93,27 @@ impl DaemonClient {
 
         // Check in same directory as current executable (for bundled app)
         if let Some(dir) = current_exe.parent() {
+            // Determine binary extension based on platform
+            #[cfg(target_os = "windows")]
+            let (sidecar_name, plain_name) = (
+                format!("localup-daemon-{}.exe", target_triple),
+                "localup-daemon.exe",
+            );
+            #[cfg(not(target_os = "windows"))]
+            let (sidecar_name, plain_name) = (
+                format!("localup-daemon-{}", target_triple),
+                "localup-daemon",
+            );
+
             // First check for sidecar with platform suffix (Tauri bundled format)
-            let sidecar_path = dir.join(format!("localup-daemon-{}", target_triple));
+            let sidecar_path = dir.join(&sidecar_name);
             if sidecar_path.exists() {
                 info!("Found sidecar daemon at: {:?}", sidecar_path);
                 return Ok(sidecar_path);
             }
 
             // Then check for plain daemon binary (development mode)
-            let daemon_path = dir.join("localup-daemon");
+            let daemon_path = dir.join(plain_name);
             if daemon_path.exists() {
                 info!("Found daemon at: {:?}", daemon_path);
                 return Ok(daemon_path);
@@ -115,9 +123,7 @@ impl DaemonClient {
             #[cfg(target_os = "macos")]
             {
                 if let Some(contents) = dir.parent() {
-                    let resources_sidecar = contents
-                        .join("Resources")
-                        .join(format!("localup-daemon-{}", target_triple));
+                    let resources_sidecar = contents.join("Resources").join(&sidecar_name);
                     if resources_sidecar.exists() {
                         info!("Found sidecar daemon in Resources: {:?}", resources_sidecar);
                         return Ok(resources_sidecar);
@@ -126,24 +132,63 @@ impl DaemonClient {
             }
         }
 
-        // Check in ~/.local/bin
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let local_bin = std::path::PathBuf::from(&home)
-            .join(".local")
-            .join("bin")
-            .join("localup-daemon");
-        if local_bin.exists() {
-            info!("Found daemon in ~/.local/bin: {:?}", local_bin);
-            return Ok(local_bin);
+        // Check in ~/.local/bin (Unix) or %LOCALAPPDATA%\localup\bin (Windows)
+        #[cfg(not(target_os = "windows"))]
+        {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            let local_bin = std::path::PathBuf::from(&home)
+                .join(".local")
+                .join("bin")
+                .join("localup-daemon");
+            if local_bin.exists() {
+                info!("Found daemon in ~/.local/bin: {:?}", local_bin);
+                return Ok(local_bin);
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| {
+                std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".to_string())
+            });
+            let local_bin = std::path::PathBuf::from(&local_app_data)
+                .join("localup")
+                .join("bin")
+                .join("localup-daemon.exe");
+            if local_bin.exists() {
+                info!("Found daemon in LOCALAPPDATA: {:?}", local_bin);
+                return Ok(local_bin);
+            }
         }
 
         // Check in PATH
-        if let Ok(output) = Command::new("which").arg("localup-daemon").output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    info!("Found daemon in PATH: {}", path);
-                    return Ok(std::path::PathBuf::from(path));
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Ok(output) = Command::new("which").arg("localup-daemon").output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        info!("Found daemon in PATH: {}", path);
+                        return Ok(std::path::PathBuf::from(path));
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(output) = Command::new("where").arg("localup-daemon").output() {
+                if output.status.success() {
+                    let path = String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if !path.is_empty() {
+                        info!("Found daemon in PATH: {}", path);
+                        return Ok(std::path::PathBuf::from(path));
+                    }
                 }
             }
         }
@@ -212,7 +257,6 @@ impl DaemonClient {
 
         // Remove PID file
         let _ = std::fs::remove_file(pid_path());
-        let _ = std::fs::remove_file(socket_path());
 
         Ok(())
     }
@@ -404,6 +448,27 @@ impl DaemonClient {
         }
     }
 
+    /// Get TCP connections for a tunnel with pagination
+    pub async fn get_tcp_connections(
+        &mut self,
+        id: &str,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    ) -> Result<(Vec<localup_lib::TcpMetric>, usize), DaemonError> {
+        match self
+            .send(DaemonRequest::GetTcpConnections {
+                id: id.to_string(),
+                offset,
+                limit,
+            })
+            .await?
+        {
+            DaemonResponse::TcpConnections { items, total, .. } => Ok((items, total)),
+            DaemonResponse::Error { message } => Err(DaemonError::ServerError(message)),
+            _ => Err(DaemonError::UnexpectedResponse),
+        }
+    }
+
     /// Subscribe to metrics for a tunnel
     /// Returns a subscription that can be used to receive streaming events
     pub async fn subscribe_metrics(self, id: &str) -> Result<MetricsSubscription, DaemonError> {
@@ -413,13 +478,13 @@ impl DaemonClient {
 
 /// Subscription to tunnel metrics events
 pub struct MetricsSubscription {
-    stream: UnixStream,
+    stream: TcpStream,
     tunnel_id: String,
 }
 
 impl MetricsSubscription {
     /// Create a new metrics subscription
-    async fn new(mut stream: UnixStream, tunnel_id: String) -> Result<Self, DaemonError> {
+    async fn new(mut stream: TcpStream, tunnel_id: String) -> Result<Self, DaemonError> {
         // Send subscribe request
         let request = DaemonRequest::SubscribeMetrics {
             id: tunnel_id.clone(),
@@ -550,7 +615,6 @@ fn process_exists(pid: u32) -> bool {
     #[cfg(target_os = "windows")]
     {
         // On Windows, use OpenProcess to check
-        use std::ptr::null_mut;
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
             OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -558,7 +622,7 @@ fn process_exists(pid: u32) -> bool {
 
         unsafe {
             let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if handle != null_mut() {
+            if handle != 0 {
                 CloseHandle(handle);
                 return true;
             }

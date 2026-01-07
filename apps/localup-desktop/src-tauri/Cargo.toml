@@ -52,6 +52,10 @@ regex = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Windows process management (for daemon)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]

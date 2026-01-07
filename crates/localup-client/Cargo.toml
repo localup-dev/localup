@@ -45,6 +45,11 @@ async-trait = { workspace = true }
 # HTTP client for replay
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
 
+# HTTP proxy (hyper-based reverse proxy for local server)
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = "0.1"
+
 # HTTP server framework
 axum = { workspace = true }
 tower = { workspace = true }
@@ -63,6 +68,9 @@ hdrhistogram = "7.5"
 
 # Compression
 flate2 = "1.0"
+
+# HTTP parsing
+httparse = "1.8"
 
 # Static asset embedding
 rust-embed = "8.5"

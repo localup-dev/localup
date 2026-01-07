@@ -73,10 +73,12 @@ import {
   getTunnelMetrics,
   clearTunnelMetrics,
   replayRequest,
+  getTcpConnections,
   type Tunnel,
   type HttpMetric,
   type BodyData,
   type ReplayResponse,
+  type TcpConnection,
 } from "@/api/tunnels";
 
 function getStatusBadge(status: string) {
@@ -146,6 +148,39 @@ function getStatusCodeBadge(status: number | null) {
 
 function formatTimestamp(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString();
+}
+
+function formatTimestampString(timestamp: string): string {
+  return new Date(timestamp).toLocaleTimeString();
+}
+
+function getTcpStateBadge(state: string) {
+  switch (state.toLowerCase()) {
+    case "connected":
+    case "active":
+      return (
+        <Badge className="bg-green-500/10 text-green-500">
+          <CheckCircle2 className="h-3 w-3 mr-1" />
+          Active
+        </Badge>
+      );
+    case "closed":
+      return (
+        <Badge variant="secondary">
+          <WifiOff className="h-3 w-3 mr-1" />
+          Closed
+        </Badge>
+      );
+    case "error":
+      return (
+        <Badge className="bg-red-500/10 text-red-500">
+          <AlertCircle className="h-3 w-3 mr-1" />
+          Error
+        </Badge>
+      );
+    default:
+      return <Badge variant="secondary">{state}</Badge>;
+  }
 }
 
 function formatBodyData(body: BodyData | null): string {
@@ -458,7 +493,7 @@ function RequestDetailSidebar({
             <Clock className="h-3 w-3" />
             {formatTimestamp(request.timestamp)}
           </span>
-          {request.duration_ms && (
+          {request.duration_ms != null && (
             <>
               <Separator orientation="vertical" className="h-4" />
               <span>{request.duration_ms}ms</span>
@@ -543,7 +578,7 @@ function RequestDetailSidebar({
                   <span className="font-medium">Status:</span>
                   {getStatusCodeBadge(request.response_status)}
                 </div>
-                {request.duration_ms && (
+                {request.duration_ms != null && (
                   <div className="flex items-center gap-2">
                     <span className="font-medium">Time:</span>
                     <span>{request.duration_ms}ms</span>
@@ -634,6 +669,10 @@ export function TunnelDetail() {
   const [currentPage, setCurrentPage] = useState(1);
   const metricsRef = useRef<Map<string, HttpMetric>>(new Map());
 
+  // TCP connections state
+  const [tcpConnections, setTcpConnections] = useState<TcpConnection[]>([]);
+  const tcpConnectionsRef = useRef<Map<string, TcpConnection>>(new Map());
+
   // Filter state
   const [methodFilter, setMethodFilter] = useState<string>("");
   const [pathFilter, setPathFilter] = useState<string>("");
@@ -650,10 +689,20 @@ export function TunnelDetail() {
       }
       setTunnel(tunnelData);
 
-      // Load metrics from in-memory store (paginated)
-      const metricsResponse = await getTunnelMetrics(id, 0, 100);
-      metricsResponse.items.forEach(m => metricsRef.current.set(m.id, m));
-      setMetrics(metricsResponse.items);
+      // Load metrics based on protocol type
+      const isTcpProtocol = tunnelData.protocol === "tcp" || tunnelData.protocol === "tls";
+
+      if (isTcpProtocol) {
+        // Load TCP connections for TCP/TLS tunnels
+        const tcpResponse = await getTcpConnections(id, 0, 100);
+        tcpResponse.items.forEach(c => tcpConnectionsRef.current.set(c.id, c));
+        setTcpConnections(tcpResponse.items);
+      } else {
+        // Load HTTP metrics for HTTP/HTTPS tunnels
+        const metricsResponse = await getTunnelMetrics(id, 0, 100);
+        metricsResponse.items.forEach(m => metricsRef.current.set(m.id, m));
+        setMetrics(metricsResponse.items);
+      }
     } catch (error) {
       toast.error("Failed to load tunnel", {
         description: String(error),
@@ -675,14 +724,27 @@ export function TunnelDetail() {
         const tunnelData = await getTunnel(id);
         if (tunnelData) {
           setTunnel(tunnelData);
-        }
 
-        // Poll metrics from daemon/in-memory store
-        const metricsResponse = await getTunnelMetrics(id, 0, 100);
-        // Update metricsRef with new data, preserving order
-        metricsResponse.items.forEach(m => metricsRef.current.set(m.id, m));
-        // Update state with all metrics sorted by timestamp (newest first)
-        setMetrics(Array.from(metricsRef.current.values()).sort((a, b) => b.timestamp - a.timestamp));
+          // Poll metrics based on protocol type
+          const isTcpProtocol = tunnelData.protocol === "tcp" || tunnelData.protocol === "tls";
+
+          if (isTcpProtocol) {
+            // Poll TCP connections for TCP/TLS tunnels
+            const tcpResponse = await getTcpConnections(id, 0, 100);
+            tcpResponse.items.forEach(c => tcpConnectionsRef.current.set(c.id, c));
+            // Update state with all connections sorted by timestamp (newest first)
+            setTcpConnections(
+              Array.from(tcpConnectionsRef.current.values()).sort(
+                (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+              )
+            );
+          } else {
+            // Poll HTTP metrics for HTTP/HTTPS tunnels
+            const metricsResponse = await getTunnelMetrics(id, 0, 100);
+            metricsResponse.items.forEach(m => metricsRef.current.set(m.id, m));
+            setMetrics(Array.from(metricsRef.current.values()).sort((a, b) => b.timestamp - a.timestamp));
+          }
+        }
       } catch {
         // Silently ignore polling errors
       }
@@ -800,8 +862,9 @@ export function TunnelDetail() {
   const isConnected = tunnel.status.toLowerCase() === "connected";
   const isConnecting = tunnel.status.toLowerCase() === "connecting";
   const isRunning = isConnected || isConnecting;
+  const isTcpProtocol = tunnel.protocol === "tcp" || tunnel.protocol === "tls";
 
-  // Filter metrics based on filter state
+  // Filter metrics based on filter state (HTTP only)
   const filteredMetrics = metrics.filter((m) => {
     // Method filter
     if (methodFilter && m.method.toUpperCase() !== methodFilter.toUpperCase()) {
@@ -824,12 +887,23 @@ export function TunnelDetail() {
     return true;
   });
 
-  // Calculate stats from all metrics (not filtered)
-  const totalRequests = metrics.length;
-  const avgLatency = totalRequests > 0
-    ? Math.round(metrics.reduce((sum, r) => sum + (r.duration_ms || 0), 0) / totalRequests)
-    : 0;
-  const errorRequests = metrics.filter((r) => r.response_status && r.response_status >= 400).length;
+  // Calculate stats based on protocol type
+  const totalRequests = isTcpProtocol ? tcpConnections.length : metrics.length;
+  const avgLatency = isTcpProtocol
+    ? (tcpConnections.length > 0
+        ? Math.round(tcpConnections.reduce((sum, c) => sum + (c.duration_ms || 0), 0) / tcpConnections.length)
+        : 0)
+    : (metrics.length > 0
+        ? Math.round(metrics.reduce((sum, r) => sum + (r.duration_ms || 0), 0) / metrics.length)
+        : 0);
+  const errorCount = isTcpProtocol
+    ? tcpConnections.filter((c) => c.error).length
+    : metrics.filter((r) => r.response_status && r.response_status >= 400).length;
+
+  // TCP-specific stats
+  const totalBytesIn = tcpConnections.reduce((sum, c) => sum + c.bytes_received, 0);
+  const totalBytesOut = tcpConnections.reduce((sum, c) => sum + c.bytes_sent, 0);
+  const activeConnections = tcpConnections.filter((c) => c.state.toLowerCase() === "active" || c.state.toLowerCase() === "connected").length;
 
   // Reset to page 1 when filters change
   const hasActiveFilter = methodFilter || pathFilter || statusFilter;
@@ -943,61 +1017,117 @@ export function TunnelDetail() {
       )}
 
       {/* Stats */}
-      <div className="grid gap-4 md:grid-cols-3">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Requests</CardTitle>
-            <Activity className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{totalRequests}</div>
-            <p className="text-xs text-muted-foreground">
-              {totalRequests === 0 ? "No requests captured" : "requests captured"}
-            </p>
-          </CardContent>
-        </Card>
+      {isTcpProtocol ? (
+        /* TCP-specific stats */
+        <div className="grid gap-4 md:grid-cols-4">
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Connections</CardTitle>
+              <Activity className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{totalRequests}</div>
+              <p className="text-xs text-muted-foreground">
+                {activeConnections > 0 ? `${activeConnections} active` : "total connections"}
+              </p>
+            </CardContent>
+          </Card>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Avg. Latency</CardTitle>
-            <Clock className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{avgLatency}ms</div>
-            <p className="text-xs text-muted-foreground">
-              average response time
-            </p>
-          </CardContent>
-        </Card>
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Data In</CardTitle>
+              <ArrowDownToLine className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{formatBytes(totalBytesIn)}</div>
+              <p className="text-xs text-muted-foreground">bytes received</p>
+            </CardContent>
+          </Card>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Errors</CardTitle>
-            <AlertCircle className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className={`text-2xl font-bold ${errorRequests > 0 ? "text-red-500" : ""}`}>
-              {errorRequests}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {errorRequests === 0 ? "no errors" : `${errorRequests} error responses`}
-            </p>
-          </CardContent>
-        </Card>
-      </div>
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Data Out</CardTitle>
+              <ArrowUpFromLine className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{formatBytes(totalBytesOut)}</div>
+              <p className="text-xs text-muted-foreground">bytes sent</p>
+            </CardContent>
+          </Card>
 
-      {/* Request Log */}
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Errors</CardTitle>
+              <AlertCircle className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className={`text-2xl font-bold ${errorCount > 0 ? "text-red-500" : ""}`}>
+                {errorCount}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {errorCount === 0 ? "no errors" : "connection errors"}
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      ) : (
+        /* HTTP-specific stats */
+        <div className="grid gap-4 md:grid-cols-3">
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Total Requests</CardTitle>
+              <Activity className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{totalRequests}</div>
+              <p className="text-xs text-muted-foreground">
+                {totalRequests === 0 ? "No requests captured" : "requests captured"}
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Avg. Latency</CardTitle>
+              <Clock className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{avgLatency}ms</div>
+              <p className="text-xs text-muted-foreground">
+                average response time
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Errors</CardTitle>
+              <AlertCircle className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className={`text-2xl font-bold ${errorCount > 0 ? "text-red-500" : ""}`}>
+                {errorCount}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {errorCount === 0 ? "no errors" : `${errorCount} error responses`}
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Connection/Request Log */}
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <div>
-            <CardTitle>Request Log</CardTitle>
+            <CardTitle>{isTcpProtocol ? "Connection Log" : "Request Log"}</CardTitle>
             <CardDescription>
-              {tunnel.protocol === "http" || tunnel.protocol === "https"
-                ? "Real-time HTTP requests through this tunnel"
-                : "Connection activity for this tunnel"}
+              {isTcpProtocol
+                ? "Real-time TCP connections through this tunnel"
+                : "Real-time HTTP requests through this tunnel"}
             </CardDescription>
           </div>
-          {metrics.length > 0 && (
+          {(isTcpProtocol ? tcpConnections.length > 0 : metrics.length > 0) && (
             <Button variant="outline" size="sm" onClick={handleClearMetrics}>
               <Trash2 className="h-4 w-4 mr-2" />
               Clear
@@ -1005,209 +1135,305 @@ export function TunnelDetail() {
           )}
         </CardHeader>
         <CardContent>
-          {metrics.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border p-8 text-center">
-              <Activity className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
-              <h3 className="text-lg font-medium mb-2">No Requests Yet</h3>
-              <p className="text-sm text-muted-foreground">
-                {isConnected
-                  ? "Requests will appear here in real-time when traffic flows through the tunnel"
-                  : "Start the tunnel and send some requests to see them here"}
-              </p>
-            </div>
+          {isTcpProtocol ? (
+            /* TCP Connections Table */
+            tcpConnections.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-border p-8 text-center">
+                <Activity className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
+                <h3 className="text-lg font-medium mb-2">No Connections Yet</h3>
+                <p className="text-sm text-muted-foreground">
+                  {isConnected
+                    ? "Connections will appear here in real-time when traffic flows through the tunnel"
+                    : "Start the tunnel and make some connections to see them here"}
+                </p>
+              </div>
+            ) : (
+              <>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-[100px]">Time</TableHead>
+                      <TableHead>Remote Address</TableHead>
+                      <TableHead>Local Address</TableHead>
+                      <TableHead className="w-[80px]">State</TableHead>
+                      <TableHead className="w-[100px] text-right">Data In</TableHead>
+                      <TableHead className="w-[100px] text-right">Data Out</TableHead>
+                      <TableHead className="w-[80px] text-right">Duration</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {tcpConnections
+                      .slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE)
+                      .map((conn) => (
+                      <TableRow key={conn.id} className="hover:bg-muted/50">
+                        <TableCell className="font-mono text-xs">
+                          {formatTimestampString(conn.timestamp)}
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">
+                          {conn.remote_addr}
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">
+                          {conn.local_addr}
+                        </TableCell>
+                        <TableCell>
+                          {conn.error ? (
+                            <Badge className="bg-red-500/10 text-red-500">
+                              <AlertCircle className="h-3 w-3 mr-1" />
+                              Error
+                            </Badge>
+                          ) : (
+                            getTcpStateBadge(conn.state)
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right text-sm text-muted-foreground">
+                          {formatBytes(conn.bytes_received)}
+                        </TableCell>
+                        <TableCell className="text-right text-sm text-muted-foreground">
+                          {formatBytes(conn.bytes_sent)}
+                        </TableCell>
+                        <TableCell className="text-right text-sm text-muted-foreground">
+                          {conn.duration_ms != null ? `${conn.duration_ms}ms` : "-"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                {/* Pagination Controls for TCP */}
+                {tcpConnections.length > ITEMS_PER_PAGE && (
+                  <div className="flex items-center justify-between mt-4 pt-4 border-t">
+                    <div className="text-sm text-muted-foreground">
+                      Showing {((currentPage - 1) * ITEMS_PER_PAGE) + 1} - {Math.min(currentPage * ITEMS_PER_PAGE, tcpConnections.length)} of {tcpConnections.length} connections
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                        disabled={currentPage === 1}
+                      >
+                        <ChevronLeft className="h-4 w-4 mr-1" />
+                        Previous
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setCurrentPage(p => Math.min(Math.ceil(tcpConnections.length / ITEMS_PER_PAGE), p + 1))}
+                        disabled={currentPage >= Math.ceil(tcpConnections.length / ITEMS_PER_PAGE)}
+                      >
+                        Next
+                        <ChevronRight className="h-4 w-4 ml-1" />
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )
           ) : (
-            <>
-              {/* Filters */}
-              <div className="flex flex-wrap gap-3 mb-4">
-                <Select
-                  value={methodFilter}
-                  onValueChange={(value) => {
-                    setMethodFilter(value === "all" ? "" : value);
-                    setCurrentPage(1);
-                  }}
-                >
-                  <SelectTrigger className="w-[120px]">
-                    <SelectValue placeholder="Method" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All Methods</SelectItem>
-                    <SelectItem value="GET">GET</SelectItem>
-                    <SelectItem value="POST">POST</SelectItem>
-                    <SelectItem value="PUT">PUT</SelectItem>
-                    <SelectItem value="PATCH">PATCH</SelectItem>
-                    <SelectItem value="DELETE">DELETE</SelectItem>
-                    <SelectItem value="OPTIONS">OPTIONS</SelectItem>
-                    <SelectItem value="HEAD">HEAD</SelectItem>
-                  </SelectContent>
-                </Select>
-
-                <div className="relative flex-1 min-w-[200px] max-w-[300px]">
-                  <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                  <Input
-                    placeholder="Filter by path..."
-                    value={pathFilter}
-                    onChange={(e) => {
-                      setPathFilter(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="pl-8"
-                  />
-                  {pathFilter && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="absolute right-0 top-0 h-full px-2"
-                      onClick={() => {
-                        setPathFilter("");
-                        setCurrentPage(1);
-                      }}
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
-                  )}
-                </div>
-
-                <Select
-                  value={statusFilter}
-                  onValueChange={(value) => {
-                    setStatusFilter(value === "all" ? "" : value);
-                    setCurrentPage(1);
-                  }}
-                >
-                  <SelectTrigger className="w-[130px]">
-                    <SelectValue placeholder="Status" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="all">All Status</SelectItem>
-                    <SelectItem value="2xx">2xx Success</SelectItem>
-                    <SelectItem value="3xx">3xx Redirect</SelectItem>
-                    <SelectItem value="4xx">4xx Client Error</SelectItem>
-                    <SelectItem value="5xx">5xx Server Error</SelectItem>
-                    <SelectItem value="error">Errors</SelectItem>
-                    <SelectItem value="pending">Pending</SelectItem>
-                  </SelectContent>
-                </Select>
-
-                {hasActiveFilter && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      setMethodFilter("");
-                      setPathFilter("");
-                      setStatusFilter("");
+            /* HTTP Requests Table */
+            metrics.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-border p-8 text-center">
+                <Activity className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
+                <h3 className="text-lg font-medium mb-2">No Requests Yet</h3>
+                <p className="text-sm text-muted-foreground">
+                  {isConnected
+                    ? "Requests will appear here in real-time when traffic flows through the tunnel"
+                    : "Start the tunnel and send some requests to see them here"}
+                </p>
+              </div>
+            ) : (
+              <>
+                {/* Filters */}
+                <div className="flex flex-wrap gap-3 mb-4">
+                  <Select
+                    value={methodFilter}
+                    onValueChange={(value) => {
+                      setMethodFilter(value === "all" ? "" : value);
                       setCurrentPage(1);
                     }}
                   >
-                    <X className="h-4 w-4 mr-1" />
-                    Clear Filters
-                  </Button>
-                )}
+                    <SelectTrigger className="w-[120px]">
+                      <SelectValue placeholder="Method" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Methods</SelectItem>
+                      <SelectItem value="GET">GET</SelectItem>
+                      <SelectItem value="POST">POST</SelectItem>
+                      <SelectItem value="PUT">PUT</SelectItem>
+                      <SelectItem value="PATCH">PATCH</SelectItem>
+                      <SelectItem value="DELETE">DELETE</SelectItem>
+                      <SelectItem value="OPTIONS">OPTIONS</SelectItem>
+                      <SelectItem value="HEAD">HEAD</SelectItem>
+                    </SelectContent>
+                  </Select>
 
-                {hasActiveFilter && (
-                  <span className="text-sm text-muted-foreground self-center">
-                    {filteredMetrics.length} of {metrics.length} requests
-                  </span>
-                )}
-              </div>
-
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-[100px]">Time</TableHead>
-                    <TableHead className="w-[80px]">Method</TableHead>
-                    <TableHead>Path</TableHead>
-                    <TableHead className="w-[80px]">Status</TableHead>
-                    <TableHead className="w-[80px] text-right">Latency</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredMetrics
-                    .slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE)
-                    .map((metric) => (
-                    <TableRow
-                      key={metric.id}
-                      className="cursor-pointer hover:bg-muted/50"
-                      onClick={() => openRequestDetail(metric)}
-                    >
-                      <TableCell className="font-mono text-xs">
-                        {formatTimestamp(metric.timestamp)}
-                      </TableCell>
-                      <TableCell>{getMethodBadge(metric.method)}</TableCell>
-                      <TableCell className="font-mono text-sm truncate max-w-xs">
-                        {metric.uri}
-                      </TableCell>
-                      <TableCell>
-                        {metric.error ? (
-                          <Badge className="bg-red-500/10 text-red-500">Error</Badge>
-                        ) : (
-                          getStatusCodeBadge(metric.response_status)
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right text-sm text-muted-foreground">
-                        {metric.duration_ms ? `${metric.duration_ms}ms` : "-"}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-              {/* Pagination Controls */}
-              {filteredMetrics.length > ITEMS_PER_PAGE && (
-                <div className="flex items-center justify-between mt-4 pt-4 border-t">
-                  <div className="text-sm text-muted-foreground">
-                    Showing {((currentPage - 1) * ITEMS_PER_PAGE) + 1} - {Math.min(currentPage * ITEMS_PER_PAGE, filteredMetrics.length)} of {filteredMetrics.length} requests
+                  <div className="relative flex-1 min-w-[200px] max-w-[300px]">
+                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      placeholder="Filter by path..."
+                      value={pathFilter}
+                      onChange={(e) => {
+                        setPathFilter(e.target.value);
+                        setCurrentPage(1);
+                      }}
+                      className="pl-8"
+                    />
+                    {pathFilter && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="absolute right-0 top-0 h-full px-2"
+                        onClick={() => {
+                          setPathFilter("");
+                          setCurrentPage(1);
+                        }}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    )}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                      disabled={currentPage === 1}
-                    >
-                      <ChevronLeft className="h-4 w-4 mr-1" />
-                      Previous
-                    </Button>
-                    <div className="flex items-center gap-1">
-                      {Array.from({ length: Math.min(5, Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE)) }, (_, i) => {
-                        const totalPages = Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE);
-                        let pageNum: number;
 
-                        if (totalPages <= 5) {
-                          pageNum = i + 1;
-                        } else if (currentPage <= 3) {
-                          pageNum = i + 1;
-                        } else if (currentPage >= totalPages - 2) {
-                          pageNum = totalPages - 4 + i;
-                        } else {
-                          pageNum = currentPage - 2 + i;
-                        }
+                  <Select
+                    value={statusFilter}
+                    onValueChange={(value) => {
+                      setStatusFilter(value === "all" ? "" : value);
+                      setCurrentPage(1);
+                    }}
+                  >
+                    <SelectTrigger className="w-[130px]">
+                      <SelectValue placeholder="Status" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">All Status</SelectItem>
+                      <SelectItem value="2xx">2xx Success</SelectItem>
+                      <SelectItem value="3xx">3xx Redirect</SelectItem>
+                      <SelectItem value="4xx">4xx Client Error</SelectItem>
+                      <SelectItem value="5xx">5xx Server Error</SelectItem>
+                      <SelectItem value="error">Errors</SelectItem>
+                      <SelectItem value="pending">Pending</SelectItem>
+                    </SelectContent>
+                  </Select>
 
-                        return (
-                          <Button
-                            key={pageNum}
-                            variant={currentPage === pageNum ? "default" : "outline"}
-                            size="sm"
-                            className="w-8 h-8 p-0"
-                            onClick={() => setCurrentPage(pageNum)}
-                          >
-                            {pageNum}
-                          </Button>
-                        );
-                      })}
-                    </div>
+                  {hasActiveFilter && (
                     <Button
-                      variant="outline"
+                      variant="ghost"
                       size="sm"
-                      onClick={() => setCurrentPage(p => Math.min(Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE), p + 1))}
-                      disabled={currentPage >= Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE)}
+                      onClick={() => {
+                        setMethodFilter("");
+                        setPathFilter("");
+                        setStatusFilter("");
+                        setCurrentPage(1);
+                      }}
                     >
-                      Next
-                      <ChevronRight className="h-4 w-4 ml-1" />
+                      <X className="h-4 w-4 mr-1" />
+                      Clear Filters
                     </Button>
-                  </div>
+                  )}
+
+                  {hasActiveFilter && (
+                    <span className="text-sm text-muted-foreground self-center">
+                      {filteredMetrics.length} of {metrics.length} requests
+                    </span>
+                  )}
                 </div>
-              )}
-            </>
+
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-[100px]">Time</TableHead>
+                      <TableHead className="w-[80px]">Method</TableHead>
+                      <TableHead>Path</TableHead>
+                      <TableHead className="w-[80px]">Status</TableHead>
+                      <TableHead className="w-[80px] text-right">Latency</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredMetrics
+                      .slice((currentPage - 1) * ITEMS_PER_PAGE, currentPage * ITEMS_PER_PAGE)
+                      .map((metric) => (
+                      <TableRow
+                        key={metric.id}
+                        className="cursor-pointer hover:bg-muted/50"
+                        onClick={() => openRequestDetail(metric)}
+                      >
+                        <TableCell className="font-mono text-xs">
+                          {formatTimestamp(metric.timestamp)}
+                        </TableCell>
+                        <TableCell>{getMethodBadge(metric.method)}</TableCell>
+                        <TableCell className="font-mono text-sm truncate max-w-xs">
+                          {metric.uri}
+                        </TableCell>
+                        <TableCell>
+                          {metric.error ? (
+                            <Badge className="bg-red-500/10 text-red-500">Error</Badge>
+                          ) : (
+                            getStatusCodeBadge(metric.response_status)
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right text-sm text-muted-foreground">
+                          {metric.duration_ms != null ? `${metric.duration_ms}ms` : "-"}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                {/* Pagination Controls */}
+                {filteredMetrics.length > ITEMS_PER_PAGE && (
+                  <div className="flex items-center justify-between mt-4 pt-4 border-t">
+                    <div className="text-sm text-muted-foreground">
+                      Showing {((currentPage - 1) * ITEMS_PER_PAGE) + 1} - {Math.min(currentPage * ITEMS_PER_PAGE, filteredMetrics.length)} of {filteredMetrics.length} requests
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                        disabled={currentPage === 1}
+                      >
+                        <ChevronLeft className="h-4 w-4 mr-1" />
+                        Previous
+                      </Button>
+                      <div className="flex items-center gap-1">
+                        {Array.from({ length: Math.min(5, Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE)) }, (_, i) => {
+                          const totalPages = Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE);
+                          let pageNum: number;
+
+                          if (totalPages <= 5) {
+                            pageNum = i + 1;
+                          } else if (currentPage <= 3) {
+                            pageNum = i + 1;
+                          } else if (currentPage >= totalPages - 2) {
+                            pageNum = totalPages - 4 + i;
+                          } else {
+                            pageNum = currentPage - 2 + i;
+                          }
+
+                          return (
+                            <Button
+                              key={pageNum}
+                              variant={currentPage === pageNum ? "default" : "outline"}
+                              size="sm"
+                              className="w-8 h-8 p-0"
+                              onClick={() => setCurrentPage(pageNum)}
+                            >
+                              {pageNum}
+                            </Button>
+                          );
+                        })}
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setCurrentPage(p => Math.min(Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE), p + 1))}
+                        disabled={currentPage >= Math.ceil(filteredMetrics.length / ITEMS_PER_PAGE)}
+                      >
+                        Next
+                        <ChevronRight className="h-4 w-4 ml-1" />
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )
           )}
         </CardContent>
       </Card>

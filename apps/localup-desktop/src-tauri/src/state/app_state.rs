@@ -1,8 +1,8 @@
 //! Global application state
 
 use localup_lib::{
-    ExitNodeConfig, HttpMetric, MetricsEvent, MetricsStore, ProtocolConfig, TunnelClient,
-    TunnelConfig as ClientTunnelConfig,
+    ExitNodeConfig, HttpMetric, MetricsEvent, MetricsStore, ProtocolConfig, TcpMetric,
+    TunnelClient, TunnelConfig as ClientTunnelConfig,
 };
 use sea_orm::{DatabaseConnection, EntityTrait};
 use std::collections::HashMap;
@@ -76,8 +76,46 @@ impl AppState {
         if let Some(store) = metrics.get(tunnel_id) {
             let total = store.count().await;
             let items = store.get_paginated(offset, limit).await;
+            debug!(
+                "get_tunnel_metrics_paginated: tunnel_id={}, total={}, items={}",
+                tunnel_id,
+                total,
+                items.len()
+            );
             (items, total)
         } else {
+            debug!(
+                "get_tunnel_metrics_paginated: no store for tunnel_id={}, available keys: {:?}",
+                tunnel_id,
+                metrics.keys().collect::<Vec<_>>()
+            );
+            (Vec::new(), 0)
+        }
+    }
+
+    /// Get TCP connections for a specific tunnel with pagination
+    pub async fn get_tcp_connections_paginated(
+        &self,
+        tunnel_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> (Vec<TcpMetric>, usize) {
+        let metrics = self.tunnel_metrics.read().await;
+        if let Some(store) = metrics.get(tunnel_id) {
+            let total = store.tcp_connections_count().await;
+            let items = store.get_tcp_connections_paginated(offset, limit).await;
+            debug!(
+                "get_tcp_connections_paginated: tunnel_id={}, total={}, items={}",
+                tunnel_id,
+                total,
+                items.len()
+            );
+            (items, total)
+        } else {
+            debug!(
+                "get_tcp_connections_paginated: no store for tunnel_id={}",
+                tunnel_id
+            );
             (Vec::new(), 0)
         }
     }

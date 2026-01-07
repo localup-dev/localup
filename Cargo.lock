@@ -3326,6 +3326,8 @@ dependencies = [
  "futures",
  "futures-util",
  "hdrhistogram",
+ "http-body-util",
+ "httparse",
  "hyper 1.7.0",
  "hyper-util",
  "localup-auth",
@@ -3432,6 +3434,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

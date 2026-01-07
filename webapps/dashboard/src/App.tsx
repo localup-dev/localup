@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { handleApiMetrics, handleApiStats, handleApiTcpConnections, handleApiReplayById } from './api/generated/sdk.gen';
 import type { HttpMetric, MetricsStats, TcpMetric, ReplayResponse, BodyData } from './api/generated/types.gen';
 
@@ -18,15 +18,7 @@ interface TcpStats {
   total_bytes_received: number;
 }
 
-// SSE Event types from the backend
-type MetricsEvent =
-  | { type: 'request'; metric: HttpMetric }
-  | { type: 'response'; id: string; status: number; headers: [string, string][]; body: unknown; duration_ms: number }
-  | { type: 'error'; id: string; error: string; duration_ms: number }
-  | { type: 'tcp_connection'; metric: TcpMetric }
-  | { type: 'tcp_update'; id: string; bytes_received: number; bytes_sent: number }
-  | { type: 'tcp_closed'; id: string; bytes_received: number; bytes_sent: number; duration_ms: number; error?: string }
-  | { type: 'stats'; stats: MetricsStats };
+// Polling is used instead of SSE for real-time updates
 
 // Filter types
 type StatusFilter = 'all' | '2xx' | '3xx' | '4xx' | '5xx' | 'error';
@@ -45,7 +37,7 @@ function App() {
   const [tunnelInfo, setTunnelInfo] = useState<TunnelEndpoint[]>([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [connected, setConnected] = useState(false);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  // Removed SSE eventSourceRef - using polling instead
 
   // Filter state
   const [methodFilter, setMethodFilter] = useState<MethodFilter>('all');
@@ -101,107 +93,43 @@ function App() {
     fetchInitialData();
   }, []);
 
-  // SSE connection for real-time updates
+  // Polling for real-time updates (fetch last 20 metrics every second)
   useEffect(() => {
-    const connectSSE = () => {
-      const eventSource = new EventSource('/api/metrics/stream');
-      eventSourceRef.current = eventSource;
+    const POLL_INTERVAL = 1000; // 1 second
+    const POLL_LIMIT = 20;
 
-      eventSource.onopen = () => {
-        setConnected(true);
-        console.log('SSE connected');
-      };
+    const pollMetrics = async () => {
+      try {
+        const [metricsRes, statsRes, tcpRes] = await Promise.all([
+          handleApiMetrics({ query: { limit: POLL_LIMIT.toString(), offset: '0' } }),
+          handleApiStats(),
+          handleApiTcpConnections()
+        ]);
 
-      eventSource.onmessage = (event) => {
-        try {
-          const data: MetricsEvent = JSON.parse(event.data);
-
-          switch (data.type) {
-            case 'request':
-              setHttpMetrics(prev => [data.metric, ...prev]);
-              break;
-
-            case 'response':
-              setHttpMetrics(prev =>
-                prev.map(m =>
-                  m.id === data.id
-                    ? {
-                        ...m,
-                        response_status: data.status,
-                        response_headers: data.headers,
-                        response_body: data.body as HttpMetric['response_body'],
-                        duration_ms: data.duration_ms,
-                      }
-                    : m
-                )
-              );
-              break;
-
-            case 'error':
-              setHttpMetrics(prev =>
-                prev.map(m =>
-                  m.id === data.id
-                    ? { ...m, error: data.error, duration_ms: data.duration_ms }
-                    : m
-                )
-              );
-              break;
-
-            case 'tcp_connection':
-              setTcpMetrics(prev => [data.metric, ...prev]);
-              break;
-
-            case 'tcp_update':
-              setTcpMetrics(prev =>
-                prev.map(m =>
-                  m.id === data.id
-                    ? { ...m, bytes_received: data.bytes_received, bytes_sent: data.bytes_sent }
-                    : m
-                )
-              );
-              break;
-
-            case 'tcp_closed':
-              setTcpMetrics(prev =>
-                prev.map(m =>
-                  m.id === data.id
-                    ? {
-                        ...m,
-                        state: data.error ? 'error' : 'closed',
-                        bytes_received: data.bytes_received,
-                        bytes_sent: data.bytes_sent,
-                        duration_ms: data.duration_ms,
-                        error: data.error,
-                        closed_at: Date.now(),
-                      }
-                    : m
-                )
-              );
-              break;
-
-            case 'stats':
-              setStats(data.stats);
-              break;
-          }
-        } catch (error) {
-          console.error('Failed to parse SSE event:', error);
+        if (metricsRes.data) {
+          setHttpMetrics(metricsRes.data);
         }
-      };
-
-      eventSource.onerror = () => {
+        if (statsRes.data) {
+          setStats(statsRes.data);
+        }
+        if (tcpRes.data) {
+          setTcpMetrics(tcpRes.data);
+        }
+        setConnected(true);
+      } catch (error) {
+        console.error('Polling failed:', error);
         setConnected(false);
-        eventSource.close();
-        // Reconnect after 2 seconds
-        setTimeout(connectSSE, 2000);
-      };
+      }
     };
 
-    connectSSE();
+    // Start polling
+    const intervalId = setInterval(pollMetrics, POLL_INTERVAL);
+
+    // Also poll immediately on mount
+    pollMetrics();
 
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-      }
+      clearInterval(intervalId);
     };
   }, []);
 

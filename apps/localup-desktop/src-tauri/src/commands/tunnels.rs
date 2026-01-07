@@ -10,9 +10,8 @@ use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tokio::sync::oneshot;
-use tracing::{info, warn};
+use tracing::info;
 
-use crate::daemon::DaemonClient;
 use crate::db::entities::{tunnel_config, RelayServer, TunnelConfig};
 use crate::state::app_state::run_tunnel;
 use crate::state::tunnel_manager::TunnelStatus;
@@ -102,40 +101,14 @@ pub async fn list_tunnels(state: State<'_, AppState>) -> Result<Vec<TunnelRespon
         .map(|r| (r.id, r.name))
         .collect();
 
-    // Try to get tunnel statuses from daemon (with quick timeout)
-    let daemon_tunnels: std::collections::HashMap<String, crate::daemon::protocol::TunnelInfo> =
-        match tokio::time::timeout(std::time::Duration::from_millis(500), async {
-            if let Ok(mut client) = DaemonClient::connect().await {
-                if let Ok(tunnels) = client.list_tunnels().await {
-                    return tunnels.into_iter().map(|t| (t.id.clone(), t)).collect();
-                }
-            }
-            std::collections::HashMap::new()
-        })
-        .await
-        {
-            Ok(map) => map,
-            Err(_) => std::collections::HashMap::new(),
-        };
-
     let manager = state.tunnel_manager.read().await;
 
     let result = configs
         .into_iter()
         .map(|config| {
-            // First check daemon status, then local manager
-            let daemon_info = daemon_tunnels.get(&config.id);
             let local_running = manager.get(&config.id);
 
-            // Prefer daemon status over local status
-            let (status, public_url, localup_id, error_message) = if let Some(dt) = daemon_info {
-                (
-                    dt.status.clone(),
-                    dt.public_url.clone(),
-                    dt.localup_id.clone(),
-                    dt.error_message.clone(),
-                )
-            } else if let Some(lt) = local_running {
+            let (status, public_url, localup_id, error_message) = if let Some(lt) = local_running {
                 (
                     lt.status.as_str().to_string(),
                     lt.public_url.clone(),
@@ -192,31 +165,10 @@ pub async fn get_tunnel(
         .await
         .map_err(|e| format!("Failed to get relay: {}", e))?;
 
-    // Try to get tunnel status from daemon (with quick timeout)
-    let daemon_info: Option<crate::daemon::protocol::TunnelInfo> =
-        tokio::time::timeout(std::time::Duration::from_millis(500), async {
-            if let Ok(mut client) = DaemonClient::connect().await {
-                if let Ok(info) = client.get_tunnel(&id).await {
-                    return Some(info);
-                }
-            }
-            None
-        })
-        .await
-        .unwrap_or(None);
-
     let manager = state.tunnel_manager.read().await;
     let local_running = manager.get(&config.id);
 
-    // Prefer daemon status over local status
-    let (status, public_url, localup_id, error_message) = if let Some(dt) = daemon_info {
-        (
-            dt.status.clone(),
-            dt.public_url.clone(),
-            dt.localup_id.clone(),
-            dt.error_message.clone(),
-        )
-    } else if let Some(lt) = local_running {
+    let (status, public_url, localup_id, error_message) = if let Some(lt) = local_running {
         (
             lt.status.as_str().to_string(),
             lt.public_url.clone(),
@@ -409,7 +361,7 @@ pub async fn delete_tunnel(state: State<'_, AppState>, id: String) -> Result<(),
     Ok(())
 }
 
-/// Start a tunnel - tries daemon first, falls back to in-process
+/// Start a tunnel (in-process)
 #[tauri::command]
 pub async fn start_tunnel(
     state: State<'_, AppState>,
@@ -441,109 +393,9 @@ pub async fn start_tunnel(
         }
     }
 
-    // Try to start via daemon first (with quick timeout check)
-    let use_daemon = match tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        DaemonClient::connect(),
-    )
-    .await
-    {
-        Ok(Ok(mut client)) => {
-            // Verify daemon is responsive with a quick ping
-            if client.ping().await.is_err() {
-                warn!("Daemon not responsive, using in-process tunnel management");
-                false
-            } else {
-                info!("Starting tunnel {} via daemon", id);
-                match client
-                    .start_tunnel(
-                        &id,
-                        &config.name,
-                        &relay.address,
-                        relay.jwt_token.as_deref().unwrap_or(""),
-                        &config.local_host,
-                        config.local_port as u16,
-                        &config.protocol,
-                        config.subdomain.as_deref(),
-                        config.custom_domain.as_deref(),
-                    )
-                    .await
-                {
-                    Ok(tunnel_info) => {
-                        // Update local state from daemon response
-                        let mut manager = state.tunnel_manager.write().await;
-                        let status = match tunnel_info.status.as_str() {
-                            "connected" => TunnelStatus::Connected,
-                            "connecting" => TunnelStatus::Connecting,
-                            "error" => TunnelStatus::Error,
-                            _ => TunnelStatus::Disconnected,
-                        };
-                        manager.update_status(
-                            &id,
-                            status,
-                            tunnel_info.public_url.clone(),
-                            tunnel_info.localup_id.clone(),
-                            tunnel_info.error_message.clone(),
-                        );
-                        drop(manager);
+    info!("Starting tunnel {} in-process", id);
 
-                        return get_tunnel(state, id)
-                            .await?
-                            .ok_or_else(|| "Tunnel not found".to_string());
-                    }
-                    Err(e) => {
-                        // Check if tunnel is already running in daemon
-                        if e.to_string().contains("already running") {
-                            info!("Tunnel {} already running in daemon, syncing state", id);
-                            // Get current tunnel info from daemon
-                            if let Ok(tunnel_info) = client.get_tunnel(&id).await {
-                                let mut manager = state.tunnel_manager.write().await;
-                                let status = match tunnel_info.status.as_str() {
-                                    "connected" => TunnelStatus::Connected,
-                                    "connecting" => TunnelStatus::Connecting,
-                                    "error" => TunnelStatus::Error,
-                                    _ => TunnelStatus::Disconnected,
-                                };
-                                manager.update_status(
-                                    &id,
-                                    status,
-                                    tunnel_info.public_url.clone(),
-                                    tunnel_info.localup_id.clone(),
-                                    tunnel_info.error_message.clone(),
-                                );
-                                drop(manager);
-
-                                return get_tunnel(state, id)
-                                    .await?
-                                    .ok_or_else(|| "Tunnel not found".to_string());
-                            }
-                        }
-                        warn!("Daemon start failed, falling back to in-process: {}", e);
-                        false
-                    }
-                }
-            }
-        }
-        Ok(Err(e)) => {
-            info!(
-                "Daemon not available ({}), using in-process tunnel management",
-                e
-            );
-            false
-        }
-        Err(_) => {
-            warn!("Daemon connection timed out, using in-process tunnel management");
-            false
-        }
-    };
-
-    if use_daemon {
-        return get_tunnel(state, id)
-            .await?
-            .ok_or_else(|| "Tunnel not found".to_string());
-    }
-
-    // Fall back to in-process tunnel management
+    // Start tunnel in-process
     start_tunnel_in_process(&state, &id, &config, &relay).await?;
 
     get_tunnel(state, id)
@@ -605,28 +457,10 @@ async fn start_tunnel_in_process(
     Ok(())
 }
 
-/// Stop a tunnel - tries both daemon and in-process
+/// Stop a tunnel (in-process)
 #[tauri::command]
 pub async fn stop_tunnel(state: State<'_, AppState>, id: String) -> Result<TunnelResponse, String> {
-    // Try to stop via daemon (with quick timeout)
-    if let Ok(Ok(mut client)) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), DaemonClient::connect()).await
-    {
-        info!("Stopping tunnel {} via daemon", id);
-        match client.stop_tunnel(&id).await {
-            Ok(()) => {
-                info!("Tunnel {} stopped via daemon", id);
-            }
-            Err(e) => {
-                // "Tunnel not found" is fine - might only exist in-process
-                if !e.to_string().contains("not found") {
-                    warn!("Daemon stop failed: {}", e);
-                }
-            }
-        }
-    }
-
-    // Always also try to stop in-process (in case tunnel is running both places)
+    info!("Stopping tunnel {} in-process", id);
     stop_tunnel_internal(&state, &id).await;
 
     get_tunnel(state, id)
@@ -669,7 +503,7 @@ pub struct PaginatedMetricsResponse {
     pub limit: usize,
 }
 
-/// Get real-time metrics for a tunnel with pagination (from daemon or in-memory MetricsStore)
+/// Get real-time metrics for a tunnel with pagination (from in-memory MetricsStore)
 #[tauri::command]
 pub async fn get_tunnel_metrics(
     state: State<'_, AppState>,
@@ -680,30 +514,10 @@ pub async fn get_tunnel_metrics(
     let offset = offset.unwrap_or(0);
     let limit = limit.unwrap_or(50).min(100); // Default 50, max 100
 
-    // Try to get metrics from daemon first (with timeout)
-    let daemon_result = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-        if let Ok(mut client) = DaemonClient::connect().await {
-            if let Ok((items, total)) = client
-                .get_tunnel_metrics(&tunnel_id, Some(offset), Some(limit))
-                .await
-            {
-                return Some((items, total));
-            }
-        }
-        None
-    })
-    .await;
-
-    // Use daemon metrics if available, otherwise fall back to in-process
-    let (items, total) = match daemon_result {
-        Ok(Some((items, total))) if !items.is_empty() || total > 0 => (items, total),
-        _ => {
-            // Fall back to in-process metrics store
-            state
-                .get_tunnel_metrics_paginated(&tunnel_id, offset, limit)
-                .await
-        }
-    };
+    // Get metrics from in-process metrics store
+    let (items, total) = state
+        .get_tunnel_metrics_paginated(&tunnel_id, offset, limit)
+        .await;
 
     Ok(PaginatedMetricsResponse {
         items,
@@ -719,15 +533,7 @@ pub async fn clear_tunnel_metrics(
     state: State<'_, AppState>,
     tunnel_id: String,
 ) -> Result<(), String> {
-    // Try to clear metrics in daemon (with timeout)
-    let _ = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-        if let Ok(mut client) = DaemonClient::connect().await {
-            let _ = client.clear_tunnel_metrics(&tunnel_id).await;
-        }
-    })
-    .await;
-
-    // Also clear in-process metrics
+    // Clear in-process metrics
     state.clear_tunnel_metrics(&tunnel_id).await;
     Ok(())
 }
@@ -976,87 +782,97 @@ pub async fn get_captured_requests(
         .collect())
 }
 
-/// Subscribe to real-time metrics for a tunnel via daemon
-/// This starts a background task that emits `tunnel-metrics` events
-/// When the subscription ends, it emits a `tunnel-metrics-subscription-ended` event
+/// Subscribe to real-time metrics for a tunnel
+/// Note: In-process tunnels already emit `tunnel-metrics` events directly,
+/// so this is now a no-op for compatibility with frontend code.
 #[tauri::command]
 pub async fn subscribe_daemon_metrics(
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
     tunnel_id: String,
 ) -> Result<(), String> {
-    use localup_lib::MetricsEvent;
-    use tauri::Emitter;
-
-    info!("Subscribing to daemon metrics for tunnel: {}", tunnel_id);
-
-    // Connect to daemon
-    let client = DaemonClient::connect()
-        .await
-        .map_err(|e| format!("Failed to connect to daemon: {}", e))?;
-
-    // Subscribe to metrics
-    let mut subscription = client
-        .subscribe_metrics(&tunnel_id)
-        .await
-        .map_err(|e| format!("Failed to subscribe to metrics: {}", e))?;
-
     info!(
-        "Subscription started for tunnel: {}",
-        subscription.tunnel_id()
+        "Metrics subscription requested for tunnel: {} (in-process tunnels emit events directly)",
+        tunnel_id
     );
+    // In-process tunnels already emit tunnel-metrics events via AppState
+    // No additional subscription needed
+    Ok(())
+}
 
-    // Spawn a background task to receive and emit events
-    let tunnel_id_clone = tunnel_id.clone();
-    tokio::spawn(async move {
-        info!(
-            "[{}] Starting metrics event loop from daemon",
-            tunnel_id_clone
-        );
-        while let Some(event) = subscription.recv().await {
-            // Emit the event to the frontend
-            match &event {
-                MetricsEvent::Request { metric } => {
-                    info!(
-                        "[{}] Daemon -> Frontend: {} {} (pending)",
-                        tunnel_id_clone, metric.method, metric.uri
-                    );
-                }
-                MetricsEvent::Response { id, status, .. } => {
-                    info!(
-                        "[{}] Daemon -> Frontend: {} -> {}",
-                        tunnel_id_clone, id, status
-                    );
-                }
-                MetricsEvent::Error { id, error, .. } => {
-                    info!(
-                        "[{}] Daemon -> Frontend: {} (error: {})",
-                        tunnel_id_clone, id, error
-                    );
-                }
-                _ => {
-                    // Other events (TCP connection, etc.)
-                    info!("[{}] Daemon -> Frontend: other event", tunnel_id_clone);
-                }
-            }
+/// TCP connection response for frontend
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TcpConnectionResponse {
+    pub id: String,
+    pub stream_id: String,
+    pub timestamp: String,
+    pub remote_addr: String,
+    pub local_addr: String,
+    pub state: String,
+    pub bytes_received: u64,
+    pub bytes_sent: u64,
+    pub duration_ms: Option<u64>,
+    pub closed_at: Option<String>,
+    pub error: Option<String>,
+}
 
-            let payload = serde_json::json!({
-                "tunnel_id": tunnel_id_clone,
-                "event": event,
+/// Paginated TCP connections response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginatedTcpConnectionsResponse {
+    pub items: Vec<TcpConnectionResponse>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+/// Get TCP connections for a tunnel
+#[tauri::command]
+pub async fn get_tcp_connections(
+    state: State<'_, AppState>,
+    tunnel_id: String,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> Result<PaginatedTcpConnectionsResponse, String> {
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(50).min(100);
+
+    // Get TCP connections from in-process metrics store
+    let (items, total) = state
+        .get_tcp_connections_paginated(&tunnel_id, offset, limit)
+        .await;
+
+    // Convert TcpMetric to TcpConnectionResponse
+    let responses: Vec<TcpConnectionResponse> = items
+        .into_iter()
+        .map(|m| {
+            // Convert millisecond timestamps to ISO 8601 strings
+            let timestamp_dt =
+                chrono::DateTime::from_timestamp_millis(m.timestamp as i64).unwrap_or_default();
+            let closed_at_str = m.closed_at.map(|t| {
+                chrono::DateTime::from_timestamp_millis(t as i64)
+                    .unwrap_or_default()
+                    .to_rfc3339()
             });
 
-            if let Err(e) = app_handle.emit("tunnel-metrics", payload) {
-                warn!("[{}] Failed to emit metrics event: {}", tunnel_id_clone, e);
-                break;
+            TcpConnectionResponse {
+                id: m.id,
+                stream_id: m.stream_id,
+                timestamp: timestamp_dt.to_rfc3339(),
+                remote_addr: m.remote_addr,
+                local_addr: m.local_addr,
+                state: format!("{:?}", m.state),
+                bytes_received: m.bytes_received,
+                bytes_sent: m.bytes_sent,
+                duration_ms: m.duration_ms,
+                closed_at: closed_at_str,
+                error: m.error,
             }
-        }
-        info!("[{}] Metrics event loop ended", tunnel_id_clone);
+        })
+        .collect();
 
-        // Notify frontend that subscription ended so it can retry
-        let end_payload = serde_json::json!({
-            "tunnel_id": tunnel_id_clone,
-        });
-        let _ = app_handle.emit("tunnel-metrics-subscription-ended", end_payload);
-    });
-
-    Ok(())
+    Ok(PaginatedTcpConnectionsResponse {
+        items: responses,
+        total,
+        offset,
+        limit,
+    })
 }

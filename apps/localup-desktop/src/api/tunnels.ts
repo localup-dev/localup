@@ -266,3 +266,45 @@ export async function subscribeToSubscriptionEnded(
     callback(event.payload);
   });
 }
+
+// ============================================================================
+// TCP Connection Types and Functions
+// ============================================================================
+
+/** TCP connection info */
+export interface TcpConnection {
+  id: string;
+  stream_id: string;
+  timestamp: string;
+  remote_addr: string;
+  local_addr: string;
+  state: string;
+  bytes_received: number;
+  bytes_sent: number;
+  duration_ms: number | null;
+  closed_at: string | null;
+  error: string | null;
+}
+
+/** Paginated TCP connections response */
+export interface PaginatedTcpConnectionsResponse {
+  items: TcpConnection[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+/**
+ * Get TCP connections for a tunnel with pagination
+ */
+export async function getTcpConnections(
+  tunnelId: string,
+  offset?: number,
+  limit?: number
+): Promise<PaginatedTcpConnectionsResponse> {
+  return invoke<PaginatedTcpConnectionsResponse>("get_tcp_connections", {
+    tunnelId,
+    offset,
+    limit,
+  });
+}

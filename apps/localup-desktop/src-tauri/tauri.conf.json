@@ -5,7 +5,7 @@
   "identifier": "dev.localup.desktop",
   "build": {
     "beforeDevCommand": "bun run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:1422",
     "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
   },
@@ -41,7 +41,22 @@
     "shortDescription": "Tunnel management for developers",
     "longDescription": "LocalUp Desktop allows you to expose local servers to the internet through geographically distributed relay servers.",
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "dmg": {
+        "background": "dmg-background/background.png",
+        "windowSize": {
+          "width": 540,
+          "height": 380
+        },
+        "appPosition": {
+          "x": 390,
+          "y": 185
+        },
+        "applicationFolderPosition": {
+          "x": 150,
+          "y": 185
+        }
+      }
     }
   },
   "plugins": {}

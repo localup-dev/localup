@@ -2,7 +2,7 @@
 //!
 //! Messages are JSON-encoded with a length prefix (4 bytes, big-endian).
 
-use localup_lib::{HttpMetric, MetricsEvent};
+use localup_lib::{HttpMetric, MetricsEvent, TcpMetric};
 use serde::{Deserialize, Serialize};
 
 /// Request from client to daemon
@@ -60,6 +60,13 @@ pub enum DaemonRequest {
     /// Clear metrics for a tunnel
     ClearTunnelMetrics { id: String },
 
+    /// Get TCP connections for a tunnel
+    GetTcpConnections {
+        id: String,
+        offset: Option<usize>,
+        limit: Option<usize>,
+    },
+
     /// Subscribe to metrics events for a tunnel (streaming)
     SubscribeMetrics { id: String },
 
@@ -96,6 +103,14 @@ pub enum DaemonResponse {
     /// Metrics response with pagination
     Metrics {
         items: Vec<HttpMetric>,
+        total: usize,
+        offset: usize,
+        limit: usize,
+    },
+
+    /// TCP connections response with pagination
+    TcpConnections {
+        items: Vec<TcpMetric>,
         total: usize,
         offset: usize,
         limit: usize,

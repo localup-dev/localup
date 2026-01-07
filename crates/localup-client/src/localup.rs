@@ -1,6 +1,7 @@
 //! Tunnel protocol implementation for client
 
 use crate::config::{ProtocolConfig, TunnelConfig};
+use crate::http_proxy::HttpProxy;
 use crate::metrics::MetricsStore;
 use crate::relay_discovery::RelayDiscovery;
 use crate::transport_discovery::TransportDiscoverer;
@@ -28,7 +29,11 @@ struct HttpRequestData {
 /// Response capture for accumulating response data in transparent streaming mode
 /// Always captures headers and status code. Only captures body for text-based content.
 /// Uses streaming decompression to avoid memory spikes.
+/// NOTE: This is kept for potential future use but currently replaced by HttpProxy
+#[allow(dead_code)]
 struct ResponseCapture {
+    /// HTTP response parser using httparse for proper boundary detection
+    parser: crate::http_parser::HttpResponseParser,
     /// Status code (captured from first chunk)
     status: u16,
     /// Response headers (captured from first chunk)
@@ -55,13 +60,27 @@ struct ResponseCapture {
     in_chunk_data: bool,
     /// Remaining bytes in current chunk
     chunk_remaining: usize,
+    /// Content-Length header value (if present)
+    content_length: Option<usize>,
+    /// Total body bytes received so far
+    body_bytes_received: usize,
+    /// Whether chunked transfer is complete (saw 0-length chunk)
+    /// Note: Now tracked by HttpResponseParser, kept for decode_chunked internal state
+    #[allow(dead_code)]
+    chunked_complete: bool,
+    /// Headers ended exactly at chunk boundary (no body in first chunk)
+    /// Note: Now tracked by HttpResponseParser for completion detection
+    #[allow(dead_code)]
+    headers_only_in_first_chunk: bool,
 }
 
+#[allow(dead_code)]
 impl ResponseCapture {
     const DEFAULT_MAX_BODY_SIZE: usize = 512 * 1024; // 512KB for text content
 
     fn new() -> Self {
         Self {
+            parser: crate::http_parser::HttpResponseParser::new(),
             status: 0,
             headers: Vec::new(),
             body_data: Vec::new(),
@@ -75,7 +94,47 @@ impl ResponseCapture {
             chunk_buffer: Vec::new(),
             in_chunk_data: false,
             chunk_remaining: 0,
+            content_length: None,
+            body_bytes_received: 0,
+            chunked_complete: false,
+            headers_only_in_first_chunk: false,
         }
+    }
+
+    /// Check if the response is complete (all body bytes received)
+    /// Uses the HttpResponseParser for proper boundary detection
+    fn is_response_complete(&self) -> bool {
+        // Delegate to the proper HTTP parser which handles:
+        // - Content-Length based completion
+        // - Chunked transfer encoding completion
+        // - No-body status codes (1xx, 204, 304)
+        // - Headers-only responses (no Content-Length, no body data)
+        let complete = self.parser.is_complete();
+
+        // For streaming content types, override the parser's decision
+        // and wait for connection close
+        if complete && self.is_streaming_content_type() {
+            debug!(
+                "Streaming response (status={}) - not complete until connection closes",
+                self.status
+            );
+            return false;
+        }
+
+        debug!(
+            "Response complete check: parser_complete={}, status={}, body_received={}",
+            complete, self.status, self.body_bytes_received
+        );
+        complete
+    }
+
+    /// Check if this is a streaming content type (SSE, etc.)
+    fn is_streaming_content_type(&self) -> bool {
+        self.headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("content-type")
+                && (value.contains("text/event-stream")
+                    || value.contains("application/octet-stream"))
+        })
     }
 
     /// Check if using chunked transfer encoding
@@ -143,7 +202,8 @@ impl ResponseCapture {
                     pos += line_end + 2; // Skip past \r\n
 
                     if chunk_size == 0 {
-                        // Final chunk - we're done
+                        // Final chunk - mark as complete and we're done
+                        self.chunked_complete = true;
                         break;
                     }
 
@@ -204,62 +264,76 @@ impl ResponseCapture {
     }
 
     fn append(&mut self, chunk: &[u8]) {
+        // Feed data to the proper HTTP parser
+        self.parser.feed(chunk);
+
+        // Extract parsed headers when available (first time only)
         if !self.first_chunk_parsed {
-            self.first_chunk_parsed = true;
+            if let Some(parsed) = self.parser.parsed() {
+                self.first_chunk_parsed = true;
+                self.status = parsed.status;
+                self.content_length = parsed.content_length;
 
-            // Parse the first chunk for status and headers
-            let text = String::from_utf8_lossy(chunk);
-            let mut lines = text.lines();
-
-            // Parse status line: HTTP/1.x STATUS REASON
-            if let Some(status_line) = lines.next() {
-                let parts: Vec<&str> = status_line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    self.status = parts[1].parse().unwrap_or(0);
-                }
-            }
-
-            // Parse headers
-            for line in lines {
-                if line.is_empty() {
-                    break;
-                }
-                if let Some((name, value)) = line.split_once(':') {
-                    let header_name = name.trim().to_string();
-                    let header_value = value.trim().to_string();
-
+                // Copy headers and track important ones
+                for (name, value) in &parsed.headers {
                     // Check Content-Type to decide if we should capture body
-                    if header_name.eq_ignore_ascii_case("content-type") {
-                        self.should_capture_body = Self::is_text_content_type(&header_value);
+                    if name.eq_ignore_ascii_case("content-type") {
+                        self.should_capture_body = Self::is_text_content_type(value);
                     }
 
                     // Track Content-Encoding for decompression
-                    if header_name.eq_ignore_ascii_case("content-encoding") {
-                        self.content_encoding = Some(header_value.to_lowercase());
+                    if name.eq_ignore_ascii_case("content-encoding") {
+                        self.content_encoding = Some(value.to_lowercase());
                     }
 
                     // Track Transfer-Encoding for chunked decoding
-                    if header_name.eq_ignore_ascii_case("transfer-encoding") {
-                        self.transfer_encoding = Some(header_value.to_lowercase());
+                    if name.eq_ignore_ascii_case("transfer-encoding") {
+                        self.transfer_encoding = Some(value.to_lowercase());
                     }
 
-                    self.headers.push((header_name, header_value));
+                    self.headers.push((name.clone(), value.clone()));
                 }
-            }
 
-            // If we should capture body, extract it from this chunk
-            if self.should_capture_body {
-                if let Some(header_end) = chunk.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let body_start = header_end + 4;
-                    if body_start < chunk.len() {
-                        let body_part = &chunk[body_start..];
-                        self.process_body_data(body_part);
+                debug!(
+                    "Parsed response (httparse): status={}, content_length={:?}, chunked={}, no_body={}, headers_count={}",
+                    parsed.status, parsed.content_length, parsed.is_chunked, parsed.no_body, parsed.headers.len()
+                );
+
+                // Track body bytes from first chunk
+                self.body_bytes_received = self.parser.body_received();
+
+                // Check for headers-only response (no body in first chunk)
+                if parsed.no_body
+                    || (self.body_bytes_received == 0
+                        && parsed.content_length.is_none()
+                        && !parsed.is_chunked)
+                {
+                    self.headers_only_in_first_chunk = true;
+                    debug!(
+                        "Headers-only response detected (proper parsing), status={}",
+                        self.status
+                    );
+                }
+
+                // Process body data for capture if needed
+                if self.should_capture_body {
+                    // Clone body data to avoid borrow conflict
+                    let body_data = self.parser.body_data().map(|d| d.to_vec());
+                    if let Some(body_data) = body_data {
+                        if !body_data.is_empty() {
+                            self.process_body_data(&body_data);
+                        }
                     }
                 }
             }
-        } else if self.should_capture_body && self.body_data.len() < self.max_body_size {
-            // Continue capturing body chunks
-            self.process_body_data(chunk);
+        } else {
+            // Track all body bytes received (even if not capturing)
+            self.body_bytes_received = self.parser.body_received();
+
+            if self.should_capture_body && self.body_data.len() < self.max_body_size {
+                // Continue capturing body chunks
+                self.process_body_data(chunk);
+            }
         }
     }
 
@@ -675,6 +749,10 @@ impl TunnelConnector {
                     info!("🌍 Public URL: {}", endpoint.public_url);
                 }
 
+                // Limit concurrent connections to local server (prevents overwhelming dev servers)
+                // 5 parallel connections balances performance vs overwhelming dev servers
+                let connection_semaphore = Arc::new(tokio::sync::Semaphore::new(5));
+
                 Ok(TunnelConnection {
                     _connection: connection,
                     control_stream: Arc::new(tokio::sync::Mutex::new(control_stream)),
@@ -683,6 +761,7 @@ impl TunnelConnector {
                     endpoints,
                     config: self.config,
                     metrics: MetricsStore::default(),
+                    connection_semaphore,
                 })
             }
             Ok(Some(TunnelMessage::Disconnect { reason })) => {
@@ -831,6 +910,9 @@ pub struct TunnelConnection {
     endpoints: Vec<Endpoint>,
     config: TunnelConfig,
     metrics: MetricsStore,
+    /// Semaphore to limit concurrent connections to local server
+    /// This prevents overwhelming dev servers like Next.js with too many parallel connections
+    connection_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl TunnelConnection {
@@ -960,6 +1042,9 @@ impl TunnelConnection {
             debug!("Control stream task exiting");
         });
 
+        // Clone semaphore for use in handlers
+        let connection_semaphore = self.connection_semaphore.clone();
+
         // Main loop: accept streams from exit node
         loop {
             tokio::select! {
@@ -971,6 +1056,7 @@ impl TunnelConnection {
 
                     let config_clone = config.clone();
                     let metrics_clone = metrics.clone();
+                    let semaphore_clone = connection_semaphore.clone();
 
                     // Spawn handler for this stream
                     tokio::spawn(async move {
@@ -1020,6 +1106,7 @@ impl TunnelConnection {
                                     &metrics_clone,
                                     stream_id,
                                     initial_data,
+                                    semaphore_clone,
                                 )
                                 .await;
                             }
@@ -1034,11 +1121,14 @@ impl TunnelConnection {
                                     remote_addr,
                                     remote_port
                                 );
+                                // Format remote address with port
+                                let full_remote_addr = format!("{}:{}", remote_addr, remote_port);
                                 Self::handle_tcp_stream(
                                     stream,
                                     &config_clone,
                                     &metrics_clone,
                                     stream_id,
+                                    full_remote_addr,
                                 )
                                 .await;
                             }
@@ -1134,18 +1224,16 @@ impl TunnelConnection {
     }
 
     /// Handle a TCP connection on a dedicated QUIC stream
-    /// Handle transparent HTTP stream (for WebSocket, HTTP/2, SSE, etc.)
+    /// Handle transparent HTTP stream using HTTP proxy for clean metrics
+    /// Falls back to raw streaming for WebSocket upgrades
     async fn handle_http_transparent_stream(
         stream: StreamWrapper,
         config: &TunnelConfig,
         metrics: &MetricsStore,
         stream_id: u32,
         initial_data: Vec<u8>,
+        _connection_semaphore: Arc<tokio::sync::Semaphore>,
     ) {
-        use std::time::Instant;
-
-        let start_time = Instant::now();
-
         // Extract the inner QUIC stream
         let mut stream = match stream {
             StreamWrapper::Quic(s) => s,
@@ -1154,21 +1242,6 @@ impl TunnelConnection {
                 return;
             }
         };
-
-        // Parse HTTP request from initial_data for metrics (including body)
-        let req = Self::parse_http_request(&initial_data);
-        let short_stream_id = generate_short_id(stream_id);
-
-        // Record request in metrics with body if present
-        let metric_id = metrics
-            .record_request(
-                short_stream_id,
-                req.method.clone(),
-                req.uri.clone(),
-                req.headers.clone(),
-                req.body,
-            )
-            .await;
 
         // Get local HTTP/HTTPS port from protocols
         let local_port = config.protocols.iter().find_map(|p| match p {
@@ -1181,14 +1254,6 @@ impl TunnelConnection {
             Some(port) => port,
             None => {
                 error!("No HTTP/HTTPS protocol configured for transparent streaming");
-                let duration_ms = start_time.elapsed().as_millis() as u64;
-                metrics
-                    .record_error(
-                        &metric_id,
-                        "No HTTP protocol configured".to_string(),
-                        duration_ms,
-                    )
-                    .await;
                 let _ = stream
                     .send_message(&TunnelMessage::HttpStreamClose { stream_id })
                     .await;
@@ -1196,184 +1261,236 @@ impl TunnelConnection {
             }
         };
 
-        // Connect to local HTTP service
         let local_addr = format!("{}:{}", config.local_host, local_port);
-        let mut local_socket = match TcpStream::connect(&local_addr).await {
-            Ok(sock) => sock,
-            Err(e) => {
-                error!(
-                    "Failed to connect to local HTTP service at {}: {}",
-                    local_addr, e
-                );
-                let duration_ms = start_time.elapsed().as_millis() as u64;
-                metrics
-                    .record_error(&metric_id, format!("Connection failed: {}", e), duration_ms)
-                    .await;
-                let _ = stream
-                    .send_message(&TunnelMessage::HttpStreamClose { stream_id })
-                    .await;
-                return;
-            }
-        };
+        let base_stream_id = generate_short_id(stream_id);
 
-        debug!(
-            "Connected to local HTTP service at {} for transparent stream {}",
-            local_addr, stream_id
-        );
+        // Check if this is a WebSocket upgrade request
+        let is_websocket = Self::is_websocket_upgrade(&initial_data);
 
-        // Write initial HTTP request data to local server
-        if let Err(e) = local_socket.write_all(&initial_data).await {
-            error!(
-                "Failed to write initial data to local server (stream {}): {}",
-                stream_id, e
-            );
-            let duration_ms = start_time.elapsed().as_millis() as u64;
-            metrics
-                .record_error(&metric_id, format!("Write error: {}", e), duration_ms)
-                .await;
-            let _ = stream
-                .send_message(&TunnelMessage::HttpStreamClose { stream_id })
-                .await;
+        if is_websocket {
+            // Fall back to raw streaming for WebSocket
+            info!("🔌 WebSocket upgrade detected, using raw streaming");
+            Self::handle_raw_http_stream(stream, &local_addr, stream_id, initial_data).await;
             return;
         }
 
-        debug!(
-            "Wrote {} bytes initial data to local server (stream {})",
-            initial_data.len(),
-            stream_id
-        );
+        // Create HTTP proxy with connection pooling
+        let proxy = HttpProxy::new(local_addr.clone(), metrics.clone());
 
-        // Split streams for bidirectional communication
+        // Process initial request through proxy
+        let result = proxy.forward_request(&base_stream_id, &initial_data).await;
+
+        match result {
+            Ok(proxy_result) => {
+                // Check if response is a WebSocket upgrade (101 Switching Protocols)
+                if proxy_result.status == 101 {
+                    // This shouldn't happen since we checked above, but handle gracefully
+                    warn!("Unexpected 101 response, falling back to raw streaming");
+                    // Can't fall back easily here since we already consumed the request
+                    // Just send the response and close
+                }
+
+                // Send response back through QUIC
+                let data_msg = TunnelMessage::HttpStreamData {
+                    stream_id,
+                    data: proxy_result.raw_response,
+                };
+                if let Err(e) = stream.send_message(&data_msg).await {
+                    error!("Failed to send response to tunnel: {}", e);
+                    return;
+                }
+            }
+            Err(e) => {
+                error!("Proxy error for initial request: {}", e);
+                // Record error in metrics
+                let error_metric_id = metrics
+                    .record_request(
+                        base_stream_id.clone(),
+                        "UNKNOWN".to_string(),
+                        "/".to_string(),
+                        vec![],
+                        None,
+                    )
+                    .await;
+                metrics
+                    .record_error(&error_metric_id, e.to_string(), 0)
+                    .await;
+
+                let _ = stream
+                    .send_message(&TunnelMessage::HttpStreamClose { stream_id })
+                    .await;
+                return;
+            }
+        }
+
+        // Request counter for keep-alive requests
+        let mut request_num: u32 = 1;
+
+        // Handle keep-alive: read more requests from QUIC stream
+        loop {
+            match stream.recv_message().await {
+                Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
+                    // Check if this is a new HTTP request
+                    if Self::looks_like_http_request(&data) {
+                        request_num += 1;
+                        let req_stream_id = format!("{}-{}", base_stream_id, request_num);
+
+                        // Check for WebSocket upgrade in subsequent requests
+                        if Self::is_websocket_upgrade(&data) {
+                            info!("🔌 WebSocket upgrade in keep-alive, switching to raw streaming");
+                            // For WebSocket upgrade in keep-alive, we need raw bidirectional streaming
+                            // Send this request through raw and continue
+                            Self::handle_raw_http_stream(stream, &local_addr, stream_id, data)
+                                .await;
+                            return;
+                        }
+
+                        // Forward through proxy
+                        match proxy.forward_request(&req_stream_id, &data).await {
+                            Ok(proxy_result) => {
+                                let data_msg = TunnelMessage::HttpStreamData {
+                                    stream_id,
+                                    data: proxy_result.raw_response,
+                                };
+                                if let Err(e) = stream.send_message(&data_msg).await {
+                                    error!("Failed to send response to tunnel: {}", e);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                error!("Proxy error for keep-alive request: {}", e);
+                                // Continue trying to handle more requests
+                            }
+                        }
+                    } else {
+                        // Non-HTTP data (shouldn't happen in normal HTTP flow)
+                        debug!("Received non-HTTP data on keep-alive stream, ignoring");
+                    }
+                }
+                Ok(Some(TunnelMessage::HttpStreamClose { .. })) => {
+                    debug!("Tunnel closed HTTP stream {}", stream_id);
+                    break;
+                }
+                Ok(None) => {
+                    debug!("QUIC stream ended (stream {})", stream_id);
+                    break;
+                }
+                Err(e) => {
+                    error!("Error reading from tunnel (stream {}): {}", stream_id, e);
+                    break;
+                }
+                _ => {
+                    warn!(
+                        "Unexpected message type on HTTP transparent stream {}",
+                        stream_id
+                    );
+                }
+            }
+        }
+
+        // Send close message
+        let _ = stream
+            .send_message(&TunnelMessage::HttpStreamClose { stream_id })
+            .await;
+
+        info!("🔌 HTTP proxy stream {} ended", stream_id);
+    }
+
+    /// Check if HTTP request is a WebSocket upgrade
+    fn is_websocket_upgrade(data: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(data).to_lowercase();
+        text.contains("upgrade: websocket") || text.contains("connection: upgrade")
+    }
+
+    /// Handle raw HTTP stream for WebSocket/SSE (bidirectional streaming)
+    async fn handle_raw_http_stream(
+        stream: localup_transport_quic::QuicStream,
+        local_addr: &str,
+        stream_id: u32,
+        initial_data: Vec<u8>,
+    ) {
+        // Connect to local server
+        let local_socket = match TcpStream::connect(local_addr).await {
+            Ok(sock) => sock,
+            Err(e) => {
+                error!(
+                    "Failed to connect to {} for raw streaming: {}",
+                    local_addr, e
+                );
+                return;
+            }
+        };
+
         let (mut local_read, mut local_write) = local_socket.into_split();
         let (mut quic_send, mut quic_recv) = stream.split();
 
-        // Shared state for capturing response
-        let response_data = Arc::new(tokio::sync::Mutex::new(ResponseCapture::new()));
-        let response_data_clone = response_data.clone();
-        let metrics_clone = metrics.clone();
-        let metric_id_clone = metric_id.clone();
+        // Write initial data
+        if let Err(e) = local_write.write_all(&initial_data).await {
+            error!("Failed to write initial data: {}", e);
+            return;
+        }
 
-        // Task: Local → Tunnel (read from local server, send to tunnel)
-        let local_to_tunnel = tokio::spawn(async move {
+        // Bidirectional streaming
+        let local_to_quic = tokio::spawn(async move {
             let mut buffer = vec![0u8; 16384];
             loop {
                 match local_read.read(&mut buffer).await {
-                    Ok(0) => {
-                        debug!("Local HTTP server closed connection (stream {})", stream_id);
-
-                        // Finalize response capture when connection closes
-                        let mut capture = response_data_clone.lock().await;
-                        if !capture.finalized {
-                            capture.finalized = true;
-                            let (status, headers, body) = capture.finalize();
-                            let duration_ms = start_time.elapsed().as_millis() as u64;
-                            metrics_clone
-                                .record_response(
-                                    &metric_id_clone,
-                                    status,
-                                    headers,
-                                    body,
-                                    duration_ms,
-                                )
-                                .await;
-                        }
-
-                        let _ = quic_send
-                            .send_message(&TunnelMessage::HttpStreamClose { stream_id })
-                            .await;
-                        break;
-                    }
+                    Ok(0) => break,
                     Ok(n) => {
-                        // Accumulate response data for metrics capture
-                        {
-                            let mut capture = response_data_clone.lock().await;
-                            capture.append(&buffer[..n]);
-                        }
-
-                        debug!(
-                            "Read {} bytes from local HTTP server (stream {})",
-                            n, stream_id
-                        );
-                        let data_msg = TunnelMessage::HttpStreamData {
+                        let msg = TunnelMessage::HttpStreamData {
                             stream_id,
                             data: buffer[..n].to_vec(),
                         };
-                        if let Err(e) = quic_send.send_message(&data_msg).await {
-                            error!("Failed to send HttpStreamData to tunnel: {}", e);
+                        if quic_send.send_message(&msg).await.is_err() {
                             break;
                         }
                     }
-                    Err(e) => {
-                        error!(
-                            "Error reading from local HTTP server (stream {}): {}",
-                            stream_id, e
-                        );
-                        break;
-                    }
+                    Err(_) => break,
                 }
             }
+            let _ = quic_send
+                .send_message(&TunnelMessage::HttpStreamClose { stream_id })
+                .await;
         });
 
-        // Task: Tunnel → Local (read from tunnel, send to local server)
-        let localup_to_local = tokio::spawn(async move {
+        let quic_to_local = tokio::spawn(async move {
             loop {
                 match quic_recv.recv_message().await {
                     Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
-                        debug!(
-                            "Received {} bytes from tunnel (stream {})",
-                            data.len(),
-                            stream_id
-                        );
-                        if let Err(e) = local_write.write_all(&data).await {
-                            error!(
-                                "Failed to write to local HTTP server (stream {}): {}",
-                                stream_id, e
-                            );
+                        if local_write.write_all(&data).await.is_err() {
                             break;
                         }
                     }
-                    Ok(Some(TunnelMessage::HttpStreamClose { .. })) => {
-                        debug!("Tunnel closed HTTP stream {}", stream_id);
-                        break;
-                    }
-                    Ok(None) => {
-                        debug!("QUIC stream ended (stream {})", stream_id);
-                        break;
-                    }
-                    Err(e) => {
-                        error!("Error reading from tunnel (stream {}): {}", stream_id, e);
-                        break;
-                    }
-                    _ => {
-                        warn!(
-                            "Unexpected message type on HTTP transparent stream {}",
-                            stream_id
-                        );
-                    }
+                    Ok(Some(TunnelMessage::HttpStreamClose { .. })) | Ok(None) | Err(_) => break,
+                    _ => {}
                 }
             }
         });
 
-        // Wait for both tasks to complete
-        let _ = tokio::join!(local_to_tunnel, localup_to_local);
+        let _ = tokio::join!(local_to_quic, quic_to_local);
+        info!("🔌 Raw HTTP stream {} ended", stream_id);
+    }
 
-        // Record error if no response was captured (connection closed without response)
-        let capture = response_data.lock().await;
-        if !capture.finalized {
-            let duration_ms = start_time.elapsed().as_millis() as u64;
-            metrics
-                .record_error(
-                    &metric_id,
-                    "Connection closed without response".to_string(),
-                    duration_ms,
-                )
-                .await;
+    /// Check if data looks like the start of an HTTP request
+    fn looks_like_http_request(data: &[u8]) -> bool {
+        if data.len() < 4 {
+            return false;
         }
-
-        debug!("Transparent HTTP stream {} ended", stream_id);
+        // Check for common HTTP methods at the start
+        data.starts_with(b"GET ")
+            || data.starts_with(b"POST ")
+            || data.starts_with(b"PUT ")
+            || data.starts_with(b"DELETE ")
+            || data.starts_with(b"PATCH ")
+            || data.starts_with(b"HEAD ")
+            || data.starts_with(b"OPTIONS ")
+            || data.starts_with(b"CONNECT ")
+            || data.starts_with(b"TRACE ")
     }
 
     /// Parse HTTP request line, headers, and body from raw bytes
+    /// NOTE: Kept for potential future use but currently unused with HttpProxy
+    #[allow(dead_code)]
     fn parse_http_request(data: &[u8]) -> HttpRequestData {
         // Helper to find subsequence in byte slice
         fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -1430,8 +1547,9 @@ impl TunnelConnection {
     async fn handle_tcp_stream(
         stream: StreamWrapper,
         config: &TunnelConfig,
-        _metrics: &MetricsStore,
+        metrics: &MetricsStore,
         stream_id: u32,
+        remote_addr: String,
     ) {
         // Extract the inner QUIC stream
         let mut stream = match stream {
@@ -1473,9 +1591,52 @@ impl TunnelConnection {
 
         debug!("Connected to local TCP service at {}", local_addr);
 
+        // Record TCP connection in metrics
+        let stream_id_str = generate_short_id(stream_id);
+        let connection_id = metrics
+            .record_tcp_connection(
+                stream_id_str.clone(),
+                remote_addr.clone(),
+                local_addr.clone(),
+            )
+            .await;
+
         // Split BOTH streams for true bidirectional communication WITHOUT MUTEXES!
         let (mut local_read, mut local_write) = local_socket.into_split();
         let (mut quic_send, mut quic_recv) = stream.split();
+
+        // Shared byte counters for metrics
+        let bytes_sent = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let bytes_received = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let bytes_sent_clone = bytes_sent.clone();
+        let bytes_received_clone = bytes_received.clone();
+
+        // Periodic metrics update task - updates every second for real-time UI
+        let bytes_sent_metrics = bytes_sent.clone();
+        let bytes_received_metrics = bytes_received.clone();
+        let metrics_clone = metrics.clone();
+        let connection_id_clone = connection_id.clone();
+        let metrics_update_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
+            interval.tick().await; // Skip first immediate tick
+
+            loop {
+                interval.tick().await;
+
+                let current_bytes_sent =
+                    bytes_sent_metrics.load(std::sync::atomic::Ordering::SeqCst);
+                let current_bytes_received =
+                    bytes_received_metrics.load(std::sync::atomic::Ordering::SeqCst);
+
+                metrics_clone
+                    .update_tcp_connection(
+                        &connection_id_clone,
+                        current_bytes_received,
+                        current_bytes_sent,
+                    )
+                    .await;
+            }
+        });
 
         // Task to read from local TCP and send to QUIC stream
         // Now owns quic_send exclusively - no mutex needed!
@@ -1495,6 +1656,7 @@ impl TunnelConnection {
                     }
                     Ok(n) => {
                         debug!("Read {} bytes from local TCP (stream {})", n, stream_id);
+                        bytes_sent_clone.fetch_add(n as u64, std::sync::atomic::Ordering::SeqCst);
                         let data_msg = TunnelMessage::TcpData {
                             stream_id,
                             data: buffer[..n].to_vec(),
@@ -1533,6 +1695,8 @@ impl TunnelConnection {
                             data.len(),
                             stream_id
                         );
+                        bytes_received_clone
+                            .fetch_add(data.len() as u64, std::sync::atomic::Ordering::SeqCst);
                         if let Err(e) = local_write.write_all(&data).await {
                             error!("Failed to write to local TCP: {}", e);
                             break;
@@ -1561,9 +1725,24 @@ impl TunnelConnection {
             }
         });
 
-        // Wait for both tasks
+        // Wait for both data transfer tasks
         let _ = tokio::join!(local_to_quic, quic_to_local);
-        debug!("TCP stream handler finished (stream {})", stream_id);
+
+        // Stop the periodic metrics update task
+        metrics_update_task.abort();
+
+        // Finalize TCP connection metrics
+        let final_bytes_sent = bytes_sent.load(std::sync::atomic::Ordering::SeqCst);
+        let final_bytes_received = bytes_received.load(std::sync::atomic::Ordering::SeqCst);
+        metrics
+            .update_tcp_connection(&connection_id, final_bytes_received, final_bytes_sent)
+            .await;
+        metrics.close_tcp_connection(&connection_id, None).await;
+
+        debug!(
+            "TCP stream handler finished (stream {}): sent={}, received={}",
+            stream_id, final_bytes_sent, final_bytes_received
+        );
     }
 
     /// Handle a TLS connection on a dedicated QUIC stream

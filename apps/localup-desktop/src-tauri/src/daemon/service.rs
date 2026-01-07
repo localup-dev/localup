@@ -7,13 +7,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::UnixListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, oneshot, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use super::protocol::{DaemonRequest, DaemonResponse, TunnelInfo};
-use super::socket_path;
+use super::{daemon_addr, ensure_localup_dir};
 
 /// Running tunnel state
 struct RunningTunnel {
@@ -46,19 +46,14 @@ impl DaemonService {
 
     /// Run the daemon service
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let socket_path = socket_path();
+        // Ensure localup directory exists
+        ensure_localup_dir()?;
 
-        // Create parent directory if needed
-        if let Some(parent) = socket_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let addr = daemon_addr();
 
-        // Remove existing socket file
-        let _ = std::fs::remove_file(&socket_path);
-
-        // Bind to Unix socket
-        let listener = UnixListener::bind(&socket_path)?;
-        info!("Daemon listening on {:?}", socket_path);
+        // Bind to TCP socket on localhost
+        let listener = TcpListener::bind(&addr).await?;
+        info!("Daemon listening on {}", addr);
 
         // Write PID file
         let pid = std::process::id();
@@ -211,7 +206,7 @@ impl Default for DaemonService {
 
 /// Handle a client connection
 async fn handle_connection(
-    mut stream: tokio::net::UnixStream,
+    mut stream: TcpStream,
     tunnels: Arc<RwLock<HashMap<String, RunningTunnel>>>,
     version: String,
     uptime: u64,
@@ -259,7 +254,7 @@ async fn handle_connection(
 
 /// Send a response to the client
 async fn send_response(
-    stream: &mut tokio::net::UnixStream,
+    stream: &mut TcpStream,
     response: &DaemonResponse,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let response_bytes = serde_json::to_vec(response)?;
@@ -271,7 +266,7 @@ async fn send_response(
 
 /// Handle metrics subscription - streams events until client disconnects or unsubscribes
 async fn handle_metrics_subscription(
-    stream: &mut tokio::net::UnixStream,
+    stream: &mut TcpStream,
     tunnels: &Arc<RwLock<HashMap<String, RunningTunnel>>>,
     tunnel_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -642,6 +637,48 @@ async fn handle_request(
                     DaemonResponse::Ok
                 } else {
                     DaemonResponse::Ok
+                }
+            } else {
+                DaemonResponse::Error {
+                    message: format!("Tunnel not found: {}", id),
+                }
+            }
+        }
+
+        DaemonRequest::GetTcpConnections { id, offset, limit } => {
+            let tunnels_read = tunnels.read().await;
+            if let Some(tunnel) = tunnels_read.get(&id) {
+                if let Some(metrics) = &tunnel.metrics {
+                    let metrics = metrics.clone();
+                    drop(tunnels_read);
+                    let offset = offset.unwrap_or(0);
+                    let limit = limit.unwrap_or(100);
+                    if offset == 0 && limit >= 100 {
+                        let items = metrics.get_all_tcp_connections().await;
+                        let total = items.len();
+                        DaemonResponse::TcpConnections {
+                            items,
+                            total,
+                            offset: 0,
+                            limit,
+                        }
+                    } else {
+                        let items = metrics.get_tcp_connections_paginated(offset, limit).await;
+                        let total = metrics.tcp_connections_count().await;
+                        DaemonResponse::TcpConnections {
+                            items,
+                            total,
+                            offset,
+                            limit,
+                        }
+                    }
+                } else {
+                    DaemonResponse::TcpConnections {
+                        items: vec![],
+                        total: 0,
+                        offset: offset.unwrap_or(0),
+                        limit: limit.unwrap_or(100),
+                    }
                 }
             } else {
                 DaemonResponse::Error {

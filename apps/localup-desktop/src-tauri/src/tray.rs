@@ -67,7 +67,22 @@ fn load_tray_icon() -> Result<Image<'static>, Box<dyn std::error::Error>> {
         _ => return Err("Unsupported PNG color type for tray icon".into()),
     };
 
-    Ok(Image::new_owned(rgba, info.width, info.height))
+    // Flip image horizontally (the source icon is mirrored)
+    let width = info.width as usize;
+    let height = info.height as usize;
+    let bytes_per_pixel = 4; // RGBA
+    let mut flipped = vec![0u8; rgba.len()];
+
+    for y in 0..height {
+        for x in 0..width {
+            let src_idx = (y * width + x) * bytes_per_pixel;
+            let dst_idx = (y * width + (width - 1 - x)) * bytes_per_pixel;
+            flipped[dst_idx..dst_idx + bytes_per_pixel]
+                .copy_from_slice(&rgba[src_idx..src_idx + bytes_per_pixel]);
+        }
+    }
+
+    Ok(Image::new_owned(flipped, info.width, info.height))
 }
 
 /// Build the tray menu

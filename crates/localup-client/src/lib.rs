@@ -4,6 +4,8 @@
 
 pub mod client;
 pub mod config;
+pub mod http_parser;
+pub mod http_proxy;
 pub mod metrics;
 pub mod metrics_db;
 pub mod metrics_server;

@@ -3,12 +3,11 @@
 use tauri::Manager;
 
 mod commands;
-pub mod daemon;
+pub mod daemon; // Keep for potential future use
 mod db;
 mod state;
 mod tray;
 
-use daemon::DaemonClient;
 use state::AppState;
 
 #[cfg(target_os = "macos")]
@@ -78,58 +77,10 @@ pub fn run() {
             // Clone app handle for the spawn block
             let app_handle_for_tunnels = app.handle().clone();
 
-            // Start the daemon automatically (ensures tunnels can run independently)
+            // Start auto-start tunnels in-process (no daemon)
             tauri::async_runtime::spawn(async move {
-                tracing::info!("Checking daemon status...");
-                match DaemonClient::connect_or_start().await {
-                    Ok(mut client) => match client.ping().await {
-                        Ok((version, uptime, count)) => {
-                            tracing::info!(
-                                "Daemon running: v{}, uptime {}s, {} tunnels",
-                                version,
-                                uptime,
-                                count
-                            );
-                            // Sync tunnel states from daemon to local state
-                            if count > 0 {
-                                tracing::info!("Syncing {} tunnel(s) from daemon...", count);
-                                if let Ok(tunnels) = client.list_tunnels().await {
-                                    let mut manager = app_state.tunnel_manager.write().await;
-                                    for tunnel in tunnels {
-                                        let status = match tunnel.status.as_str() {
-                                            "connected" => state::tunnel_manager::TunnelStatus::Connected,
-                                            "connecting" => state::tunnel_manager::TunnelStatus::Connecting,
-                                            "error" => state::tunnel_manager::TunnelStatus::Error,
-                                            _ => state::tunnel_manager::TunnelStatus::Disconnected,
-                                        };
-                                        manager.update_status(
-                                            &tunnel.id,
-                                            status,
-                                            tunnel.public_url.clone(),
-                                            tunnel.localup_id.clone(),
-                                            tunnel.error_message.clone(),
-                                        );
-                                        tracing::info!(
-                                            "Synced tunnel {} ({}) - status: {}",
-                                            tunnel.id,
-                                            tunnel.name,
-                                            tunnel.status
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Daemon ping failed: {}", e);
-                        }
-                    },
-                    Err(e) => {
-                        tracing::error!("Failed to start daemon: {}", e);
-                        // Fall back to in-process tunnel management
-                        tracing::info!("Falling back to in-process tunnel management");
-                        app_state.start_auto_start_tunnels().await;
-                    }
-                }
+                tracing::info!("Starting in-process tunnel management...");
+                app_state.start_auto_start_tunnels().await;
                 // Update tray after tunnels start
                 tray::update_tray_menu(&app_handle_for_tunnels).await;
             });
@@ -170,6 +121,7 @@ pub fn run() {
             commands::stop_tunnel,
             commands::get_tunnel_metrics,
             commands::clear_tunnel_metrics,
+            commands::get_tcp_connections,
             commands::get_captured_requests,
             commands::replay_request,
             commands::subscribe_daemon_metrics,
