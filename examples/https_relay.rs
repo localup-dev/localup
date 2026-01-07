@@ -8,6 +8,7 @@
 //!
 //! Architecture:
 //! - Data Plane: HTTPS server on 127.0.0.1:8443 (accepts public HTTPS connections)
+//!   - Supports HTTP/1.1 and HTTP/2 via ALPN negotiation
 //! - Control Plane: QUIC on 127.0.0.1:4443 (TunnelClient registration and route management)
 //! - Local Server: HTTP on dynamic port (your actual application)
 //!
@@ -21,9 +22,19 @@
 //! - QUIC control plane listening on 127.0.0.1:4443
 //! - TunnelClient connects and registers local server
 //!
-//! Test in another terminal:
+//! Test in another terminal (HTTP/1.1):
 //! ```bash
 //! curl -k https://localho.st:8443/myapp
+//! ```
+//!
+//! Test with HTTP/2:
+//! ```bash
+//! curl -k --http2 https://localho.st:8443/myapp
+//! ```
+//!
+//! Verify HTTP/2 negotiation:
+//! ```bash
+//! curl -k -v --http2 https://localho.st:8443/myapp 2>&1 | grep -i "ALPN\|HTTP/2"
 //! ```
 
 use axum::{routing::get, Router};
@@ -133,7 +144,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("🧪 Testing the tunnel:");
                 println!("=======================");
                 println!("In another terminal, test the tunnel with:");
-                println!("  curl -k {}:8443/myapp", url);
+                println!();
+                println!("  HTTP/1.1: curl -k {}:8443/myapp", url);
+                println!("  HTTP/2:   curl -k --http2 {}:8443/myapp", url);
+                println!();
+                println!("Verify HTTP/2 is being used:");
+                println!(
+                    "  curl -k -v --http2 {}:8443/myapp 2>&1 | grep -i 'ALPN\\|HTTP/2'",
+                    url
+                );
                 println!();
                 println!("Expected response:");
                 println!("  ✅ Hello from Axum server! (myapp path)");
@@ -142,7 +161,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  1. RelayBuilder: Simple API for setting up relay servers");
                 println!("  2. Axum: Local HTTP server (user's application)");
                 println!("  3. TunnelClient: Registers the local server with the relay");
-                println!("  4. End-to-end: Local app exposed through HTTPS relay\n");
+                println!("  4. End-to-end: Local app exposed through HTTPS relay");
+                println!("  5. HTTP/2: ALPN negotiation for HTTP/2 support\n");
                 println!("Press Ctrl+C to stop...\n");
             }
 
