@@ -1,0 +1,21 @@
+# Typos configuration
+# https://github.com/crate-ci/typos
+
+[files]
+# Ignore certificate files and test files with embedded certificates
+extend-exclude = [
+    "*.pem",
+    "*.crt",
+    "*.key",
+]
+
+[default.extend-words]
+# False positives in base64-encoded certificates
+ue = "ue"
+ot = "ot"
+
+[type.rust]
+extend-ignore-re = [
+    # Ignore base64-encoded certificate blocks
+    "-----BEGIN CERTIFICATE-----[\\s\\S]*?-----END CERTIFICATE-----",
+]

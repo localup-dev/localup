@@ -49,7 +49,9 @@ struct Cli {
     /// Custom domain for HTTP/HTTPS tunnels (standalone mode only)
     /// Requires DNS pointing to relay and valid TLS certificate.
     /// Takes precedence over subdomain when both are set.
+    /// Supports wildcard domains (e.g., *.mycompany.com) for multi-subdomain tunnels.
     /// Example: --custom-domain api.mycompany.com
+    /// Example: --custom-domain "*.mycompany.com"
     #[arg(long = "custom-domain")]
     custom_domain: Option<String>,
 
@@ -119,7 +121,9 @@ enum Commands {
         #[arg(short, long)]
         subdomain: Option<String>,
         /// Custom domain for HTTP/HTTPS tunnels (requires DNS and certificate)
+        /// Supports wildcard domains (e.g., *.mycompany.com) for multi-subdomain tunnels.
         /// Example: --custom-domain api.mycompany.com
+        /// Example: --custom-domain "*.mycompany.com"
         #[arg(long = "custom-domain")]
         custom_domain: Option<String>,
         /// Relay server address (host:port)
@@ -661,6 +665,7 @@ enum DaemonCommands {
         #[arg(short, long)]
         subdomain: Option<String>,
         /// Custom domain for HTTP/HTTPS tunnels
+        /// Supports wildcard domains (e.g., *.mycompany.com) for multi-subdomain tunnels.
         #[arg(long = "custom-domain")]
         custom_domain: Option<String>,
     },

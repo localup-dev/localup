@@ -13,6 +13,7 @@ localup-proto = { path = "../localup-proto", features = ["openapi"] }
 localup-auth = { path = "../localup-auth" }
 localup-relay-db = { path = "../localup-relay-db" }
 localup-cert = { path = "../localup-cert" }
+localup-router = { path = "../localup-router" }
 
 # Web framework
 axum = { workspace = true }

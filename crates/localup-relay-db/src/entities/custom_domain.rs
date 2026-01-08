@@ -64,6 +64,10 @@ pub struct Model {
     /// Private key in PEM format (stored directly in database)
     #[sea_orm(column_type = "Text", nullable)]
     pub key_pem: Option<String>,
+
+    /// Whether this is a wildcard domain (e.g., *.example.com)
+    #[sea_orm(default_value = false)]
+    pub is_wildcard: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

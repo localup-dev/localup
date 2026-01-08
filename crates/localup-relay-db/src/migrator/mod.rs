@@ -8,6 +8,7 @@ mod m20251216_000001_create_domain_challenges;
 mod m20251216_000002_make_cert_paths_nullable;
 mod m20251216_000003_add_domain_id;
 mod m20260102_000001_add_cert_pem_columns;
+mod m20260108_000001_add_is_wildcard;
 
 pub struct Migrator;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20251216_000002_make_cert_paths_nullable::Migration),
             Box::new(m20251216_000003_add_domain_id::Migration),
             Box::new(m20260102_000001_add_cert_pem_columns::Migration),
+            Box::new(m20260108_000001_add_is_wildcard::Migration),
         ]
     }
 }

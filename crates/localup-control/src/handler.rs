@@ -10,7 +10,9 @@ use localup_relay_db::entities::{
     custom_domain::{self, DomainStatus},
     prelude::{AuthToken as AuthTokenEntity, CustomDomain as CustomDomainEntity},
 };
-use localup_router::{RouteKey, RouteRegistry, RouteTarget};
+use localup_router::{
+    extract_parent_wildcard, RouteKey, RouteRegistry, RouteTarget, WildcardPattern,
+};
 use localup_transport::{TransportConnection, TransportStream};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use sha2::{Digest, Sha256};
@@ -135,6 +137,10 @@ impl TunnelHandler {
     }
 
     /// Check if a custom domain is registered and active in the database
+    ///
+    /// Supports wildcard domain matching:
+    /// - First checks for exact domain match
+    /// - If not found, checks for matching wildcard domain (e.g., `api.myapp.com` matches `*.myapp.com`)
     async fn is_custom_domain_registered(&self, domain: &str) -> Result<bool, String> {
         let Some(ref db) = self.db else {
             // If no database, allow all custom domains (for testing/simple setups)
@@ -145,6 +151,7 @@ impl TunnelHandler {
             return Ok(true);
         };
 
+        // 1. Try exact domain match first
         match CustomDomainEntity::find()
             .filter(custom_domain::Column::Domain.eq(domain))
             .one(db)
@@ -153,24 +160,69 @@ impl TunnelHandler {
             Ok(Some(record)) => {
                 if record.status == DomainStatus::Active {
                     info!("Custom domain '{}' is registered and active", domain);
-                    Ok(true)
+                    return Ok(true);
                 } else {
                     warn!(
                         "Custom domain '{}' exists but status is {:?}",
                         domain, record.status
                     );
-                    Ok(false)
+                    return Ok(false);
                 }
             }
             Ok(None) => {
-                info!("Custom domain '{}' is not registered", domain);
-                Ok(false)
+                // Exact match not found, try wildcard fallback
+                debug!(
+                    "Exact custom domain '{}' not found, trying wildcard fallback",
+                    domain
+                );
             }
             Err(e) => {
                 error!("Database error checking custom domain '{}': {}", domain, e);
-                Err(format!("Database error: {}", e))
+                return Err(format!("Database error: {}", e));
             }
         }
+
+        // 2. Try wildcard fallback: api.myapp.com -> *.myapp.com
+        if let Some(wildcard_pattern) = extract_parent_wildcard(domain) {
+            match CustomDomainEntity::find()
+                .filter(custom_domain::Column::Domain.eq(&wildcard_pattern))
+                .filter(custom_domain::Column::IsWildcard.eq(true))
+                .one(db)
+                .await
+            {
+                Ok(Some(record)) => {
+                    if record.status == DomainStatus::Active {
+                        info!(
+                            "Domain '{}' matches wildcard '{}' which is registered and active",
+                            domain, wildcard_pattern
+                        );
+                        return Ok(true);
+                    } else {
+                        warn!(
+                            "Wildcard domain '{}' exists but status is {:?}",
+                            wildcard_pattern, record.status
+                        );
+                        return Ok(false);
+                    }
+                }
+                Ok(None) => {
+                    debug!("Wildcard domain '{}' not found", wildcard_pattern);
+                }
+                Err(e) => {
+                    error!(
+                        "Database error checking wildcard domain '{}': {}",
+                        wildcard_pattern, e
+                    );
+                    return Err(format!("Database error: {}", e));
+                }
+            }
+        }
+
+        info!(
+            "Custom domain '{}' is not registered (no exact or wildcard match)",
+            domain
+        );
+        Ok(false)
     }
 
     /// Handle an incoming tunnel connection (client or agent)
@@ -1910,6 +1962,65 @@ impl TunnelHandler {
                     }
                 }
 
+                // Check if this is a wildcard pattern
+                let is_wildcard = WildcardPattern::is_wildcard_pattern(&host);
+
+                if is_wildcard {
+                    // Validate wildcard pattern format
+                    if let Err(e) = WildcardPattern::parse(&host) {
+                        error!("Invalid wildcard pattern '{}': {}", host, e);
+                        return Err(format!("Invalid wildcard pattern '{}': {}", host, e));
+                    }
+
+                    // Check if wildcard route already exists
+                    if self.route_registry.wildcard_exists(&host) {
+                        // Check if same tunnel is reconnecting
+                        if let Some(existing_target) =
+                            self.route_registry.get_wildcard_target(&host)
+                        {
+                            if existing_target.localup_id == localup_id {
+                                // Same tunnel ID reconnecting - force cleanup of old route
+                                warn!(
+                                    "Wildcard route {} already exists for the same tunnel {}. Force cleaning up old route (likely a reconnect).",
+                                    host, localup_id
+                                );
+                                let _ = self.route_registry.unregister_wildcard(&host);
+                            } else {
+                                // Different tunnel ID - this is a real conflict
+                                error!(
+                                    "Wildcard route {} already exists for different tunnel {} (current tunnel: {}). Route conflict!",
+                                    host, existing_target.localup_id, localup_id
+                                );
+                                return Err(format!(
+                                    "Wildcard domain '{}' is already in use by another tunnel",
+                                    host
+                                ));
+                            }
+                        }
+                    }
+
+                    let route_target = RouteTarget {
+                        localup_id: localup_id.to_string(),
+                        target_addr: format!("tunnel:{}", localup_id),
+                        metadata: Some("wildcard-domain".to_string()),
+                        ip_filter: ip_filter.clone(),
+                    };
+
+                    self.route_registry
+                        .register_wildcard(&host, route_target)
+                        .map_err(|e| {
+                            error!("Failed to register wildcard route {}: {}", host, e);
+                            e.to_string()
+                        })?;
+
+                    info!(
+                        "✅ Registered wildcard domain route: {} -> tunnel:{}",
+                        host, localup_id
+                    );
+                    return Ok(None);
+                }
+
+                // Regular (non-wildcard) route registration
                 let route_key = RouteKey::HttpHost(host.clone());
 
                 // Check if route already exists
@@ -2085,6 +2196,26 @@ impl TunnelHandler {
                     return;
                 };
 
+                // Check if this is a wildcard pattern
+                if WildcardPattern::is_wildcard_pattern(&host) {
+                    match self.route_registry.unregister_wildcard(&host) {
+                        Ok(_) => {
+                            info!(
+                                "🗑️  Unregistered wildcard route: {} (tunnel: {})",
+                                host, localup_id
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to unregister wildcard route {}: {} (may already be removed)",
+                                host, e
+                            );
+                        }
+                    }
+                    return;
+                }
+
+                // Regular route unregistration
                 let route_key = RouteKey::HttpHost(host.clone());
                 match self.route_registry.unregister(&route_key) {
                     Ok(_) => {

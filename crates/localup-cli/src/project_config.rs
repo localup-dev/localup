@@ -70,8 +70,9 @@ pub struct ProjectTunnel {
     /// Subdomain for HTTP/HTTPS/TLS tunnels
     pub subdomain: Option<String>,
 
-    /// Custom domain for HTTP/HTTPS tunnels (e.g., "api.example.com")
+    /// Custom domain for HTTP/HTTPS tunnels (e.g., "api.example.com" or "*.example.com")
     /// Requires DNS pointing to relay and valid TLS certificate.
+    /// Supports wildcard domains for multi-subdomain tunnels.
     /// Takes precedence over subdomain when specified.
     #[serde(default)]
     pub custom_domain: Option<String>,
@@ -272,6 +273,12 @@ tunnels:
   #   port: 8080
   #   protocol: https
   #   custom_domain: api.example.com
+
+  # Wildcard domain example (serves all *.example.com subdomains)
+  # - name: wildcard-api
+  #   port: 8080
+  #   protocol: https
+  #   custom_domain: "*.example.com"
 "#
         .to_string()
     }

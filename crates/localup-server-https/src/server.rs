@@ -1,8 +1,10 @@
 //! HTTPS server implementation with TLS termination
+//!
+//! Supports wildcard domain certificates (e.g., `*.example.com`) with fallback resolution.
 use localup_control::{PendingRequests, TunnelConnectionManager};
 use localup_proto::TunnelMessage;
 use localup_relay_db::entities::custom_domain;
-use localup_router::{RouteKey, RouteRegistry};
+use localup_router::{extract_parent_wildcard, RouteKey, RouteRegistry};
 use localup_transport::TransportConnection;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use std::collections::HashMap;
@@ -136,13 +138,25 @@ impl ResolvesServerCert for CustomCertResolver {
         // Try to find custom cert for this domain
         // Note: We can't use async here, so we use try_read() which is non-blocking
         if let Ok(certs) = self.custom_certs.try_read() {
+            // 1. Try exact domain match first
             if let Some(cert) = certs.get(domain) {
                 info!("Using custom certificate for domain: {}", domain);
                 return Some(cert.clone());
             }
+
+            // 2. Try wildcard fallback: api.example.com -> *.example.com
+            if let Some(wildcard_pattern) = extract_parent_wildcard(domain) {
+                if let Some(cert) = certs.get(&wildcard_pattern) {
+                    info!(
+                        "Using wildcard certificate {} for domain: {}",
+                        wildcard_pattern, domain
+                    );
+                    return Some(cert.clone());
+                }
+            }
         }
 
-        // Fall back to default certificate
+        // 3. Fall back to default certificate
         debug!("Using default certificate for domain: {}", domain);
         Some(self.default_cert.clone())
     }

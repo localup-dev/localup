@@ -4,6 +4,7 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
+use localup_router::WildcardPattern;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use tracing::{debug, error, info};
@@ -944,6 +945,9 @@ pub async fn upload_custom_domain(
     let cert_pem_str = String::from_utf8_lossy(&cert_pem).to_string();
     let key_pem_str = String::from_utf8_lossy(&key_pem).to_string();
 
+    // Detect if this is a wildcard domain
+    let is_wildcard = WildcardPattern::is_wildcard_pattern(&req.domain);
+
     // Save to database (including PEM content for direct loading)
     let domain_model = custom_domain::ActiveModel {
         domain: Set(req.domain.clone()),
@@ -957,6 +961,7 @@ pub async fn upload_custom_domain(
         error_message: Set(None),
         cert_pem: Set(Some(cert_pem_str)),
         key_pem: Set(Some(key_pem_str)),
+        is_wildcard: Set(is_wildcard),
     };
 
     domain_model.insert(&state.db).await.map_err(|e| {
@@ -1319,6 +1324,8 @@ pub async fn initiate_challenge(
     use sea_orm::ActiveValue::Set;
 
     let domain_id = uuid::Uuid::new_v4().to_string();
+    // Detect if this is a wildcard domain
+    let is_wildcard = WildcardPattern::is_wildcard_pattern(&req.domain);
     let domain_model = custom_domain::ActiveModel {
         domain: Set(req.domain.clone()),
         id: Set(Some(domain_id)),
@@ -1331,6 +1338,7 @@ pub async fn initiate_challenge(
         error_message: Set(None),
         cert_pem: Set(None),
         key_pem: Set(None),
+        is_wildcard: Set(is_wildcard),
     };
 
     use sea_orm::EntityTrait;
@@ -1482,6 +1490,8 @@ pub async fn complete_challenge(
 
     // Save to database (keep existing id if updating, include PEM content)
     use sea_orm::ActiveValue::NotSet;
+    // Detect if this is a wildcard domain
+    let is_wildcard = WildcardPattern::is_wildcard_pattern(&req.domain);
     let domain_model = custom_domain::ActiveModel {
         domain: Set(req.domain.clone()),
         id: NotSet, // Preserve existing ID on update
@@ -1494,6 +1504,7 @@ pub async fn complete_challenge(
         error_message: Set(None),
         cert_pem: Set(Some(cert_pem_str)),
         key_pem: Set(Some(key_pem_str)),
+        is_wildcard: Set(is_wildcard),
     };
 
     // Try to update if exists, otherwise insert
@@ -1953,6 +1964,7 @@ pub async fn cancel_challenge(
         error_message: Set(Some("Challenge cancelled by user".to_string())),
         cert_pem: NotSet,
         key_pem: NotSet,
+        is_wildcard: NotSet, // Preserve existing value
     };
     domain_model.update(&state.db).await.ok();
 
