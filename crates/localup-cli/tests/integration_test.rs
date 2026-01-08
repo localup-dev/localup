@@ -250,6 +250,7 @@ mod quic_tests {
 
 // Module for routing tests
 mod routing_tests {
+    use localup_proto::IpFilter;
     use localup_router::{RouteKey, RouteRegistry, RouteTarget};
     use std::sync::Arc;
 
@@ -262,6 +263,7 @@ mod routing_tests {
             localup_id: "test-tunnel".to_string(),
             target_addr: "localhost:5432".to_string(),
             metadata: None,
+            ip_filter: IpFilter::new(),
         };
 
         registry.register(key.clone(), target.clone()).unwrap();
@@ -279,6 +281,7 @@ mod routing_tests {
             localup_id: "web-tunnel".to_string(),
             target_addr: "localhost:3000".to_string(),
             metadata: None,
+            ip_filter: IpFilter::new(),
         };
 
         registry.register(key.clone(), target).unwrap();
@@ -296,6 +299,7 @@ mod routing_tests {
             localup_id: "db-tunnel".to_string(),
             target_addr: "localhost:5432".to_string(),
             metadata: None,
+            ip_filter: IpFilter::new(),
         };
 
         registry.register(key.clone(), target).unwrap();
@@ -317,6 +321,7 @@ mod routing_tests {
                 localup_id: format!("localup-{}", i),
                 target_addr: format!("localhost:{}", 5000 + i),
                 metadata: None,
+                ip_filter: IpFilter::new(),
             };
             registry.register(key, target).unwrap();
         }

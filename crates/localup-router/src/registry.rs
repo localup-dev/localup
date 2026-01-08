@@ -2,6 +2,8 @@
 
 use crate::RouteKey;
 use dashmap::DashMap;
+use localup_proto::IpFilter;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -14,6 +16,16 @@ pub struct RouteTarget {
     pub target_addr: String,
     /// Additional metadata
     pub metadata: Option<String>,
+    /// IP filter for access control
+    /// Empty filter allows all connections (default)
+    pub ip_filter: IpFilter,
+}
+
+impl RouteTarget {
+    /// Check if the given peer address is allowed to access this route
+    pub fn is_ip_allowed(&self, peer_addr: &SocketAddr) -> bool {
+        self.ip_filter.is_socket_allowed(peer_addr)
+    }
 }
 
 // Future: Route registration with state for reconnection support
@@ -122,6 +134,7 @@ mod tests {
             localup_id: "localup-1".to_string(),
             target_addr: "localhost:5432".to_string(),
             metadata: None,
+            ip_filter: IpFilter::new(),
         };
 
         registry.register(key.clone(), target.clone()).unwrap();
@@ -139,6 +152,7 @@ mod tests {
             localup_id: "localup-1".to_string(),
             target_addr: "localhost:3000".to_string(),
             metadata: None,
+            ip_filter: IpFilter::new(),
         };
 
         registry.register(key.clone(), target.clone()).unwrap();
@@ -155,6 +169,7 @@ mod tests {
             localup_id: "localup-1".to_string(),
             target_addr: "localhost:5432".to_string(),
             metadata: None,
+            ip_filter: IpFilter::new(),
         };
 
         registry.register(key.clone(), target).unwrap();
@@ -171,5 +186,38 @@ mod tests {
 
         let result = registry.lookup(&key);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_route_target_ip_filter() {
+        let target = RouteTarget {
+            localup_id: "localup-1".to_string(),
+            target_addr: "localhost:3000".to_string(),
+            metadata: None,
+            ip_filter: IpFilter::from_allowlist(vec!["192.168.1.0/24".to_string()]).unwrap(),
+        };
+
+        let allowed_addr: SocketAddr = "192.168.1.100:12345".parse().unwrap();
+        let denied_addr: SocketAddr = "10.0.0.1:12345".parse().unwrap();
+
+        assert!(target.is_ip_allowed(&allowed_addr));
+        assert!(!target.is_ip_allowed(&denied_addr));
+    }
+
+    #[test]
+    fn test_route_target_empty_filter() {
+        let target = RouteTarget {
+            localup_id: "localup-1".to_string(),
+            target_addr: "localhost:3000".to_string(),
+            metadata: None,
+            ip_filter: IpFilter::new(),
+        };
+
+        // Empty filter allows all IPs
+        let addr1: SocketAddr = "192.168.1.100:12345".parse().unwrap();
+        let addr2: SocketAddr = "10.0.0.1:12345".parse().unwrap();
+
+        assert!(target.is_ip_allowed(&addr1));
+        assert!(target.is_ip_allowed(&addr2));
     }
 }

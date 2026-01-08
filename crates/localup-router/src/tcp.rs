@@ -1,6 +1,7 @@
 //! TCP port-based routing
 
 use crate::{RouteKey, RouteRegistry, RouteTarget};
+use localup_proto::IpFilter;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, trace};
@@ -21,6 +22,8 @@ pub struct TcpRoute {
     pub port: u16,
     pub localup_id: String,
     pub target_addr: String,
+    /// IP filter for access control (empty allows all)
+    pub ip_filter: IpFilter,
 }
 
 /// TCP router
@@ -45,6 +48,7 @@ impl TcpRouter {
             localup_id: route.localup_id,
             target_addr: route.target_addr,
             metadata: None,
+            ip_filter: route.ip_filter,
         };
 
         self.registry.register(key, target)?;
@@ -91,6 +95,7 @@ mod tests {
             port: 5432,
             localup_id: "localup-postgres".to_string(),
             target_addr: "localhost:5432".to_string(),
+            ip_filter: IpFilter::new(),
         };
 
         router.register_route(route).unwrap();

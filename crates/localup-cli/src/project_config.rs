@@ -97,6 +97,11 @@ pub struct ProjectTunnel {
 
     /// Local host override
     pub local_host: Option<String>,
+
+    /// Allowed IP addresses or CIDR ranges
+    /// If empty or not specified, all IPs are allowed
+    #[serde(default, rename = "allow_ips")]
+    pub ip_allowlist: Vec<String>,
 }
 
 fn default_protocol() -> String {
@@ -122,6 +127,7 @@ impl Default for ProjectTunnel {
             transport: None,
             enabled: true,
             local_host: None,
+            ip_allowlist: Vec::new(),
         }
     }
 }
@@ -359,6 +365,7 @@ impl ProjectTunnel {
             connection_timeout: Duration::from_secs(defaults.timeout_seconds),
             preferred_transport,
             http_auth: HttpAuthConfig::None,
+            ip_allowlist: self.ip_allowlist.clone(),
         })
     }
 }

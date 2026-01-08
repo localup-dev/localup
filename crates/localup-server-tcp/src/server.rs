@@ -112,6 +112,7 @@ impl TcpServer {
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_http_connection(
                             socket,
+                            peer_addr,
                             registry,
                             localup_manager,
                             pending_requests,
@@ -133,6 +134,7 @@ impl TcpServer {
     /// Handle HTTP connection with routing
     async fn handle_http_connection(
         mut client_socket: TcpStream,
+        peer_addr: SocketAddr,
         registry: Arc<RouteRegistry>,
         localup_manager: Option<Arc<TunnelConnectionManager>>,
         pending_requests: Arc<PendingRequests>,
@@ -223,6 +225,18 @@ impl TcpServer {
         }
 
         let target = target.unwrap();
+
+        // Check IP filtering
+        if !target.is_ip_allowed(&peer_addr) {
+            warn!(
+                "Connection from {} denied by IP filter for host: {}",
+                peer_addr, host
+            );
+            let response = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 15\r\n\r\nAccess denied\n";
+            client_socket.write_all(response).await?;
+            return Ok(());
+        }
+
         debug!("Proxying to: {}", target.target_addr);
 
         // Check if this is a tunnel route

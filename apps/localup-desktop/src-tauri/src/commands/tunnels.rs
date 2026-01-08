@@ -109,6 +109,7 @@ pub struct TunnelResponse {
     pub custom_domain: Option<String>,
     pub auto_start: bool,
     pub enabled: bool,
+    pub ip_allowlist: Vec<String>,
     pub status: String,
     pub public_url: Option<String>,
     pub localup_id: Option<String>,
@@ -152,6 +153,7 @@ pub struct CreateTunnelRequest {
     pub subdomain: Option<String>,
     pub custom_domain: Option<String>,
     pub auto_start: Option<bool>,
+    pub ip_allowlist: Option<Vec<String>>,
 }
 
 /// Request to update a tunnel
@@ -166,6 +168,21 @@ pub struct UpdateTunnelRequest {
     pub custom_domain: Option<String>,
     pub auto_start: Option<bool>,
     pub enabled: Option<bool>,
+    pub ip_allowlist: Option<Vec<String>>,
+}
+
+/// Parse ip_allowlist from JSON string stored in database
+fn parse_ip_allowlist(json_str: &Option<String>) -> Vec<String> {
+    json_str
+        .as_ref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
+
+/// Serialize ip_allowlist to JSON string for database storage
+fn serialize_ip_allowlist(list: &Option<Vec<String>>) -> Option<String> {
+    list.as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default())
 }
 
 /// List all tunnel configurations with their current status
@@ -203,9 +220,6 @@ pub async fn list_tunnels(state: State<'_, AppState>) -> Result<Vec<TunnelRespon
             ("disconnected".to_string(), None, None, None)
         };
 
-        // Compute upstream status from recent metrics
-        let upstream_info = compute_upstream_status(&state, &config.id).await;
-
         result.push(TunnelResponse {
             id: config.id.clone(),
             name: config.name,
@@ -218,18 +232,15 @@ pub async fn list_tunnels(state: State<'_, AppState>) -> Result<Vec<TunnelRespon
             custom_domain: config.custom_domain,
             auto_start: config.auto_start,
             enabled: config.enabled,
+            ip_allowlist: parse_ip_allowlist(&config.ip_allowlist),
             status,
             public_url,
             localup_id,
             error_message,
-            upstream_status: upstream_info.status,
-            recent_upstream_errors: upstream_info.recent_502_count,
-            recent_request_count: upstream_info.total_count,
             created_at: config.created_at.to_rfc3339(),
             updated_at: config.updated_at.to_rfc3339(),
         });
     }
-
     Ok(result)
 }
 
@@ -283,6 +294,7 @@ pub async fn get_tunnel(
         custom_domain: config.custom_domain,
         auto_start: config.auto_start,
         enabled: config.enabled,
+        ip_allowlist: parse_ip_allowlist(&config.ip_allowlist),
         status,
         public_url,
         localup_id,
@@ -324,6 +336,7 @@ pub async fn create_tunnel(
         custom_domain: Set(request.custom_domain.clone()),
         auto_start: Set(request.auto_start.unwrap_or(false)),
         enabled: Set(true),
+        ip_allowlist: Set(serialize_ip_allowlist(&request.ip_allowlist)),
         created_at: Set(now),
         updated_at: Set(now),
     };
@@ -345,6 +358,7 @@ pub async fn create_tunnel(
         custom_domain: result.custom_domain,
         auto_start: result.auto_start,
         enabled: result.enabled,
+        ip_allowlist: parse_ip_allowlist(&result.ip_allowlist),
         status: "disconnected".to_string(),
         public_url: None,
         localup_id: None,
@@ -405,6 +419,11 @@ pub async fn update_tunnel(
     if let Some(enabled) = request.enabled {
         tunnel.enabled = Set(enabled);
     }
+    if let Some(ref ip_allowlist) = request.ip_allowlist {
+        tunnel.ip_allowlist = Set(Some(
+            serde_json::to_string(ip_allowlist).unwrap_or_default(),
+        ));
+    }
 
     tunnel.updated_at = Set(Utc::now());
 
@@ -437,6 +456,7 @@ pub async fn update_tunnel(
         custom_domain: result.custom_domain,
         auto_start: result.auto_start,
         enabled: result.enabled,
+        ip_allowlist: parse_ip_allowlist(&result.ip_allowlist),
         status: running
             .map(|t| t.status.as_str().to_string())
             .unwrap_or_else(|| "disconnected".to_string()),
@@ -528,6 +548,7 @@ async fn start_tunnel_in_process(
         protocols: vec![protocol_config],
         auth_token: relay.jwt_token.clone().unwrap_or_default(),
         exit_node: ExitNodeConfig::Custom(relay.address.clone()),
+        ip_allowlist: parse_ip_allowlist(&config.ip_allowlist),
         ..Default::default()
     };
 

@@ -544,6 +544,17 @@ impl HttpsServer {
             }
         };
 
+        // Check IP filtering
+        if !target.is_ip_allowed(&peer_addr) {
+            warn!(
+                "Connection from {} denied by IP filter for host: {}",
+                peer_addr, host
+            );
+            let response = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 13\r\n\r\nAccess denied";
+            tls_stream.write_all(response).await?;
+            return Ok(());
+        }
+
         // Check if this is a tunnel route
         if !target.target_addr.starts_with("tunnel:") {
             warn!("HTTPS route is not a tunnel: {}", target.target_addr);

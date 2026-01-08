@@ -32,6 +32,9 @@ pub enum TlsServerError {
     #[error("No route found for SNI: {0}")]
     NoRoute(String),
 
+    #[error("Access denied for IP: {0}")]
+    AccessDenied(String),
+
     #[error("Transport error: {0}")]
     TransportError(String),
 
@@ -175,6 +178,15 @@ impl TlsServer {
             );
             TlsServerError::NoRoute(sni_hostname.clone())
         })?;
+
+        // Check IP filtering
+        if !route.is_ip_allowed(&peer_addr) {
+            debug!(
+                "Connection from {} denied by IP filter for SNI: {}",
+                peer_addr, sni_hostname
+            );
+            return Err(TlsServerError::AccessDenied(peer_addr.to_string()));
+        }
 
         debug!(
             "Routing SNI {} to backend: {}",
@@ -464,6 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sni_routing() {
+        use localup_proto::IpFilter;
         use localup_router::{RouteKey, RouteTarget};
 
         let route_registry = Arc::new(RouteRegistry::new());
@@ -474,6 +487,7 @@ mod tests {
             localup_id: "test-tunnel".to_string(),
             target_addr: "localhost:9443".to_string(),
             metadata: None,
+            ip_filter: IpFilter::new(),
         };
         route_registry.register(key, target).unwrap();
 

@@ -88,6 +88,12 @@ struct Cli {
     /// Example: --auth-token "secret-token-123"
     #[arg(long = "auth-token", value_name = "TOKEN")]
     auth_tokens: Vec<String>,
+
+    /// Allowed IP addresses or CIDR ranges for the tunnel (standalone mode only)
+    /// Can be specified multiple times. If not specified, all IPs are allowed.
+    /// Examples: --allow-ip "192.168.1.0/24" --allow-ip "10.0.0.1"
+    #[arg(long = "allow-ip", value_name = "IP_OR_CIDR")]
+    allow_ips: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -128,6 +134,11 @@ enum Commands {
         /// Auto-enable (start with daemon)
         #[arg(long)]
         enabled: bool,
+        /// Allowed IP addresses or CIDR ranges for the tunnel
+        /// Can be specified multiple times. If not specified, all IPs are allowed.
+        /// Examples: --allow-ip "192.168.1.0/24" --allow-ip "10.0.0.1"
+        #[arg(long = "allow-ip", value_name = "IP_OR_CIDR")]
+        allow_ips: Vec<String>,
     },
     /// List all tunnel configurations
     List,
@@ -706,6 +717,7 @@ async fn main() -> Result<()> {
             transport,
             remote_port,
             enabled,
+            allow_ips,
         }) => handle_add_tunnel(
             name,
             port,
@@ -718,6 +730,7 @@ async fn main() -> Result<()> {
             transport,
             remote_port,
             enabled,
+            allow_ips,
         ),
         Some(Commands::List) => handle_list_tunnels(),
         Some(Commands::Show { name }) => handle_show_tunnel(name),
@@ -1219,6 +1232,7 @@ fn handle_add_tunnel(
     transport: Option<String>,
     remote_port: Option<u16>,
     enabled: bool,
+    allow_ips: Vec<String>,
 ) -> Result<()> {
     let store = localup_store::TunnelStore::new()?;
 
@@ -1267,6 +1281,7 @@ fn handle_add_tunnel(
         connection_timeout: Duration::from_secs(30),
         preferred_transport,
         http_auth: localup_proto::HttpAuthConfig::None,
+        ip_allowlist: allow_ips,
     };
 
     let stored_tunnel = localup_store::StoredTunnel {
@@ -1546,6 +1561,7 @@ async fn run_standalone(cli: Cli) -> Result<()> {
         connection_timeout: Duration::from_secs(30),
         preferred_transport,
         http_auth,
+        ip_allowlist: cli.allow_ips.clone(),
     };
 
     // Create cancellation token for Ctrl+C

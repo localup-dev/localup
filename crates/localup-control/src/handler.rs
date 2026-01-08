@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 use localup_auth::JwtValidator;
-use localup_proto::{Endpoint, Protocol, TunnelMessage};
+use localup_proto::{Endpoint, IpFilter, Protocol, TunnelMessage};
 use localup_relay_db::entities::{
     auth_token,
     custom_domain::{self, DomainStatus},
@@ -338,9 +338,21 @@ impl TunnelHandler {
         // Register routes in the route registry
         // If any route registration fails (e.g., subdomain conflict), reject the connection
         // For TCP endpoints, update with allocated port
+        // Create IP filter from config's allowlist
+        let ip_filter = IpFilter::from_allowlist(config.ip_allowlist.clone()).unwrap_or_else(|e| {
+            warn!(
+                "Invalid IP allowlist entries for tunnel {}: {}. Using empty filter (allow all).",
+                localup_id, e
+            );
+            IpFilter::new()
+        });
+
         for endpoint in &mut endpoints {
             debug!("Registering endpoint: protocol={:?}", endpoint.protocol);
-            match self.register_route(&localup_id, endpoint).await {
+            match self
+                .register_route(&localup_id, endpoint, ip_filter.clone())
+                .await
+            {
                 Ok(Some(allocated_port)) => {
                     // Update TCP endpoint with allocated port
                     endpoint.public_url = format!("tcp://{}:{}", self.domain, allocated_port);
@@ -1852,6 +1864,7 @@ impl TunnelHandler {
         &self,
         localup_id: &str,
         endpoint: &Endpoint,
+        ip_filter: IpFilter,
     ) -> Result<Option<u16>, String> {
         match &endpoint.protocol {
             Protocol::Http {
@@ -1939,6 +1952,7 @@ impl TunnelHandler {
                     } else {
                         "via-tunnel".to_string()
                     }),
+                    ip_filter: ip_filter.clone(),
                 };
 
                 self.route_registry
@@ -1949,12 +1963,26 @@ impl TunnelHandler {
                     })?;
 
                 if is_custom_domain {
-                    info!(
-                        "✅ Registered custom domain route: {} -> tunnel:{}",
-                        host, localup_id
-                    );
-                } else {
+                    if ip_filter.is_empty() {
+                        info!(
+                            "✅ Registered custom domain route: {} -> tunnel:{}",
+                            host, localup_id
+                        );
+                    } else {
+                        info!(
+                            "✅ Registered custom domain route: {} -> tunnel:{} (IP filter: {} entries)",
+                            host, localup_id, ip_filter.len()
+                        );
+                    }
+                } else if ip_filter.is_empty() {
                     info!("✅ Registered route: {} -> tunnel:{}", host, localup_id);
+                } else {
+                    info!(
+                        "✅ Registered route: {} -> tunnel:{} (IP filter: {} entries)",
+                        host,
+                        localup_id,
+                        ip_filter.len()
+                    );
                 }
                 Ok(None)
             }
@@ -2015,16 +2043,24 @@ impl TunnelHandler {
                     localup_id: localup_id.to_string(),
                     target_addr: format!("tunnel:{}", localup_id), // Special marker for tunnel routing
                     metadata: Some("via-tunnel".to_string()),
+                    ip_filter: ip_filter.clone(),
                 };
 
                 self.route_registry
                     .register(route_key, route_target)
                     .map_err(|e| e.to_string())?;
 
-                debug!(
-                    "Registered TLS route for SNI pattern {} -> tunnel:{}",
-                    sni_pattern, localup_id
-                );
+                if ip_filter.is_empty() {
+                    debug!(
+                        "Registered TLS route for SNI pattern {} -> tunnel:{}",
+                        sni_pattern, localup_id
+                    );
+                } else {
+                    debug!(
+                        "Registered TLS route for SNI pattern {} -> tunnel:{} (IP filter: {} entries)",
+                        sni_pattern, localup_id, ip_filter.len()
+                    );
+                }
                 Ok(None)
             }
         }
@@ -2429,7 +2465,9 @@ mod tests {
             port: None,
         };
 
-        let result = handler.register_route(localup_id, &endpoint).await;
+        let result = handler
+            .register_route(localup_id, &endpoint, IpFilter::new())
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None); // HTTP doesn't return allocated port
 
@@ -2461,7 +2499,9 @@ mod tests {
             port: None,
         };
 
-        let result = handler.register_route(localup_id, &endpoint).await;
+        let result = handler
+            .register_route(localup_id, &endpoint, IpFilter::new())
+            .await;
         assert!(result.is_ok());
 
         // Verify route was registered
@@ -2489,7 +2529,9 @@ mod tests {
             port: Some(8080),
         };
 
-        let result = handler.register_route(localup_id, &endpoint).await;
+        let result = handler
+            .register_route(localup_id, &endpoint, IpFilter::new())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not supported"));
     }
@@ -2531,7 +2573,9 @@ mod tests {
             port: Some(8080),
         };
 
-        let result = handler.register_route(localup_id, &endpoint).await;
+        let result = handler
+            .register_route(localup_id, &endpoint, IpFilter::new())
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), Some(9000));
     }
@@ -2561,7 +2605,10 @@ mod tests {
         };
 
         // Register first
-        handler.register_route(localup_id, &endpoint).await.unwrap();
+        handler
+            .register_route(localup_id, &endpoint, IpFilter::new())
+            .await
+            .unwrap();
         assert_eq!(route_registry.count(), 1);
 
         // Unregister
@@ -2752,7 +2799,9 @@ mod tests {
             port: None,
         };
 
-        let result = handler.register_route(localup_id, &endpoint).await;
+        let result = handler
+            .register_route(localup_id, &endpoint, IpFilter::new())
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), None);
 
@@ -2788,7 +2837,9 @@ mod tests {
             port: None,
         };
 
-        let result = handler.register_route(localup_id, &endpoint).await;
+        let result = handler
+            .register_route(localup_id, &endpoint, IpFilter::new())
+            .await;
         assert!(result.is_ok());
 
         // Verify route was registered with full custom domain
@@ -2821,7 +2872,9 @@ mod tests {
             public_url: "https://api.mycompany.com".to_string(),
             port: None,
         };
-        let result1 = handler.register_route("tunnel-1", &endpoint1).await;
+        let result1 = handler
+            .register_route("tunnel-1", &endpoint1, IpFilter::new())
+            .await;
         assert!(result1.is_ok());
 
         // Try to register second tunnel with same custom domain - should fail
@@ -2833,7 +2886,9 @@ mod tests {
             public_url: "https://api.mycompany.com".to_string(),
             port: None,
         };
-        let result2 = handler.register_route("tunnel-2", &endpoint2).await;
+        let result2 = handler
+            .register_route("tunnel-2", &endpoint2, IpFilter::new())
+            .await;
         assert!(result2.is_err());
         assert!(result2.unwrap_err().contains("already in use"));
     }
@@ -2863,7 +2918,10 @@ mod tests {
         };
 
         // Register first
-        handler.register_route(localup_id, &endpoint).await.unwrap();
+        handler
+            .register_route(localup_id, &endpoint, IpFilter::new())
+            .await
+            .unwrap();
         assert_eq!(route_registry.count(), 1);
 
         // Unregister
@@ -2900,7 +2958,9 @@ mod tests {
             port: None,
         };
 
-        let result = handler.register_route(localup_id, &endpoint).await;
+        let result = handler
+            .register_route(localup_id, &endpoint, IpFilter::new())
+            .await;
         // This should fail because neither subdomain nor custom_domain is provided
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("subdomain or custom_domain"));

@@ -53,6 +53,7 @@ import {
   CheckCircle2,
   WifiOff,
   Pencil,
+  Shield,
 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -150,7 +151,11 @@ export function Tunnels() {
     protocol: "http",
     subdomain: "",
     auto_start: false,
+    ip_allowlist: [],
   });
+  // IP allowlist as comma-separated string for input
+  const [newTunnelIpAllowlist, setNewTunnelIpAllowlist] = useState("");
+  const [editTunnelIpAllowlist, setEditTunnelIpAllowlist] = useState("");
 
   const loadData = useCallback(async () => {
     try {
@@ -201,9 +206,16 @@ export function Tunnels() {
 
     setActionLoading("create");
     try {
+      // Parse IP allowlist from comma-separated string
+      const ipAllowlist = newTunnelIpAllowlist
+        .split(",")
+        .map((ip) => ip.trim())
+        .filter((ip) => ip.length > 0);
+
       const created = await createTunnel({
         ...newTunnel,
         subdomain: newTunnel.subdomain ? newTunnel.subdomain.toLowerCase() : undefined,
+        ip_allowlist: ipAllowlist.length > 0 ? ipAllowlist : undefined,
       });
       setTunnels((prev) => [...prev, created]);
       setCreateDialogOpen(false);
@@ -214,7 +226,9 @@ export function Tunnels() {
         protocol: "http",
         subdomain: "",
         auto_start: false,
+        ip_allowlist: [],
       });
+      setNewTunnelIpAllowlist("");
       toast.success("Tunnel created", {
         description: `Created tunnel "${created.name}"`,
       });
@@ -237,9 +251,16 @@ export function Tunnels() {
 
     setActionLoading("edit");
     try {
+      // Parse IP allowlist from comma-separated string
+      const ipAllowlist = editTunnelIpAllowlist
+        .split(",")
+        .map((ip) => ip.trim())
+        .filter((ip) => ip.length > 0);
+
       const updated = await updateTunnel(tunnelToEdit.id, {
         ...editTunnel,
         subdomain: editTunnel.subdomain?.toLowerCase(),
+        ip_allowlist: ipAllowlist,
       });
       setTunnels((prev) => prev.map((t) => (t.id === tunnelToEdit.id ? updated : t)));
       setEditDialogOpen(false);
@@ -266,6 +287,8 @@ export function Tunnels() {
       subdomain: tunnel.subdomain || "",
       auto_start: tunnel.auto_start,
     });
+    // Initialize IP allowlist as comma-separated string
+    setEditTunnelIpAllowlist(tunnel.ip_allowlist?.join(", ") || "");
     setEditDialogOpen(true);
   };
 
@@ -494,6 +517,21 @@ export function Tunnels() {
                     </p>
                   </div>
                 )}
+                <div className="grid gap-2">
+                  <Label htmlFor="ip-allowlist" className="flex items-center gap-2">
+                    <Shield className="h-4 w-4" />
+                    IP Allowlist (optional)
+                  </Label>
+                  <Input
+                    id="ip-allowlist"
+                    placeholder="192.168.1.100, 10.0.0.0/8"
+                    value={newTunnelIpAllowlist}
+                    onChange={(e) => setNewTunnelIpAllowlist(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Comma-separated IPs or CIDR ranges. Leave empty to allow all.
+                  </p>
+                </div>
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
                     <Label htmlFor="auto-start">Auto Start</Label>
@@ -591,6 +629,12 @@ export function Tunnels() {
                       <div className="flex items-center gap-3">
                         <span className="font-medium hover:underline">{tunnel.name}</span>
                         {getStatusBadge(tunnel.status)}
+                        {tunnel.ip_allowlist && tunnel.ip_allowlist.length > 0 && (
+                          <Badge variant="outline" className="text-xs" title={`IP filtering: ${tunnel.ip_allowlist.join(", ")}`}>
+                            <Shield className="h-3 w-3 mr-1" />
+                            {tunnel.ip_allowlist.length} IP{tunnel.ip_allowlist.length > 1 ? "s" : ""}
+                          </Badge>
+                        )}
                       </div>
                       <div className="text-sm text-muted-foreground">
                         <span className="font-mono">
@@ -727,6 +771,7 @@ export function Tunnels() {
         if (!open) {
           setTunnelToEdit(null);
           setEditTunnel({});
+          setEditTunnelIpAllowlist("");
         }
       }}>
         <DialogContent className="sm:max-w-[425px]">
@@ -793,6 +838,21 @@ export function Tunnels() {
                 </p>
               </div>
             )}
+            <div className="grid gap-2">
+              <Label htmlFor="edit-ip-allowlist" className="flex items-center gap-2">
+                <Shield className="h-4 w-4" />
+                IP Allowlist
+              </Label>
+              <Input
+                id="edit-ip-allowlist"
+                placeholder="192.168.1.100, 10.0.0.0/8"
+                value={editTunnelIpAllowlist}
+                onChange={(e) => setEditTunnelIpAllowlist(e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Comma-separated IPs or CIDR ranges. Leave empty to allow all.
+              </p>
+            </div>
             <div className="flex items-center justify-between">
               <div className="space-y-0.5">
                 <Label htmlFor="edit-auto-start">Auto Start</Label>
@@ -816,6 +876,7 @@ export function Tunnels() {
                 setEditDialogOpen(false);
                 setTunnelToEdit(null);
                 setEditTunnel({});
+                setEditTunnelIpAllowlist("");
               }}
             >
               Cancel

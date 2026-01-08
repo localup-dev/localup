@@ -1,6 +1,7 @@
 //! TLS SNI-based routing
 
 use crate::{RouteKey, RouteRegistry, RouteTarget};
+use localup_proto::IpFilter;
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, trace};
@@ -24,6 +25,8 @@ pub struct SniRoute {
     pub sni_hostname: String,
     pub localup_id: String,
     pub target_addr: String,
+    /// IP filter for access control (empty allows all)
+    pub ip_filter: IpFilter,
 }
 
 /// SNI router for TLS connections
@@ -48,6 +51,7 @@ impl SniRouter {
             localup_id: route.localup_id,
             target_addr: route.target_addr,
             metadata: None,
+            ip_filter: route.ip_filter,
         };
 
         self.registry.register(key, target)?;
@@ -197,6 +201,7 @@ mod tests {
             sni_hostname: "db.example.com".to_string(),
             localup_id: "localup-db".to_string(),
             target_addr: "localhost:5432".to_string(),
+            ip_filter: IpFilter::new(),
         };
 
         router.register_route(route).unwrap();
@@ -228,6 +233,7 @@ mod tests {
             sni_hostname: "*.example.com".to_string(),
             localup_id: "localup-wildcard".to_string(),
             target_addr: "localhost:3000".to_string(),
+            ip_filter: IpFilter::new(),
         };
 
         router.register_route(route).unwrap();

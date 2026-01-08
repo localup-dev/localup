@@ -38,6 +38,11 @@ pub struct Model {
     /// Is this tunnel enabled
     pub enabled: bool,
 
+    /// IP allowlist for filtering incoming connections (JSON array of IPs/CIDRs)
+    /// Example: ["192.168.1.0/24", "10.0.0.1"]
+    #[sea_orm(column_type = "Text", nullable)]
+    pub ip_allowlist: Option<String>,
+
     /// Creation timestamp
     pub created_at: ChronoDateTimeUtc,
 

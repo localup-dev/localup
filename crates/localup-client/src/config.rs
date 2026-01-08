@@ -55,6 +55,10 @@ pub struct TunnelConfig {
     /// HTTP authentication configuration for incoming requests to this tunnel
     #[serde(default)]
     pub http_auth: HttpAuthConfig,
+    /// IP addresses and CIDR ranges allowed to access this tunnel
+    /// Empty list means all IPs are allowed
+    #[serde(default)]
+    pub ip_allowlist: Vec<String>,
 }
 
 /// Helper module for serializing Duration as seconds
@@ -89,6 +93,7 @@ impl Default for TunnelConfig {
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None, // Auto-discover
             http_auth: HttpAuthConfig::None,
+            ip_allowlist: Vec::new(), // Empty = allow all
         }
     }
 }

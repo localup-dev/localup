@@ -5,6 +5,7 @@
 
 pub mod codec;
 pub mod discovery;
+pub mod ip_filter;
 pub mod messages;
 pub mod mux;
 
@@ -12,6 +13,7 @@ pub use codec::{CodecError, TunnelCodec};
 pub use discovery::{
     ProtocolDiscoveryResponse, TransportEndpoint, TransportProtocol, WELL_KNOWN_PATH,
 };
+pub use ip_filter::{IpFilter, IpFilterError};
 pub use messages::*;
 pub use mux::{Frame, FrameType, Multiplexer, StreamId};
 

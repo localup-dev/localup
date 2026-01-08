@@ -723,7 +723,7 @@ impl TunnelConnector {
                 local_https: false,
                 exit_node: self.config.exit_node.clone(),
                 failover: self.config.failover,
-                ip_allowlist: Vec::new(),
+                ip_allowlist: self.config.ip_allowlist.clone(),
                 enable_compression: false,
                 enable_multiplexing: true,
                 http_auth: self.config.http_auth.clone(),

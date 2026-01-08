@@ -13,6 +13,7 @@ export interface Tunnel {
   custom_domain: string | null;
   auto_start: boolean;
   enabled: boolean;
+  ip_allowlist: string[];
   status: string;
   public_url: string | null;
   localup_id: string | null;
@@ -50,6 +51,7 @@ export interface CreateTunnelRequest {
   subdomain?: string;
   custom_domain?: string;
   auto_start?: boolean;
+  ip_allowlist?: string[];
 }
 
 export interface UpdateTunnelRequest {
@@ -62,6 +64,7 @@ export interface UpdateTunnelRequest {
   custom_domain?: string;
   auto_start?: boolean;
   enabled?: boolean;
+  ip_allowlist?: string[];
 }
 
 /**
