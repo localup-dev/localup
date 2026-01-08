@@ -17,6 +17,84 @@ use crate::state::app_state::run_tunnel;
 use crate::state::tunnel_manager::TunnelStatus;
 use crate::state::AppState;
 
+/// Upstream status computed from recent metrics
+struct UpstreamStatusInfo {
+    status: String,
+    recent_502_count: Option<i64>,
+    total_count: Option<i64>,
+}
+
+/// Compute upstream status from in-memory metrics
+async fn compute_upstream_status(state: &AppState, tunnel_id: &str) -> UpstreamStatusInfo {
+    // Get recent metrics (last 60 seconds)
+    let cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        - 60_000; // 60 seconds ago
+
+    let (metrics, _total) = state.get_tunnel_metrics_paginated(tunnel_id, 0, 100).await;
+
+    // Filter to recent metrics
+    let recent_metrics: Vec<_> = metrics
+        .into_iter()
+        .filter(|m| m.timestamp >= cutoff)
+        .collect();
+
+    let total_count = recent_metrics.len() as i64;
+
+    if total_count == 0 {
+        return UpstreamStatusInfo {
+            status: "unknown".to_string(),
+            recent_502_count: None,
+            total_count: None,
+        };
+    }
+
+    // Count 502 errors (Bad Gateway - upstream connection failure)
+    let recent_502_count = recent_metrics
+        .iter()
+        .filter(|m| m.response_status == Some(502))
+        .count() as i64;
+
+    // Count pending requests (no response yet)
+    let pending_count = recent_metrics
+        .iter()
+        .filter(|m| m.response_status.is_none() && m.error.is_none())
+        .count() as i64;
+
+    // Determine status
+    let status = if recent_502_count > 0 {
+        // Check most recent request
+        if let Some(most_recent) = recent_metrics.first() {
+            match most_recent.response_status {
+                Some(502) => "down".to_string(),
+                None if most_recent.error.is_none() => "down".to_string(), // Pending
+                _ => {
+                    // Has 502s but most recent succeeded - check ratio
+                    if recent_502_count * 2 > total_count {
+                        "down".to_string()
+                    } else {
+                        "up".to_string()
+                    }
+                }
+            }
+        } else {
+            "unknown".to_string()
+        }
+    } else if pending_count > 0 && pending_count == total_count {
+        "down".to_string() // All requests pending
+    } else {
+        "up".to_string()
+    };
+
+    UpstreamStatusInfo {
+        status,
+        recent_502_count: Some(recent_502_count),
+        total_count: Some(total_count),
+    }
+}
+
 /// Tunnel response with current status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TunnelResponse {
@@ -35,6 +113,12 @@ pub struct TunnelResponse {
     pub public_url: Option<String>,
     pub localup_id: Option<String>,
     pub error_message: Option<String>,
+    /// Upstream service status (up/down/unknown) based on recent 502 errors
+    pub upstream_status: String,
+    /// Number of recent 502 errors
+    pub recent_upstream_errors: Option<i64>,
+    /// Total recent requests analyzed
+    pub recent_request_count: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -103,43 +187,48 @@ pub async fn list_tunnels(state: State<'_, AppState>) -> Result<Vec<TunnelRespon
 
     let manager = state.tunnel_manager.read().await;
 
-    let result = configs
-        .into_iter()
-        .map(|config| {
-            let local_running = manager.get(&config.id);
+    let mut result = Vec::with_capacity(configs.len());
 
-            let (status, public_url, localup_id, error_message) = if let Some(lt) = local_running {
-                (
-                    lt.status.as_str().to_string(),
-                    lt.public_url.clone(),
-                    lt.localup_id.clone(),
-                    lt.error_message.clone(),
-                )
-            } else {
-                ("disconnected".to_string(), None, None, None)
-            };
+    for config in configs {
+        let local_running = manager.get(&config.id);
 
-            TunnelResponse {
-                id: config.id.clone(),
-                name: config.name,
-                relay_id: config.relay_server_id.clone(),
-                relay_name: relays.get(&config.relay_server_id).cloned(),
-                local_host: config.local_host,
-                local_port: config.local_port as u16,
-                protocol: config.protocol,
-                subdomain: config.subdomain,
-                custom_domain: config.custom_domain,
-                auto_start: config.auto_start,
-                enabled: config.enabled,
-                status,
-                public_url,
-                localup_id,
-                error_message,
-                created_at: config.created_at.to_rfc3339(),
-                updated_at: config.updated_at.to_rfc3339(),
-            }
-        })
-        .collect();
+        let (status, public_url, localup_id, error_message) = if let Some(lt) = local_running {
+            (
+                lt.status.as_str().to_string(),
+                lt.public_url.clone(),
+                lt.localup_id.clone(),
+                lt.error_message.clone(),
+            )
+        } else {
+            ("disconnected".to_string(), None, None, None)
+        };
+
+        // Compute upstream status from recent metrics
+        let upstream_info = compute_upstream_status(&state, &config.id).await;
+
+        result.push(TunnelResponse {
+            id: config.id.clone(),
+            name: config.name,
+            relay_id: config.relay_server_id.clone(),
+            relay_name: relays.get(&config.relay_server_id).cloned(),
+            local_host: config.local_host,
+            local_port: config.local_port as u16,
+            protocol: config.protocol,
+            subdomain: config.subdomain,
+            custom_domain: config.custom_domain,
+            auto_start: config.auto_start,
+            enabled: config.enabled,
+            status,
+            public_url,
+            localup_id,
+            error_message,
+            upstream_status: upstream_info.status,
+            recent_upstream_errors: upstream_info.recent_502_count,
+            recent_request_count: upstream_info.total_count,
+            created_at: config.created_at.to_rfc3339(),
+            updated_at: config.updated_at.to_rfc3339(),
+        });
+    }
 
     Ok(result)
 }
@@ -179,6 +268,9 @@ pub async fn get_tunnel(
         ("disconnected".to_string(), None, None, None)
     };
 
+    // Compute upstream status from recent metrics
+    let upstream_info = compute_upstream_status(&state, &id).await;
+
     Ok(Some(TunnelResponse {
         id: config.id.clone(),
         name: config.name,
@@ -195,6 +287,9 @@ pub async fn get_tunnel(
         public_url,
         localup_id,
         error_message,
+        upstream_status: upstream_info.status,
+        recent_upstream_errors: upstream_info.recent_502_count,
+        recent_request_count: upstream_info.total_count,
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
     }))
@@ -254,6 +349,9 @@ pub async fn create_tunnel(
         public_url: None,
         localup_id: None,
         error_message: None,
+        upstream_status: "unknown".to_string(), // New tunnel, no metrics yet
+        recent_upstream_errors: None,
+        recent_request_count: None,
         created_at: result.created_at.to_rfc3339(),
         updated_at: result.updated_at.to_rfc3339(),
     })
@@ -324,6 +422,9 @@ pub async fn update_tunnel(
     let manager = state.tunnel_manager.read().await;
     let running = manager.get(&result.id);
 
+    // Compute upstream status from recent metrics
+    let upstream_info = compute_upstream_status(&state, &result.id).await;
+
     Ok(TunnelResponse {
         id: result.id.clone(),
         name: result.name,
@@ -342,6 +443,9 @@ pub async fn update_tunnel(
         public_url: running.and_then(|t| t.public_url.clone()),
         localup_id: running.and_then(|t| t.localup_id.clone()),
         error_message: running.and_then(|t| t.error_message.clone()),
+        upstream_status: upstream_info.status,
+        recent_upstream_errors: upstream_info.recent_502_count,
+        recent_request_count: upstream_info.total_count,
         created_at: result.created_at.to_rfc3339(),
         updated_at: result.updated_at.to_rfc3339(),
     })

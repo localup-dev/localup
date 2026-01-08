@@ -114,6 +114,37 @@ function getStatusBadge(status: string) {
   }
 }
 
+function getUpstreamStatusInfo(status: string | undefined): {
+  label: string;
+  color: string;
+  bgColor: string;
+  description: string;
+} {
+  switch (status?.toLowerCase()) {
+    case "up":
+      return {
+        label: "Up",
+        color: "text-emerald-400",
+        bgColor: "bg-emerald-500/20 border-emerald-500/50",
+        description: "Local service is responding",
+      };
+    case "down":
+      return {
+        label: "Down",
+        color: "text-red-400",
+        bgColor: "bg-red-500/20 border-red-500/50",
+        description: "Local service is not responding (502 errors)",
+      };
+    default:
+      return {
+        label: "Unknown",
+        color: "text-yellow-400",
+        bgColor: "bg-yellow-500/20 border-yellow-500/50",
+        description: "No recent requests to check status",
+      };
+  }
+}
+
 function getMethodBadge(method: string) {
   const colors: Record<string, string> = {
     GET: "bg-blue-500/10 text-blue-500",
@@ -926,6 +957,18 @@ export function TunnelDetail() {
             <div className="flex items-center gap-3">
               <h1 className="text-2xl font-bold">{tunnel.name}</h1>
               {getStatusBadge(tunnel.status)}
+              {/* Upstream Status Badge */}
+              {isConnected && (
+                <Badge
+                  className={`${getUpstreamStatusInfo(tunnel.upstream_status).bgColor} ${getUpstreamStatusInfo(tunnel.upstream_status).color} border`}
+                  title={getUpstreamStatusInfo(tunnel.upstream_status).description}
+                >
+                  <span className={`mr-1 ${tunnel.upstream_status === "down" ? "animate-pulse" : ""}`}>
+                    {tunnel.upstream_status === "up" ? "●" : tunnel.upstream_status === "down" ? "●" : "○"}
+                  </span>
+                  Upstream {getUpstreamStatusInfo(tunnel.upstream_status).label}
+                </Badge>
+              )}
             </div>
             <p className="text-muted-foreground">
               <span className="font-mono">{tunnel.local_host}:{tunnel.local_port}</span>

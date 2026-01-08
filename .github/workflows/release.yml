@@ -248,11 +248,48 @@ jobs:
           bun install
           bun run build
 
+      # Import Apple certificate (macOS only)
+      - name: Import Apple certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "Importing Apple certificate..."
+            CERTIFICATE_PATH=$RUNNER_TEMP/certificate.p12
+            KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+            KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+            # Decode certificate
+            echo -n "$APPLE_CERTIFICATE" | base64 --decode -o $CERTIFICATE_PATH
+
+            # Create temporary keychain
+            security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+            security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+            # Import certificate
+            security import $CERTIFICATE_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+            security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+            security list-keychain -d user -s $KEYCHAIN_PATH
+
+            echo "Certificate imported successfully"
+          else
+            echo "No Apple certificate configured, skipping code signing"
+          fi
+
       # Build Tauri app
       - name: Build Tauri app
         working-directory: apps/localup-desktop
         env:
           LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
+          # macOS code signing
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # macOS notarization
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           bun run tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle_targets }}
 
@@ -370,6 +407,12 @@ jobs:
             ### macOS
             - **Apple Silicon (M1/M2/M3)**: `LocalUp-macos-arm64.dmg`
             - **Intel**: `LocalUp-macos-amd64.dmg`
+
+            > **Note for macOS users:** The app is not yet code-signed. If you see _"LocalUp is damaged and can't be opened"_, run this command after installing:
+            > ```bash
+            > xattr -cr /Applications/LocalUp.app
+            > ```
+            > Then open the app again.
 
             ### Linux
             - **AppImage (Universal)**: `LocalUp-linux-amd64.AppImage`

@@ -111,6 +111,32 @@ const getProtocolBadgeColor = (type: string) => {
   }
 };
 
+const getUpstreamStatusInfo = (status: string | undefined): { label: string; color: string; icon: string; description: string } => {
+  switch (status?.toLowerCase()) {
+    case 'up':
+      return {
+        label: 'Up',
+        color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50',
+        icon: '●',
+        description: 'Local service is responding'
+      };
+    case 'down':
+      return {
+        label: 'Down',
+        color: 'bg-red-500/20 text-red-400 border-red-500/50',
+        icon: '●',
+        description: 'Local service is not responding (502 errors)'
+      };
+    default:
+      return {
+        label: 'Unknown',
+        color: 'bg-yellow-500/20 text-yellow-400 border-yellow-500/50',
+        icon: '○',
+        description: 'No recent requests to check status'
+      };
+  }
+};
+
 export default function TunnelDetail() {
   const { tunnelId } = useParams<{ tunnelId: string }>();
   const navigate = useNavigate();
@@ -295,7 +321,7 @@ export default function TunnelDetail() {
       {/* Compact Header with Endpoints */}
       <div className="border-b bg-card/50 backdrop-blur-sm sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 py-3">
-          {/* Top row: Back button, ID, Status */}
+          {/* Top row: Back button, ID, Status, Upstream Status */}
           <div className="flex items-center gap-3 mb-2">
             <button
               onClick={() => navigate('/tunnels')}
@@ -310,6 +336,28 @@ export default function TunnelDetail() {
             <Badge variant={getStatusVariant(tunnel.status)} className="shrink-0">
               {tunnel.status}
             </Badge>
+            {/* Upstream Status Indicator */}
+            {(() => {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const upstreamInfo = getUpstreamStatusInfo((tunnel as any).upstream_status);
+              return (
+                <div
+                  className="flex items-center gap-1.5 shrink-0"
+                  title={`Upstream: ${upstreamInfo.description}${(tunnel as any).recent_upstream_errors ? ` (${(tunnel as any).recent_upstream_errors}/${(tunnel as any).recent_request_count} errors)` : ''}`}
+                >
+                  <span className="text-xs text-muted-foreground">Upstream:</span>
+                  <Badge
+                    variant="outline"
+                    className={`${upstreamInfo.color} text-[10px] px-1.5 py-0 flex items-center gap-1`}
+                  >
+                    <span className={upstreamInfo.label === 'Down' ? 'animate-pulse' : ''}>
+                      {upstreamInfo.icon}
+                    </span>
+                    {upstreamInfo.label}
+                  </Badge>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Bottom row: Connection time + Endpoints */}

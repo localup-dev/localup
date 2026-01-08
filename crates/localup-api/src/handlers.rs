@@ -4,12 +4,106 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
 use crate::middleware::AuthUser;
 use crate::models::*;
 use crate::AppState;
+
+/// Compute upstream status by analyzing recent requests for a tunnel
+/// Returns (upstream_status, recent_502_count, total_recent_count)
+async fn compute_upstream_status(
+    db: &DatabaseConnection,
+    localup_id: &str,
+) -> (UpstreamStatus, Option<i64>, Option<i64>) {
+    use localup_relay_db::entities::prelude::*;
+    use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder};
+
+    // Look at requests from the last 60 seconds
+    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(60);
+
+    // Count recent 502 errors (Bad Gateway - indicates upstream connection failure)
+    let recent_502_count = CapturedRequest::find()
+        .filter(localup_relay_db::entities::captured_request::Column::LocalupId.eq(localup_id))
+        .filter(localup_relay_db::entities::captured_request::Column::CreatedAt.gt(cutoff))
+        .filter(localup_relay_db::entities::captured_request::Column::Status.eq(502))
+        .count(db)
+        .await
+        .unwrap_or(0) as i64;
+
+    // Count total recent requests
+    let total_recent_count = CapturedRequest::find()
+        .filter(localup_relay_db::entities::captured_request::Column::LocalupId.eq(localup_id))
+        .filter(localup_relay_db::entities::captured_request::Column::CreatedAt.gt(cutoff))
+        .count(db)
+        .await
+        .unwrap_or(0) as i64;
+
+    // Also check for pending requests (no status yet)
+    let pending_count = CapturedRequest::find()
+        .filter(localup_relay_db::entities::captured_request::Column::LocalupId.eq(localup_id))
+        .filter(localup_relay_db::entities::captured_request::Column::CreatedAt.gt(cutoff))
+        .filter(localup_relay_db::entities::captured_request::Column::Status.is_null())
+        .count(db)
+        .await
+        .unwrap_or(0) as i64;
+
+    // Determine upstream status:
+    // - Unknown: No recent requests at all
+    // - Down: Recent 502 errors (more than 50% of requests, or all recent requests are 502/pending)
+    // - Up: Has recent requests with non-502 responses
+    let upstream_status = if total_recent_count == 0 {
+        UpstreamStatus::Unknown
+    } else if recent_502_count > 0 {
+        // Check if the most recent request was a 502 or pending
+        let most_recent = CapturedRequest::find()
+            .filter(localup_relay_db::entities::captured_request::Column::LocalupId.eq(localup_id))
+            .filter(localup_relay_db::entities::captured_request::Column::CreatedAt.gt(cutoff))
+            .order_by_desc(localup_relay_db::entities::captured_request::Column::CreatedAt)
+            .one(db)
+            .await
+            .ok()
+            .flatten();
+
+        if let Some(req) = most_recent {
+            match req.status {
+                Some(502) => UpstreamStatus::Down,
+                None => UpstreamStatus::Down, // Pending request, likely upstream not responding
+                _ => {
+                    // Recent 502s but most recent succeeded - might be recovering
+                    if recent_502_count * 2 > total_recent_count {
+                        UpstreamStatus::Down
+                    } else {
+                        UpstreamStatus::Up
+                    }
+                }
+            }
+        } else {
+            UpstreamStatus::Unknown
+        }
+    } else if pending_count > 0 && pending_count == total_recent_count {
+        // All requests are pending - upstream might be slow or down
+        UpstreamStatus::Down
+    } else {
+        UpstreamStatus::Up
+    };
+
+    (
+        upstream_status,
+        if total_recent_count > 0 {
+            Some(recent_502_count)
+        } else {
+            None
+        },
+        if total_recent_count > 0 {
+            Some(total_recent_count)
+        } else {
+            None
+        },
+    )
+}
 
 /// Determine if the request came over HTTPS by checking headers
 /// Checks X-Forwarded-Proto (common for reverse proxies) and falls back to server config
@@ -83,6 +177,10 @@ pub async fn list_tunnels(
     // Add active tunnels
     for localup_id in &active_localup_ids {
         if let Some(endpoints) = state.localup_manager.get_endpoints(localup_id).await {
+            // Compute upstream status from recent requests
+            let (upstream_status, recent_upstream_errors, recent_request_count) =
+                compute_upstream_status(&state.db, localup_id).await;
+
             let tunnel = Tunnel {
                 id: localup_id.clone(),
                 endpoints: endpoints
@@ -118,9 +216,12 @@ pub async fn list_tunnels(
                     })
                     .collect(),
                 status: TunnelStatus::Connected,
+                upstream_status,
                 region: "us-east-1".to_string(), // TODO: Get from config
                 connected_at: chrono::Utc::now(), // TODO: Track actual connection time
                 local_addr: None,                // Client-side information
+                recent_upstream_errors,
+                recent_request_count,
             };
             tunnels.push(tunnel);
         }
@@ -182,9 +283,12 @@ pub async fn list_tunnels(
                 id: inactive_id.clone(),
                 endpoints: vec![], // No endpoints for inactive tunnels
                 status: TunnelStatus::Disconnected,
+                upstream_status: UpstreamStatus::Unknown, // Disconnected tunnels have unknown upstream
                 region: "unknown".to_string(),
                 connected_at: chrono::Utc::now(), // Use current time as placeholder
                 local_addr: None,
+                recent_upstream_errors: None,
+                recent_request_count: None,
             });
         }
     }
@@ -216,6 +320,10 @@ pub async fn get_tunnel(
 
     // First, check if tunnel is active in memory
     if let Some(endpoints) = state.localup_manager.get_endpoints(&id).await {
+        // Compute upstream status from recent requests
+        let (upstream_status, recent_upstream_errors, recent_request_count) =
+            compute_upstream_status(&state.db, &id).await;
+
         let tunnel = Tunnel {
             id: id.clone(),
             endpoints: endpoints
@@ -243,9 +351,12 @@ pub async fn get_tunnel(
                 })
                 .collect(),
             status: TunnelStatus::Connected,
+            upstream_status,
             region: "us-east-1".to_string(),
             connected_at: chrono::Utc::now(),
             local_addr: None,
+            recent_upstream_errors,
+            recent_request_count,
         };
 
         return Ok(Json(tunnel));
@@ -329,9 +440,12 @@ pub async fn get_tunnel(
             id: id.clone(),
             endpoints,
             status: TunnelStatus::Disconnected,
+            upstream_status: UpstreamStatus::Unknown, // Disconnected tunnels have unknown upstream
             region: "unknown".to_string(),
             connected_at: chrono::Utc::now(), // TODO: Get actual connected_at from DB
             local_addr: None,
+            recent_upstream_errors: None,
+            recent_request_count: None,
         };
 
         return Ok(Json(tunnel));

@@ -54,6 +54,18 @@ pub enum TunnelStatus {
     Error,
 }
 
+/// Upstream service status (the local service the tunnel forwards to)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum UpstreamStatus {
+    /// Upstream service is responding normally
+    Up,
+    /// Upstream service appears to be down (502 errors)
+    Down,
+    /// Upstream status is unknown (no recent requests)
+    Unknown,
+}
+
 /// Tunnel information
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Tunnel {
@@ -63,6 +75,8 @@ pub struct Tunnel {
     pub endpoints: Vec<TunnelEndpoint>,
     /// Tunnel status
     pub status: TunnelStatus,
+    /// Upstream service status (inferred from recent request errors)
+    pub upstream_status: UpstreamStatus,
     /// Tunnel region/location
     pub region: String,
     /// Connection timestamp
@@ -70,6 +84,12 @@ pub struct Tunnel {
     /// Local address being forwarded
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_addr: Option<String>,
+    /// Number of recent 502 errors (upstream connection failures)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_upstream_errors: Option<i64>,
+    /// Total recent requests analyzed for upstream status
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_request_count: Option<i64>,
 }
 
 /// Request to create a new tunnel

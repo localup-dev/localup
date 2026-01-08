@@ -37,6 +37,7 @@
     "category": "DeveloperTool",
     "shortDescription": "Tunnel management for developers",
     "longDescription": "LocalUp Desktop allows you to expose local servers to the internet through geographically distributed relay servers.",
+    "createUpdaterArtifacts": true,
     "macOS": {
       "minimumSystemVersion": "10.15",
       "dmg": {

@@ -19,6 +19,10 @@ export interface Tunnel {
   error_message: string | null;
   created_at: string;
   updated_at: string;
+  // Upstream service status
+  upstream_status: "up" | "down" | "unknown";
+  recent_upstream_errors: number | null;
+  recent_request_count: number | null;
 }
 
 export interface CapturedRequest {

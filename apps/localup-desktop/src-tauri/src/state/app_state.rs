@@ -334,6 +334,16 @@ pub async fn run_tunnel(
                 let metrics_store = client.metrics().clone();
                 {
                     let mut metrics_map = tunnel_metrics.write().await;
+                    // Note: This creates a new MetricsStore each time the tunnel reconnects
+                    // Previous metrics are lost on reconnection
+                    info!(
+                        "[{}] Storing metrics store (previous entries: {:?})",
+                        config_id,
+                        metrics_map
+                            .get(&config_id)
+                            .map(|_| "exists")
+                            .unwrap_or("none")
+                    );
                     metrics_map.insert(config_id.clone(), metrics_store.clone());
                 }
 
@@ -344,9 +354,12 @@ pub async fn run_tunnel(
 
                 let metrics_task = tokio::spawn(async move {
                     let mut rx = metrics_rx;
+                    let mut event_count = 0u64;
+                    let mut dropped_count = 0u64;
                     loop {
                         match rx.recv().await {
                             Ok(event) => {
+                                event_count += 1;
                                 // Emit event to frontend
                                 if let Some(handle) = app_handle_for_metrics.read().await.as_ref() {
                                     let payload = TunnelMetricsPayload {
@@ -356,17 +369,28 @@ pub async fn run_tunnel(
                                     if let Err(e) = handle.emit("tunnel-metrics", &payload) {
                                         warn!("Failed to emit metrics event: {}", e);
                                     }
+                                } else {
+                                    dropped_count += 1;
+                                    if dropped_count == 1 || dropped_count % 10 == 0 {
+                                        warn!(
+                                            "[{}] App handle not set, dropping metrics event ({} dropped so far)",
+                                            config_id_for_metrics, dropped_count
+                                        );
+                                    }
                                 }
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 debug!(
-                                    "Metrics channel closed for tunnel {}",
-                                    config_id_for_metrics
+                                    "[{}] Metrics channel closed (total events: {}, dropped: {})",
+                                    config_id_for_metrics, event_count, dropped_count
                                 );
                                 break;
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                                warn!("Metrics receiver lagged {} messages", n);
+                                warn!(
+                                    "[{}] Metrics receiver lagged {} messages (events so far: {})",
+                                    config_id_for_metrics, n, event_count
+                                );
                             }
                         }
                     }

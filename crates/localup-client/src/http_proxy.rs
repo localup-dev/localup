@@ -237,7 +237,7 @@ impl HttpProxy {
         let start_time = Instant::now();
 
         // Parse the request
-        let (request, _header_len) = Self::parse_request(data)?;
+        let (request, header_len) = Self::parse_request(data)?;
 
         let method = request.method().to_string();
         let uri = request.uri().to_string();
@@ -247,6 +247,24 @@ impl HttpProxy {
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
 
+        // Extract request body for metrics (only capture text/json content up to 512KB)
+        let request_body = if header_len < data.len() {
+            let body_data = &data[header_len..];
+            let content_type = req_headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("");
+            let is_text = is_text_content_type(content_type);
+            if is_text && body_data.len() <= 512 * 1024 {
+                Some(body_data.to_vec())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Record the request in metrics
         let metric_id = self
             .metrics
@@ -255,7 +273,7 @@ impl HttpProxy {
                 method.clone(),
                 uri.clone(),
                 req_headers,
-                None, // Body captured separately if needed
+                request_body,
             )
             .await;
 
