@@ -284,6 +284,9 @@ jobs:
         working-directory: apps/localup-desktop
         env:
           LOCALUP_VERSION: ${{ steps.get_version.outputs.VERSION }}
+          # Tauri updater signing
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           # macOS code signing
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           # macOS notarization
@@ -305,19 +308,40 @@ jobs:
           fi
 
           echo "Looking for bundles in: $BUNDLE_DIR"
-          ls -la "$BUNDLE_DIR" 2>/dev/null || echo "Bundle dir not found"
+          ls -laR "$BUNDLE_DIR" 2>/dev/null || echo "Bundle dir not found"
 
-          # macOS DMG
+          # macOS DMG + signature
           if ls "$BUNDLE_DIR/dmg/"*.dmg 1> /dev/null 2>&1; then
             for f in "$BUNDLE_DIR/dmg/"*.dmg; do
               cp "$f" "release/LocalUp-${{ matrix.platform }}.dmg"
             done
           fi
+          if ls "$BUNDLE_DIR/dmg/"*.dmg.sig 1> /dev/null 2>&1; then
+            for f in "$BUNDLE_DIR/dmg/"*.dmg.sig; do
+              cp "$f" "release/LocalUp-${{ matrix.platform }}.dmg.sig"
+            done
+          fi
 
-          # Linux AppImage
+          # Linux AppImage + signature (tar.gz format for updater)
           if ls "$BUNDLE_DIR/appimage/"*.AppImage 1> /dev/null 2>&1; then
             for f in "$BUNDLE_DIR/appimage/"*.AppImage; do
               cp "$f" "release/LocalUp-${{ matrix.platform }}.AppImage"
+            done
+          fi
+          if ls "$BUNDLE_DIR/appimage/"*.AppImage.sig 1> /dev/null 2>&1; then
+            for f in "$BUNDLE_DIR/appimage/"*.AppImage.sig; do
+              cp "$f" "release/LocalUp-${{ matrix.platform }}.AppImage.sig"
+            done
+          fi
+          # Also check for tar.gz (Tauri updater format)
+          if ls "$BUNDLE_DIR/appimage/"*.AppImage.tar.gz 1> /dev/null 2>&1; then
+            for f in "$BUNDLE_DIR/appimage/"*.AppImage.tar.gz; do
+              cp "$f" "release/LocalUp-${{ matrix.platform }}.AppImage.tar.gz"
+            done
+          fi
+          if ls "$BUNDLE_DIR/appimage/"*.AppImage.tar.gz.sig 1> /dev/null 2>&1; then
+            for f in "$BUNDLE_DIR/appimage/"*.AppImage.tar.gz.sig; do
+              cp "$f" "release/LocalUp-${{ matrix.platform }}.AppImage.tar.gz.sig"
             done
           fi
 
@@ -366,8 +390,8 @@ jobs:
           find artifacts/ -type f \( -name "*.tar.gz" -o -name "checksums-*.txt" \) \
             -exec cp {} release/ \;
 
-          # Desktop app artifacts (DMG, AppImage, deb)
-          find artifacts/ -type f \( -name "*.dmg" -o -name "*.AppImage" -o -name "*.deb" \) \
+          # Desktop app artifacts (DMG, AppImage, deb) and their signatures
+          find artifacts/ -type f \( -name "*.dmg" -o -name "*.dmg.sig" -o -name "*.AppImage" -o -name "*.AppImage.sig" -o -name "*.AppImage.tar.gz" -o -name "*.AppImage.tar.gz.sig" -o -name "*.deb" \) \
             -exec cp {} release/ \;
 
           # Create a combined checksums file
@@ -383,7 +407,9 @@ jobs:
         id: get_version
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
+          VERSION_NUM=${VERSION#v}
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "VERSION_NUM=$VERSION_NUM" >> $GITHUB_OUTPUT
 
           # Detect if this is a pre-release (contains alpha, beta, rc, or has dash followed by non-numeric)
           if [[ "$VERSION" =~ (alpha|beta|rc|-[a-zA-Z]) ]]; then
@@ -391,6 +417,53 @@ jobs:
           else
             echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Create latest.json for auto-updater
+        run: |
+          VERSION="${{ steps.get_version.outputs.VERSION_NUM }}"
+          RELEASE_URL="https://github.com/localup-dev/localup/releases/download/${{ steps.get_version.outputs.VERSION }}"
+          PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          # Read signatures from .sig files
+          MACOS_ARM64_SIG=""
+          MACOS_AMD64_SIG=""
+          LINUX_AMD64_SIG=""
+
+          if [ -f "release/LocalUp-macos-arm64.dmg.sig" ]; then
+            MACOS_ARM64_SIG=$(cat release/LocalUp-macos-arm64.dmg.sig)
+          fi
+          if [ -f "release/LocalUp-macos-amd64.dmg.sig" ]; then
+            MACOS_AMD64_SIG=$(cat release/LocalUp-macos-amd64.dmg.sig)
+          fi
+          if [ -f "release/LocalUp-linux-amd64.AppImage.tar.gz.sig" ]; then
+            LINUX_AMD64_SIG=$(cat release/LocalUp-linux-amd64.AppImage.tar.gz.sig)
+          fi
+
+          # Create latest.json
+          cat > release/latest.json << EOF
+          {
+            "version": "${VERSION}",
+            "notes": "See the release notes at ${RELEASE_URL}",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "darwin-aarch64": {
+                "url": "${RELEASE_URL}/LocalUp-macos-arm64.dmg",
+                "signature": "${MACOS_ARM64_SIG}"
+              },
+              "darwin-x86_64": {
+                "url": "${RELEASE_URL}/LocalUp-macos-amd64.dmg",
+                "signature": "${MACOS_AMD64_SIG}"
+              },
+              "linux-x86_64": {
+                "url": "${RELEASE_URL}/LocalUp-linux-amd64.AppImage.tar.gz",
+                "signature": "${LINUX_AMD64_SIG}"
+              }
+            }
+          }
+          EOF
+
+          echo "Created latest.json:"
+          cat release/latest.json
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -478,10 +551,14 @@ jobs:
           files: |
             release/*.tar.gz
             release/*.dmg
+            release/*.dmg.sig
             release/*.AppImage
+            release/*.AppImage.tar.gz
+            release/*.AppImage.tar.gz.sig
             release/*.deb
             release/checksums-*.txt
             release/SHA256SUMS.txt
+            release/latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
