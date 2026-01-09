@@ -220,6 +220,9 @@ pub async fn list_tunnels(state: State<'_, AppState>) -> Result<Vec<TunnelRespon
             ("disconnected".to_string(), None, None, None)
         };
 
+        // Compute upstream status from recent metrics
+        let upstream_info = compute_upstream_status(&state, &config.id).await;
+
         result.push(TunnelResponse {
             id: config.id.clone(),
             name: config.name,
@@ -237,6 +240,9 @@ pub async fn list_tunnels(state: State<'_, AppState>) -> Result<Vec<TunnelRespon
             public_url,
             localup_id,
             error_message,
+            upstream_status: upstream_info.status,
+            recent_upstream_errors: upstream_info.recent_502_count,
+            recent_request_count: upstream_info.total_count,
             created_at: config.created_at.to_rfc3339(),
             updated_at: config.updated_at.to_rfc3339(),
         });
