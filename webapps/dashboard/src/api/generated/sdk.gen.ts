@@ -2,7 +2,7 @@
 
 import type { Client, Options as Options2, TDataShape } from './client';
 import { client } from './client.gen';
-import type { HandleApiClearData, HandleApiClearResponses, HandleApiMetricByIdData, HandleApiMetricByIdErrors, HandleApiMetricByIdResponses, HandleApiMetricsData, HandleApiMetricsResponses, HandleApiReplayData, HandleApiReplayErrors, HandleApiReplayResponses, HandleApiStatsData, HandleApiStatsResponses, HandleApiTcpConnectionByIdData, HandleApiTcpConnectionByIdErrors, HandleApiTcpConnectionByIdResponses, HandleApiTcpConnectionsData, HandleApiTcpConnectionsResponses } from './types.gen';
+import type { HandleApiClearData, HandleApiClearResponses, HandleApiMetricByIdData, HandleApiMetricByIdErrors, HandleApiMetricByIdResponses, HandleApiMetricsData, HandleApiMetricsResponses, HandleApiReplayData, HandleApiReplayErrors, HandleApiReplayResponses, HandleApiReplayByIdData, HandleApiReplayByIdErrors, HandleApiReplayByIdResponses, HandleApiStatsData, HandleApiStatsResponses, HandleApiTcpConnectionByIdData, HandleApiTcpConnectionByIdErrors, HandleApiTcpConnectionByIdResponses, HandleApiTcpConnectionsData, HandleApiTcpConnectionsResponses } from './types.gen';
 
 export type Options<TData extends TDataShape = TDataShape, ThrowOnError extends boolean = boolean> = Options2<TData, ThrowOnError> & {
     /**
@@ -102,6 +102,19 @@ export const handleApiTcpConnections = <ThrowOnError extends boolean = false>(op
 export const handleApiTcpConnectionById = <ThrowOnError extends boolean = false>(options: Options<HandleApiTcpConnectionByIdData, ThrowOnError>) => {
     return (options.client ?? client).get<HandleApiTcpConnectionByIdResponses, HandleApiTcpConnectionByIdErrors, ThrowOnError>({
         url: '/api/tcp/connections/{id}',
+        ...options
+    });
+};
+
+/**
+ * Replay a captured request by ID
+ *
+ * Looks up a captured HTTP request by its ID and replays it to the local upstream server.
+ * The original request body stored in the backend is used.
+ */
+export const handleApiReplayById = <ThrowOnError extends boolean = false>(options: Options<HandleApiReplayByIdData, ThrowOnError>) => {
+    return (options.client ?? client).post<HandleApiReplayByIdResponses, HandleApiReplayByIdErrors, ThrowOnError>({
+        url: '/api/metrics/{id}/replay',
         ...options
     });
 };

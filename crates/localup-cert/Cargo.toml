@@ -1,0 +1,40 @@
+[package]
+name = "localup-cert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# ACME/Let's Encrypt
+instant-acme = { workspace = true }
+
+# TLS
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# Self-signed certificate generation
+rcgen = "0.13"
+time = "0.3"
+rand = "0.8"
+
+# Async runtime
+tokio = { workspace = true }
+
+# Utilities
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+testcontainers = "0.23"
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
+# Enable ring for Rustls crypto in tests
+rustls = { workspace = true, features = ["ring"] }

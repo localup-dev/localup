@@ -1,0 +1,37 @@
+[package]
+name = "localup-transport-websocket"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Internal dependencies
+localup-proto = { path = "../localup-proto" }
+localup-transport = { path = "../localup-transport" }
+localup-cert = { path = "../localup-cert" }
+
+# Async runtime
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+
+# WebSocket
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util = { workspace = true }
+
+# TLS
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+uuid = { version = "1.11", features = ["v4"] }
+url = "2.5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }

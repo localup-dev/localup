@@ -1,0 +1,37 @@
+[package]
+name = "localup-server-tcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Internal dependencies
+localup-proto = { path = "../localup-proto" }
+localup-router = { path = "../localup-router" }
+localup-connection = { path = "../localup-connection" }
+localup-control = { path = "../localup-control" }
+localup-relay-db = { path = "../localup-relay-db" }
+localup-transport = { path = "../localup-transport" }
+localup-transport-quic = { path = "../localup-transport-quic" }
+localup-http-auth = { path = "../localup-http-auth" }
+
+# Async runtime
+tokio = { workspace = true, features = ["net", "io-util", "sync"] }
+
+# Utilities
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+rand = "0.8"
+uuid = { workspace = true }
+chrono = { workspace = true }
+serde_json = { workspace = true }
+
+# Database
+sea-orm = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

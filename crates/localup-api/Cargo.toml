@@ -1,0 +1,68 @@
+[package]
+name = "localup-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace crates
+localup-control = { path = "../localup-control" }
+localup-proto = { path = "../localup-proto", features = ["openapi"] }
+localup-auth = { path = "../localup-auth" }
+localup-relay-db = { path = "../localup-relay-db" }
+localup-cert = { path = "../localup-cert" }
+localup-router = { path = "../localup-router" }
+
+# Web framework
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+
+# OpenAPI
+utoipa = { workspace = true }
+utoipa-axum = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# TLS
+rustls = { workspace = true }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Utilities
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+base64 = "0.22"
+
+# Database
+sea-orm = { workspace = true }
+
+# Static file embedding
+rust-embed = "8.5.0"
+mime_guess = "2.0"
+
+# Cryptography
+sha2 = "0.10"
+x509-parser = "0.16"
+
+# HTTP client for pre-validation
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+
+# DNS resolver for pre-validation
+hickory-resolver = "0.24"
+
+[dev-dependencies]
+tokio = { workspace = true }
+sea-orm-migration = { workspace = true }
+tower = { workspace = true }

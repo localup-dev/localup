@@ -11,10 +11,9 @@ env:
   RUST_VERSION: "1.90.0" # Pin Rust version for reproducible builds
 
 jobs:
-  test:
-    name: Test Suite
+  build-webapps:
+    name: Build Web Applications
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -36,28 +35,71 @@ jobs:
           bun install
           bun run build
 
+      - name: Upload webapp artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapps-ci
+          path: |
+            webapps/dashboard/dist
+            webapps/exit-node-portal/dist
+          retention-days: 1
+
+  build-nodejs-sdk:
+    name: Build & Test Node.js SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/nodejs
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run linting
+        run: bun run lint
+
+      - name: Run tests
+        run: bun test
+
+      - name: Build package
+        run: bun run build:all
+
+      - name: Verify package (dry run)
+        run: npm pack --dry-run
+
+  test:
+    name: Test Suite
+    needs: build-webapps
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download webapp artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: webapps-ci
+          path: webapps/
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache Cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-target-test-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: "ci"
+          cache-targets: true
+          cache-on-failure: true
 
       - name: Build workspace (all crates)
         run: cargo build --workspace --verbose
@@ -67,34 +109,31 @@ jobs:
 
   lint:
     name: Linting
+    needs: build-webapps
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Download webapp artifacts
+        uses: actions/download-artifact@v4
         with:
-          bun-version: latest
-
-      - name: Build dashboard webapp
-        run: |
-          cd webapps/dashboard
-          bun install
-          bun run build
-
-      - name: Build exit-node-portal webapp
-        run: |
-          cd webapps/exit-node-portal
-          bun install
-          bun run build
+          name: webapps-ci
+          path: webapps/
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+          cache-targets: true
+          cache-on-failure: true
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -104,51 +143,74 @@ jobs:
 
   build:
     name: Build Check
+    needs: build-webapps
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Download webapp artifacts
+        uses: actions/download-artifact@v4
         with:
-          bun-version: latest
-
-      - name: Build dashboard webapp
-        run: |
-          cd webapps/dashboard
-          bun install
-          bun run build
-
-      - name: Build exit-node-portal webapp
-        run: |
-          cd webapps/exit-node-portal
-          bun install
-          bun run build
+          name: webapps-ci
+          path: webapps/
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
 
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
         with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache Cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache target directory
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-target-build-${{ hashFiles('**/Cargo.lock') }}
+          shared-key: "ci"
+          cache-targets: true
+          cache-on-failure: true
 
       - name: Build workspace
         run: cargo build --release --workspace --verbose
+
+  cli-e2e:
+    name: CLI E2E Tests
+    needs: [build, build-webapps]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download webapp artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: webapps-ci
+          path: webapps/
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+          cache-targets: true
+          cache-on-failure: true
+
+      - name: Build binaries in release mode
+        run: cargo build --release --bins --workspace
+
+      - name: Add binaries to PATH
+        run: echo "${{ github.workspace }}/target/release" >> $GITHUB_PATH
+
+      - name: Run CLI E2E tests
+        run: bash .github/scripts/test-cli.sh
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-test-logs
+          path: /tmp/test_output.txt
+          retention-days: 7

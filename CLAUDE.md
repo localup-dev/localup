@@ -12,20 +12,20 @@ This is a **geo-distributed tunnel library** written in Rust that enables develo
 
 This is a Rust workspace with 12 focused crates, each with a single responsibility:
 
-- **`tunnel-proto`**: Protocol definitions, message types, frame format, codec
-- **`tunnel-client`**: Public client library API (main entry point for users)
-- **`tunnel-connection`**: Connection management, QUIC transport, multiplexing, reconnection
-- **`tunnel-auth`**: Authentication and JWT handling
-- **`tunnel-router`**: Routing logic (TCP port-based, SNI-based, HTTP host-based)
-- **`tunnel-server-tcp`**: TCP tunnel server implementation
-- **`tunnel-server-tls`**: TLS/SNI tunnel server with passthrough (no termination)
-- **`tunnel-server-https`**: HTTPS server with TLS termination and HTTP/1.1, HTTP/2
-- **`tunnel-cert`**: Certificate management, ACME/Let's Encrypt integration
-- **`tunnel-control`**: Control plane orchestration, tunnel registry, exit node selection
-- **`tunnel-exit-node`**: Exit node orchestrator that coordinates all server types
-- **`tunnel-cli`**: Command-line tool for users
-- **`tunnel-relay-db`**: Database layer using SeaORM for request/response storage and traffic inspection
-- **`tunnel-api`**: REST API with OpenAPI documentation for managing tunnels and viewing traffic
+- **`localup-proto`**: Protocol definitions, message types, frame format, codec
+- **`localup-client`**: Public client library API (main entry point for users)
+- **`localup-connection`**: Connection management, QUIC transport, multiplexing, reconnection
+- **`localup-auth`**: Authentication and JWT handling
+- **`localup-router`**: Routing logic (TCP port-based, SNI-based, HTTP host-based)
+- **`localup-server-tcp`**: TCP tunnel server implementation
+- **`localup-server-tls`**: TLS/SNI tunnel server with passthrough (no termination)
+- **`localup-server-https`**: HTTPS server with TLS termination and HTTP/1.1, HTTP/2
+- **`localup-cert`**: Certificate management, ACME/Let's Encrypt integration
+- **`localup-control`**: Control plane orchestration, tunnel registry, exit node selection
+- **`localup-exit-node`**: Exit node orchestrator that coordinates all server types
+- **`localup-cli`**: Command-line tool for users
+- **`localup-relay-db`**: Database layer using SeaORM for request/response storage and traffic inspection
+- **`localup-api`**: REST API with OpenAPI documentation for managing tunnels and viewing traffic
 
 ## Common Commands
 
@@ -35,7 +35,7 @@ This is a Rust workspace with 12 focused crates, each with a single responsibili
 cargo build
 
 # Build specific crate
-cargo build -p tunnel-client
+cargo build -p localup-client
 
 # Build with release optimizations
 cargo build --release
@@ -47,10 +47,10 @@ cargo build --release
 cargo test
 
 # Run tests for specific crate
-cargo test -p tunnel-proto
+cargo test -p localup-proto
 
 # Run specific test
-cargo test test_tcp_tunnel_basic
+cargo test test_tcp_localup_basic
 
 # Run tests with output
 cargo test -- --nocapture
@@ -82,16 +82,16 @@ These are the exact commands used in the CI workflow (`.github/workflows/ci.yml`
 ### Running
 ```bash
 # Run exit node binary (defaults to in-memory SQLite)
-cargo run -p tunnel-exit-node
+cargo run -p localup-exit-node
 
 # Run exit node with persistent SQLite
-cargo run -p tunnel-exit-node -- --database-url "sqlite://./tunnel.db?mode=rwc"
+cargo run -p localup-exit-node -- --database-url "sqlite://./tunnel.db?mode=rwc"
 
 # Run exit node with PostgreSQL
-cargo run -p tunnel-exit-node -- --database-url "postgres://user:pass@localhost/tunnel_db"
+cargo run -p localup-exit-node -- --database-url "postgres://user:pass@localhost/localup_db"
 
 # Run CLI tool
-cargo run -p tunnel-cli -- --help
+cargo run -p localup-cli -- --help
 ```
 
 ## Architecture Overview
@@ -183,7 +183,7 @@ Use `thiserror` for custom error types. Each crate defines its own error types w
 Everything uses Tokio. Never use `std::sync` primitives - use `tokio::sync` instead.
 
 ### Message Types
-Protocol messages are defined in `tunnel-proto/src/messages.rs` and serialized using `bincode`. All messages implement `Serialize` and `Deserialize`.
+Protocol messages are defined in `localup-proto/src/messages.rs` and serialized using `bincode`. All messages implement `Serialize` and `Deserialize`.
 
 ### Axum Routing (0.8+)
 
@@ -231,7 +231,7 @@ When addressing warnings, always understand **why** they exist:
 **Test Coverage Requirements**:
 
 - **All crates**: ≥75% test coverage (minimum, non-negotiable)
-- **Core libraries**: >90% test coverage (tunnel-transport, tunnel-proto, tunnel-router, tunnel-auth, tunnel-relay-db)
+- **Core libraries**: >90% test coverage (localup-transport, localup-proto, localup-router, localup-auth, localup-relay-db)
 
 #### Test Types
 
@@ -255,14 +255,14 @@ When addressing warnings, always understand **why** they exist:
 cargo test
 
 # Run tests for specific crate
-cargo test -p tunnel-transport
-cargo test -p tunnel-transport-quic
+cargo test -p localup-transport
+cargo test -p localup-transport-quic
 
 # Run only unit tests
-cargo test --lib -p tunnel-transport
+cargo test --lib -p localup-transport
 
 # Run only integration tests
-cargo test --test integration -p tunnel-transport-quic
+cargo test --test integration -p localup-transport-quic
 
 # Run with output
 cargo test -- --nocapture
@@ -280,10 +280,10 @@ To check test coverage, use `cargo-tarpaulin`:
 cargo install cargo-tarpaulin
 
 # Check coverage for a specific crate
-cargo tarpaulin -p tunnel-transport --out Stdout
+cargo tarpaulin -p localup-transport --out Stdout
 
 # Check coverage for multiple crates
-cargo tarpaulin -p tunnel-transport -p tunnel-transport-quic --out Html
+cargo tarpaulin -p localup-transport -p localup-transport-quic --out Html
 ```
 
 #### Test Guidelines
@@ -295,7 +295,7 @@ cargo tarpaulin -p tunnel-transport -p tunnel-transport-quic --out Html
   - Must test from user perspective (how would a developer use this crate?)
   - Must test real component interactions, not just mocks
   - Must cover error scenarios and edge cases
-  - Example: For `tunnel-control`, test actual TCP connections, message serialization, authentication flows
+  - Example: For `localup-control`, test actual TCP connections, message serialization, authentication flows
 - **Use `#[tokio::test]`** for async tests
 - **For QUIC tests**, certificates in workspace root (`cert.pem`, `key.pem`) are used
 
@@ -325,10 +325,10 @@ Every crate with a public API **must** have integration tests in `tests/` direct
    - Real database operations (with in-memory DB)
    - Real async runtime behavior
 
-**Example Structure** (`crates/tunnel-control/tests/integration.rs`):
+**Example Structure** (`crates/localup-control/tests/integration.rs`):
 ```rust
 #[tokio::test]
-async fn test_basic_http_tunnel_connection() {
+async fn test_basic_http_localup_connection() {
     // Setup: Start real TCP server
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -474,7 +474,7 @@ mod tests {
 }
 
 // Integration tests in tests/integration.rs
-use tunnel_transport::*;
+use localup_transport::*;
 
 #[tokio::test]
 async fn test_end_to_end_flow() {
@@ -487,49 +487,49 @@ async fn test_end_to_end_flow() {
 Different crate types have different coverage requirements based on their criticality:
 
 **Tier 1: Core Infrastructure (≥80% required)**
-- `tunnel-transport` - Transport abstraction layer
-- `tunnel-proto` - Protocol definitions
-- `tunnel-router` - Routing logic
-- `tunnel-auth` - Authentication/authorization
-- `tunnel-relay-db` - Database layer (CRITICAL: currently 0%)
-- `tunnel-exit-node` - Orchestration (CRITICAL: currently 0%)
+- `localup-transport` - Transport abstraction layer
+- `localup-proto` - Protocol definitions
+- `localup-router` - Routing logic
+- `localup-auth` - Authentication/authorization
+- `localup-relay-db` - Database layer (CRITICAL: currently 0%)
+- `localup-exit-node` - Orchestration (CRITICAL: currently 0%)
 
 **Tier 2: Server Components (≥60% required)**
-- `tunnel-server-tcp` - TCP server
-- `tunnel-server-tls` - TLS/SNI server
-- `tunnel-server-https` - HTTPS server
-- `tunnel-control` - Control plane
-- `tunnel-connection` - Connection management
+- `localup-server-tcp` - TCP server
+- `localup-server-tls` - TLS/SNI server
+- `localup-server-https` - HTTPS server
+- `localup-control` - Control plane
+- `localup-connection` - Connection management
 
 **Tier 3: Client & Tools (≥50% required)**
-- `tunnel-client` - Client library
-- `tunnel-cli` - CLI tool
-- `tunnel-cert` - Certificate management
-- `tunnel-api` - REST API
+- `localup-client` - Client library
+- `localup-cli` - CLI tool
+- `localup-cert` - Certificate management
+- `localup-api` - REST API
 
 **Current Status (as of last check)**:
 
 | Crate | Current | Target | Status |
 |-------|---------|--------|--------|
-| tunnel-transport | 95% | 80% | ✅ Exceeds |
-| tunnel-transport-quic | 72% | 75% | ⚠️ Close |
-| tunnel-router | 80% | 80% | ✅ Meets |
-| tunnel-proto | 75% | 80% | ⚠️ Close |
-| tunnel-auth | 80% | 80% | ✅ Meets |
-| tunnel-cli | 85% | 50% | ✅ Exceeds |
-| tunnel-cert | 70% | 50% | ✅ Exceeds |
-| **tunnel-relay-db** | **0%** | **80%** | ❌ **BLOCKER** |
-| **tunnel-exit-node** | **0%** | **80%** | ❌ **BLOCKER** |
-| tunnel-control | 20% | 60% | ❌ Insufficient |
-| tunnel-connection | 15% | 60% | ❌ Insufficient |
-| tunnel-client | 50% | 50% | ✅ Meets |
-| tunnel-api | 25% | 50% | ❌ Insufficient |
+| localup-transport | 95% | 80% | ✅ Exceeds |
+| localup-transport-quic | 72% | 75% | ⚠️ Close |
+| localup-router | 80% | 80% | ✅ Meets |
+| localup-proto | 75% | 80% | ⚠️ Close |
+| localup-auth | 80% | 80% | ✅ Meets |
+| localup-cli | 85% | 50% | ✅ Exceeds |
+| localup-cert | 70% | 50% | ✅ Exceeds |
+| **localup-relay-db** | **0%** | **80%** | ❌ **BLOCKER** |
+| **localup-exit-node** | **0%** | **80%** | ❌ **BLOCKER** |
+| localup-control | 20% | 60% | ❌ Insufficient |
+| localup-connection | 15% | 60% | ❌ Insufficient |
+| localup-client | 50% | 50% | ✅ Meets |
+| localup-api | 25% | 50% | ❌ Insufficient |
 
 **Total workspace tests: 103** (102 passing, 1 failing benchmark)
 
 ## Important Constants
 
-- `PROTOCOL_VERSION`: Current protocol version (defined in `tunnel-proto`)
+- `PROTOCOL_VERSION`: Current protocol version (defined in `localup-proto`)
 - `MAX_FRAME_SIZE`: 16MB maximum frame size
 - `CONTROL_STREAM_ID`: Stream 0 reserved for control messages
 
@@ -552,7 +552,7 @@ The system uses **SeaORM** for database operations, supporting multiple backends
 ### Exit Nodes (Production)
 - **PostgreSQL with TimescaleDB** (recommended): Optimized for time-series data
   ```bash
-  --database-url "postgres://user:pass@localhost/tunnel_db"
+  --database-url "postgres://user:pass@localhost/localup_db"
   ```
 - **PostgreSQL**: Standard relational database without TimescaleDB
 - **SQLite3**: Lightweight option for development or small deployments
@@ -564,7 +564,7 @@ The system uses **SeaORM** for database operations, supporting multiple backends
 - **In-memory SQLite** (default): No persistence, data lost on restart
   ```bash
   # Automatic if --database-url not specified
-  cargo run -p tunnel-exit-node
+  cargo run -p localup-exit-node
   ```
 
 ### Clients
@@ -575,7 +575,7 @@ The system uses **SeaORM** for database operations, supporting multiple backends
 
 ### Schema
 
-The `tunnel-relay-db` crate contains:
+The `localup-relay-db` crate contains:
 - **Entities**: SeaORM models (e.g., `CapturedRequest`)
 - **Migrations**: Automatic schema setup with `sea-orm-migration`
 - **TimescaleDB support**: Automatic hypertable creation for PostgreSQL (if extension available)
@@ -584,14 +584,14 @@ Migrations run automatically on startup. The `captured_requests` table stores:
 - Full HTTP request/response data (headers, body, status)
 - Timestamps for time-series queries
 - Latency metrics
-- Indexes on `tunnel_id` and `created_at`
+- Indexes on `localup_id` and `created_at`
 
 ### Reconnection Support
 
 Both port allocations (TCP) and route registrations (HTTP/HTTPS subdomains) use a **reservation system** with TTL:
 
 - **On disconnect**: Resources are marked as "reserved" (default: 5 minutes TTL)
-- **On reconnect**: If the same `tunnel_id` reconnects within the TTL window, it receives the same port/subdomain
+- **On reconnect**: If the same `localup_id` reconnects within the TTL window, it receives the same port/subdomain
 - **After TTL expires**: A background cleanup task frees the resources for reuse
 
 This ensures clients can reconnect with the same public URLs after temporary network interruptions.
@@ -600,18 +600,18 @@ This ensures clients can reconnect with the same public URLs after temporary net
 
 ### Adding a New Feature
 1. Identify which crate(s) the feature belongs to
-2. Update protocol messages if needed (`tunnel-proto`)
+2. Update protocol messages if needed (`localup-proto`)
 3. Implement in appropriate crate(s)
 4. Add unit tests in the same file
 5. Add integration tests in `tests/` directory
 6. Update documentation
 
 ### Adding a New Protocol
-1. Define message types in `tunnel-proto/src/messages.rs`
-2. Add routing logic in `tunnel-router`
-3. Create new server crate `tunnel-server-{protocol}`
+1. Define message types in `localup-proto/src/messages.rs`
+2. Add routing logic in `localup-router`
+3. Create new server crate `localup-server-{protocol}`
 4. Integrate with exit node orchestrator
-5. Add client-side support in `tunnel-client`
+5. Add client-side support in `localup-client`
 
 ## Web Applications
 
@@ -799,32 +799,32 @@ Current milestone: Phase 1-2 (Core protocol and TCP tunnel implementation)
 - Support: 1000+ concurrent connections per tunnel
 - Throughput: 10,000+ requests/second per exit node
 
-## tunnel-lib: Public API Crate
+## localup-lib: Public API Crate
 
-**`tunnel-lib`** is the high-level public API crate for Rust applications that want to integrate tunnel functionality. It re-exports all the focused crates, providing a unified entry point.
+**`localup-lib`** is the high-level public API crate for Rust applications that want to integrate tunnel functionality. It re-exports all the focused crates, providing a unified entry point.
 
 ### Purpose
 
-- **For tunnel clients**: Use `TunnelClient` directly from `tunnel-lib` instead of importing from `tunnel-client`
+- **For tunnel clients**: Use `TunnelClient` directly from `localup-lib` instead of importing from `localup-client`
 - **For custom relays**: Build custom relay servers using the server components (`TunnelHandler`, `HttpsServer`, etc.)
-- **Single dependency**: Applications only need to add `tunnel-lib` instead of multiple crate dependencies
+- **Single dependency**: Applications only need to add `localup-lib` instead of multiple crate dependencies
 
 ### Maintenance Guidelines
 
-**IMPORTANT**: `tunnel-lib` must be kept up-to-date whenever you make changes to other crates. This is a **MANDATORY** requirement.
+**IMPORTANT**: `localup-lib` must be kept up-to-date whenever you make changes to other crates. This is a **MANDATORY** requirement.
 
-1. **When adding new public types to any crate**, add the re-export to [tunnel-lib/src/lib.rs](crates/tunnel-lib/src/lib.rs)
+1. **When adding new public types to any crate**, add the re-export to [localup-lib/src/lib.rs](crates/localup-lib/src/lib.rs)
 2. **When removing/renaming public types**, update the re-exports accordingly
-3. **After any API changes**, run `cargo build -p tunnel-lib` to ensure it compiles
+3. **After any API changes**, run `cargo build -p localup-lib` to ensure it compiles
 4. **Only re-export public types** - do not re-export internal/private types
 
 ### Structure
 
 ```rust
-// tunnel-lib/src/lib.rs
-pub use tunnel_client::{TunnelClient, TunnelConfig, ...};  // Client API
-pub use tunnel_control::{TunnelHandler, ...};               // Relay API  
-pub use tunnel_server_https::{HttpsServer, ...};           // Server components
+// localup-lib/src/lib.rs
+pub use localup_client::{TunnelClient, TunnelConfig, ...};  // Client API
+pub use localup_control::{TunnelHandler, ...};               // Relay API
+pub use localup_server_https::{HttpsServer, ...};           // Server components
 // ... etc
 ```
 
@@ -833,10 +833,10 @@ pub use tunnel_server_https::{HttpsServer, ...};           // Server components
 ```rust
 // Cargo.toml
 [dependencies]
-tunnel-lib = { path = "../tunnel-lib" }
+localup-lib = { path = "../localup-lib" }
 
 // main.rs
-use tunnel_lib::{TunnelClient, ProtocolConfig, TunnelConfig};
+use localup_lib::{TunnelClient, ProtocolConfig, TunnelConfig};
 
 let config = TunnelConfig {
     relay_addr: "localhost:4443".to_string(),
@@ -854,11 +854,364 @@ client.wait().await?;
 
 ### Verification
 
-Always verify `tunnel-lib` compiles after making changes:
+Always verify `localup-lib` compiles after making changes:
 
 ```bash
-cargo build -p tunnel-lib
+cargo build -p localup-lib
 cargo build --all-targets  # Ensure entire workspace compiles
 ```
 
-**Zero warnings policy applies** to `tunnel-lib` just like all other crates.
+**Zero warnings policy applies** to `localup-lib` just like all other crates.
+
+## Documentation and File Organization
+
+### Markdown Files
+
+**Guideline**: All markdown files created during development without explicit user request should be placed in the `thoughts/` folder at the repository root.
+
+This keeps the root directory clean while preserving internal documentation and analysis:
+
+```
+localup-dev/
+├── thoughts/
+│   ├── SNI_ANALYSIS.md          # Analysis and research notes
+│   ├── ARCHITECTURE_NOTES.md    # Architecture discussions
+│   ├── IMPLEMENTATION_PLAN.md   # Implementation planning
+│   ├── TEST_SUMMARY.md          # Test documentation
+│   └── [other-documentation]/   # Other internal docs
+├── docs/                         # User-facing documentation
+├── README.md                     # Project readme (root level, explicit)
+├── CLAUDE.md                     # This file (root level, explicit)
+└── [source files]/
+```
+
+**Exception**: User-requested documentation at the repository root (e.g., when user explicitly asks for a README or specific documentation file) may be placed at the root.
+
+**Examples**:
+- ✅ Internal SNI analysis → `thoughts/SNI_ANALYSIS.md`
+- ✅ Test summaries → `thoughts/TEST_SUMMARY.md`
+- ✅ Implementation notes → `thoughts/IMPLEMENTATION_NOTES.md`
+- ✅ Exploration findings → `thoughts/CODEBASE_EXPLORATION.md`
+- ❌ Root-level documentation without explicit request
+
+## Docker Setup (Session: HTTPS Certificate Support)
+
+### Files Created/Modified
+
+**Docker Files:**
+- **`Dockerfile`** (multi-stage build): Compiles Rust binary in builder stage, runs on Ubuntu 24.04 runtime
+- **`Dockerfile.prebuilt`**: Alternative build using pre-compiled binary (faster builds)
+- **`docker-compose.yml`**: Complete multi-service setup (relay + web + agent) with TLS certificate volumes
+- **`.dockerignore`**: Excludes unnecessary files from Docker build context
+
+**TLS Certificates:**
+- **`relay-cert.pem`**: Self-signed X.509 certificate (CN=localhost, valid 365 days)
+- **`relay-key.pem`**: 2048-bit RSA private key for TLS
+- Generated with: `openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem -days 365 -nodes -subj "/CN=localhost"`
+
+**Documentation Updates:**
+- **`README.md`**: Added comprehensive Docker sections with HTTPS examples
+- **`scripts/install-local-from-source.sh`**: Updated to install single unified `localup` binary
+
+### Port Configuration
+
+**Standard Port Mapping** (used consistently across all Docker examples):
+- **4443/UDP**: QUIC control plane (relay ↔ clients)
+- **18080/TCP**: HTTP server (relay)
+- **18443/TCP**: HTTPS server (relay with TLS certificates)
+
+**Rationale**: Using ports 18080/18443 avoids conflicts with common local development ports (8080/8443).
+
+### Docker Examples in README
+
+1. **Docker Build** (multi-stage from source)
+   ```bash
+   docker build -f Dockerfile -t localup:latest .
+   ```
+
+2. **Relay Server** (with HTTPS support)
+   ```bash
+   docker run -d \
+     -p 4443:4443/udp \
+     -p 18080:18080 \
+     -p 18443:18443 \
+     -v "$(pwd)/relay-cert.pem:/app/relay-cert.pem:ro" \
+     -v "$(pwd)/relay-key.pem:/app/relay-key.pem:ro" \
+     localup:latest relay \
+       --localup-addr 0.0.0.0:4443 \
+       --http-addr 0.0.0.0:18080 \
+       --https-addr 0.0.0.0:18443 \
+       --tls-cert /app/relay-cert.pem \
+       --tls-key /app/relay-key.pem \
+       --jwt-secret "my-super-secret-key"
+   ```
+
+3. **Tunnel Creation** (standalone mode)
+   ```bash
+   docker run --rm localup:latest \
+     --port 3000 \
+     --protocol http \
+     --relay host.docker.internal:4443 \
+     --subdomain myapp \
+     --token "YOUR_JWT_TOKEN"
+   # Access: http://localhost:18080/myapp
+   ```
+
+4. **Docker Compose** (complete setup with relay + web + agent)
+   - Automatic certificate volume mounting
+   - Health checks on relay service
+   - Internal Docker network for service communication
+   - Agent creates HTTP tunnel to web service
+
+### Key Docker Setup Decisions
+
+1. **Volume Mounting for Certificates**: Certificates mounted as read-only volumes from host
+   - Allows easy certificate rotation without rebuilding image
+   - Secures permissions (`:ro` flag prevents modification in container)
+
+2. **Multi-Stage Build**: Compiles binary in builder stage, runs on lightweight Ubuntu 24.04
+   - Binary ABI compatibility ensured (GLIBC 2.39+ in runtime image)
+   - Reduced image size (only runtime dependencies in final layer)
+   - Reproducible builds (everything compiled inside Docker)
+
+3. **Health Checks**: Relay service checks `localup --help` command
+   - Ensures binary works before Docker Compose considers service healthy
+   - Prevents dependent services (agent) from starting too early
+
+4. **Environment Variables**: TLS paths set in container (not host)
+   - Makes Docker examples portable across different hosts
+   - Follows Docker best practices for path configuration
+
+### Generating Custom Certificates
+
+For different hostnames or Subject Alternative Names:
+
+```bash
+# Single hostname (localhost)
+openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem \
+  -days 365 -nodes -subj "/CN=localhost"
+
+# Production hostname
+openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem \
+  -days 365 -nodes -subj "/CN=relay.example.com"
+
+# With multiple Subject Alternative Names (SANs)
+openssl req -x509 -newkey rsa:2048 -keyout relay-key.pem -out relay-cert.pem \
+  -days 365 -nodes -subj "/CN=localhost" \
+  -addext "subjectAltName=DNS:localhost,DNS:127.0.0.1,DNS:host.docker.internal"
+```
+
+### Testing Docker Examples
+
+All examples in README are designed to be copy-paste ready:
+- Include build step explicitly
+- Use `host.docker.internal` for macOS/Windows Docker Desktop
+- Include port numbers in access URLs
+- Show both HTTP and HTTPS access patterns
+- Include cleanup commands (docker stop/rm, docker-compose down)
+
+### Important: TLS Certificate Flags
+
+**Correction**: The relay command uses `--tls-cert` and `--tls-key` flags, NOT `--cert-path` and `--key-path`.
+
+**Correct usage:**
+```bash
+localup relay \
+  --localup-addr 0.0.0.0:4443 \
+  --http-addr 0.0.0.0:18080 \
+  --https-addr 0.0.0.0:18443 \
+  --tls-cert /app/relay-cert.pem \
+  --tls-key /app/relay-key.pem \
+  --jwt-secret "my-super-secret-key"
+```
+
+All README examples have been corrected to use `--tls-cert` and `--tls-key`.
+
+## JWT Authentication (Session: Simplified Validation)
+
+### Overview
+
+The system uses JWT (JSON Web Tokens) for authentication between clients and the relay server. JWT tokens are signed with a shared secret that must match between token generation and validation.
+
+### Token Structure
+
+A JWT token has three parts separated by dots:
+```
+header.payload.signature
+```
+
+Example decoded payload:
+```json
+{
+  "sub": "myapp",          // subject (tunnel ID)
+  "iat": 1762681328,       // issued at (timestamp)
+  "exp": 1762767728,       // expiration (timestamp)
+  "iss": "localup-relay",  // issuer
+  "aud": "localup-client", // audience
+  "protocols": [],         // protocols allowed
+  "regions": []            // regions allowed
+}
+```
+
+### Validation Approach
+
+**Signature-Only Validation**: The relay validates JWT tokens by verifying ONLY the signature and expiration, ignoring all claims:
+
+**Validated**:
+1. ✅ **Signature Verification**: The token must be signed with the correct secret (HMAC-SHA256 or RSA-256)
+2. ✅ **Expiration**: The token must not be expired (checks `exp` claim)
+
+**NOT Validated** (explicitly disabled):
+1. ❌ **Issuer Claim** (`iss`): Relay does NOT check who issued the token
+2. ❌ **Audience Claim** (`aud`): Relay does NOT check who the token is for
+3. ❌ **Not-Before Claim** (`nbf`): Relay does NOT check when token becomes valid
+4. ❌ **Any Other Claims**: Custom claims are not validated
+
+This means you can generate tokens with any issuer/audience/subject values - as long as they're signed with the correct secret and not expired, they'll be accepted.
+
+**Implementation** ([localup-auth/src/jwt.rs:229-234](crates/localup-auth/src/jwt.rs#L229-L234)):
+```rust
+pub fn new(secret: &[u8]) -> Self {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.validate_exp = true;    // Check expiration
+    validation.validate_aud = false;   // Don't check audience
+    validation.validate_nbf = false;   // Don't check not-before
+    // Signature is always verified (implicit)
+    Self { decoding_key, validation }
+}
+```
+
+### Generating Tokens
+
+Use the CLI to generate tokens:
+
+```bash
+# Generate token for tunnel "myapp" with 24-hour validity
+./target/release/localup generate-token \
+  --secret "my-super-secret-key" \
+  --localup-id "myapp"
+```
+
+Output includes the token and usage instructions:
+```
+✅ JWT Token generated successfully!
+
+Token: eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJteWFwcCIsImlhdCI6MTc2MjY4MTMyOCwiZXhwIjoxNzYyNzY3NzI4LCJpc3MiOiJsb2NhbHVwLXJlbGF5IiwiYXVkIjoibG9jYWx1cC1jbGllbnQiLCJwcm90b2NvbHMiOltdLCJyZWdpb25zIjpbXX0.kYFPGNTd9mNHOcA9OFzCkf2jliyLj5sxNY3CZ-NPUVo
+
+Token details:
+  - Localup ID: myapp
+  - Expires in: 24 hour(s)
+  - Expires at: 2025-11-10 10:42:08 +01:00
+```
+
+### Using Tokens
+
+Pass the token when creating a tunnel:
+
+```bash
+# CLI mode
+./target/release/localup \
+  --port 3000 \
+  --relay localhost:4443 \
+  --token "eyJ0eXAiOiJKV1QiLC..." \
+  --protocol http
+
+# Docker mode
+docker run -e TUNNEL_AUTH_TOKEN="eyJ0eXAiOiJKV1QiLC..." ...
+```
+
+### Token Configuration
+
+Generate with custom validity:
+
+```bash
+# 48-hour token
+./target/release/localup generate-token \
+  --secret "my-super-secret-key" \
+  --localup-id "myapp" \
+  --hours 48
+
+# 1-hour token
+./target/release/localup generate-token \
+  --secret "my-super-secret-key" \
+  --localup-id "myapp" \
+  --hours 1
+```
+
+### Important: Secret Matching
+
+The **secret must match exactly** between token generation and relay validation:
+
+```bash
+# Token generation
+./target/release/localup generate-token \
+  --secret "my-super-secret-key"  # This secret
+
+# Relay validation
+docker run ... \
+  -e LOCALUP_JWT_SECRET="my-super-secret-key"  # Must match exactly
+```
+
+If the secrets don't match, you'll see:
+```
+ERROR localup_control::handler: Authentication failed for tunnel ...: JWT verification failed
+```
+
+### Implementation Details
+
+**Token Generation** (localup-cli/src/main.rs:1744-1745):
+```rust
+let claims = JwtClaims::new(
+    localup_id.clone(),
+    "localup-relay".to_string(),    // issuer
+    "localup-client".to_string(),   // audience
+    Duration::hours(hours),
+);
+let token = JwtValidator::encode(secret.as_bytes(), &claims)?;
+```
+
+**Token Validation** (localup-lib/src/relay.rs:440-441):
+```rust
+// Only verify JWT signature using the secret - no issuer/audience checks
+let jwt_validator = Arc::new(JwtValidator::new(&jwt_secret));
+```
+
+**Handler Authentication** (localup-control/src/handler.rs:225-235):
+```rust
+if let Some(ref validator) = self.jwt_validator {
+    if let Err(e) = validator.validate(&auth_token) {
+        error!("Authentication failed for tunnel {}: {}", localup_id, e);
+        return Err(format!("Authentication failed: {}", e));
+    }
+}
+```
+
+### Security Considerations
+
+⚠️ **Important**: Simplified validation (signature-only) is appropriate for:
+- Internal deployments where you control token generation
+- Development/testing environments
+- Scenarios where all clients trust the same secret
+
+For production deployments with untrusted clients, consider:
+- Adding issuer/audience validation for claim verification
+- Using RS256 (RSA) instead of HS256 (HMAC) for asymmetric verification
+- Implementing token revocation/blacklisting
+- Rate limiting on token generation
+
+### Error Message Flow to Client
+
+Authentication errors are automatically communicated from relay server to client:
+
+**Server-side** ([localup-control/src/handler.rs:225-235](crates/localup-control/src/handler.rs#L225-L235)):
+- Relay validates JWT signature and expiration
+- If validation fails, relay sends `Disconnect { reason: "..." }` message to client
+- Relay also logs error for debugging
+
+**Client-side** ([localup-client/src/localup.rs:295-303](crates/localup-client/src/localup.rs#L295-L303)):
+- Client receives Disconnect message from relay
+- Client checks if reason contains "Authentication failed", "JWT", etc.
+- Client displays error in red: `❌ Authentication failed: <reason>`
+- Client exits with error (no retry)
+
+**Result**: User sees authentication errors printed to stderr immediately when connecting, no need to check server logs. Errors like "JWT verification failed" or "Token expired" appear on the client terminal instantly.

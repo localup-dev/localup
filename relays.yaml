@@ -1,0 +1,66 @@
+# LocalUp Relay Server Configuration
+#
+# This file defines available relay servers for tunnel connections.
+# The binary embeds this configuration at compile time.
+
+version: 1
+
+# Global relay configuration
+config:
+  # Default protocol to use if not specified
+  default_protocol: https
+  # Connection timeout in seconds
+  connection_timeout: 30
+  # Health check interval in seconds
+  health_check_interval: 60
+
+# Relay servers
+relays:
+  # Europe West - Primary
+  - id: eu-west-1
+    name: Europe West (Spain)
+    region: eu-west
+    location:
+      city: Madrid
+      state: Madrid
+      country: ES
+      continent: Europe
+    endpoints:
+      # HTTPS endpoint (with TLS termination)
+      - protocol: https
+        address: tunnel.kfs.es:4443
+        capacity: 1000  # Max concurrent connections
+        priority: 1     # Lower number = higher priority
+      # TCP endpoint (raw TCP proxy)
+      - protocol: tcp
+        address: tunnel.kfs.es:5443
+        capacity: 1000
+        priority: 1
+    status: active
+    tags:
+      - production
+      - primary
+
+# Region groups for fallback
+region_groups:
+  - name: Europe
+    regions:
+      - eu-west
+    fallback_order:
+      - eu-west
+
+# Selection policies
+selection_policies:
+  # Automatic selection (default)
+  auto:
+    # Prefer relays in same region as client
+    prefer_same_region: true
+    # Fallback to nearest region if same region unavailable
+    fallback_to_nearest: false
+    # Consider relay capacity when selecting
+    consider_capacity: true
+    # Only use active relays
+    only_active: true
+    # Include production tags
+    include_tags:
+      - production

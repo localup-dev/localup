@@ -4,6 +4,12 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  define: {
+    // Version is set via VITE_APP_VERSION env var during release workflow
+    // Falls back to 'dev' for local development
+    __APP_VERSION__: JSON.stringify(process.env.VITE_APP_VERSION || 'dev'),
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
   css: {
     postcss: './postcss.config.js',
   },

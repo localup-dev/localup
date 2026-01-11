@@ -1,0 +1,53 @@
+[package]
+name = "localup-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "localup"
+path = "src/main.rs"
+
+[dependencies]
+localup-client = { path = "../localup-client" }
+localup-proto = { path = "../localup-proto" }
+localup-router = { path = "../localup-router" }
+localup-agent = { path = "../localup-agent" }
+localup-exit-node = { path = "../localup-exit-node" }
+localup-agent-server = { path = "../localup-agent-server" }
+localup-auth = { path = "../localup-auth" }
+localup-api = { path = "../localup-api" }
+localup-control = { path = "../localup-control" }
+localup-server-https = { path = "../localup-server-https" }
+localup-server-tcp = { path = "../localup-server-tcp" }
+localup-server-tcp-proxy = { path = "../localup-server-tcp-proxy" }
+localup-server-tls = { path = "../localup-server-tls" }
+localup-transport = { path = "../localup-transport" }
+localup-transport-quic = { path = "../localup-transport-quic" }
+localup-transport-websocket = { path = "../localup-transport-websocket" }
+localup-transport-h2 = { path = "../localup-transport-h2" }
+localup-relay-db = { path = "../localup-relay-db" }
+localup-cert = { path = "../localup-cert" }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = "5.0"
+serde_yaml = "0.9"
+regex-lite = "0.1"
+uuid = { version = "1.0", features = ["v4"] }
+ipnetwork = "0.20"
+chrono = { workspace = true }
+sea-orm = { workspace = true }
+
+[build-dependencies]
+chrono = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3.13"

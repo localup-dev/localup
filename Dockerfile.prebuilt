@@ -1,0 +1,35 @@
+# Prebuilt binary Docker image
+# Use this for faster builds when you already have the compiled binary
+# Build: docker build -f Dockerfile.prebuilt -t localup:latest .
+
+FROM debian:bookworm-slim
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user
+RUN useradd -m -u 1000 localup
+
+# Set working directory
+WORKDIR /home/localup
+
+# Copy the pre-built binary
+COPY target/release/localup /usr/local/bin/localup
+
+# Change ownership
+RUN chown -R localup:localup /home/localup && \
+    chmod +x /usr/local/bin/localup
+
+# Switch to non-root user
+USER localup
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD localup --help > /dev/null 2>&1 || exit 1
+
+# Default command
+ENTRYPOINT ["localup"]
+CMD ["--help"]

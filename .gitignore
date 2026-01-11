@@ -2,3 +2,17 @@
 *.db
 node_modules
 .vscode
+
+# Custom relay configurations (keep private)
+relays-*.yaml
+*-relays.yaml
+my-relays.yaml
+custom-relays.yaml
+private_key.pem
+
+localup-saas-example
+*.pem
+*.log
+*.txt
+
+localup-daemon-aarch64-apple-darwin

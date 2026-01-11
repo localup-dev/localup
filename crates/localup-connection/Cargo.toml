@@ -1,0 +1,31 @@
+[package]
+name = "localup-connection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Internal dependencies
+localup-proto = { path = "../localup-proto" }
+
+# Async runtime
+tokio = { workspace = true }
+
+# QUIC
+quinn = { workspace = true }
+
+# TLS
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+
+# Utilities
+bytes = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }

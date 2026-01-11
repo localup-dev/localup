@@ -1,26 +1,67 @@
 [workspace]
 members = [
-    "crates/tunnel-proto",
-    "crates/tunnel-client",
-    "crates/tunnel-connection",
-    "crates/tunnel-auth",
-    "crates/tunnel-router",
-    "crates/tunnel-server-tcp",
-    "crates/tunnel-server-tcp-proxy",
-    "crates/tunnel-server-tls",
-    "crates/tunnel-server-https",
-    "crates/tunnel-cert",
-    "crates/tunnel-control",
-    "crates/tunnel-exit-node",
-    "crates/tunnel-cli",
-    "crates/tunnel-lib",  # High-level public API for Rust applications
-    "crates/tunnel-api",
-    "crates/tunnel-relay-db",
-    "crates/tunnel-transport",
-    "crates/tunnel-transport-quic",
+    "crates/localup-proto",
+    "crates/localup-client",
+    "crates/localup-connection",
+    "crates/localup-auth",
+    "crates/localup-http-auth",  # HTTP authentication middleware for tunnels
+    "crates/localup-router",
+    "crates/localup-server-tcp",
+    "crates/localup-server-tcp-proxy",
+    "crates/localup-server-tls",
+    "crates/localup-server-https",
+    "crates/localup-cert",
+    "crates/localup-control",
+    "crates/localup-exit-node",
+    "crates/localup-cli",
+    "crates/localup-lib",  # High-level public API for Rust applications
+    "crates/localup-api",
+    "crates/localup-relay-db",
+    "crates/localup-transport",
+    "crates/localup-transport-quic",
+    "crates/localup-transport-websocket",
+    "crates/localup-transport-h2",
+    "crates/localup-agent",
+    "crates/localup-agent-server",
+    "apps/localup-desktop/src-tauri",  # Desktop application
 ]
 
 resolver = "2"
+
+[package]
+name = "localup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[example]]
+name = "https_relay"
+path = "examples/https_relay.rs"
+
+[[example]]
+name = "tcp_relay"
+path = "examples/tcp_relay.rs"
+
+[[example]]
+name = "tls_relay"
+path = "examples/tls_relay.rs"
+
+[dependencies]
+localup-agent = { path = "crates/localup-agent" }
+localup-lib = { path = "crates/localup-lib" }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+rustls = { workspace = true }
+axum = { workspace = true }
+
+[build-dependencies]
+chrono = { workspace = true }
 
 [workspace.package]
 version = "0.1.0"
@@ -43,14 +84,18 @@ http-body-util = "0.1"
 # QUIC
 quinn = "0.11"
 
+# HTTP/3 (h3-quinn 0.0.10+ supports quinn 0.11)
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+
 # TLS
-rustls = { version = "0.22", features = ["ring"] }
-tokio-rustls = "0.25"
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
 rustls-pemfile = "2.0"
 webpki-roots = "0.26"
 
 # ACME/Let's Encrypt
-instant-acme = "0.4"
+instant-acme = "0.8"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -69,6 +114,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Authentication
 jsonwebtoken = "9.2"
 base64 = "0.21"
+argon2 = { version = "0.5", features = ["std"] }
 
 # CLI
 clap = { version = "4.4", features = ["derive", "env"] }

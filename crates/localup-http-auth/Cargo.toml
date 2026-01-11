@@ -1,0 +1,17 @@
+[package]
+name = "localup-http-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "HTTP authentication middleware for localup tunnels"
+
+[dependencies]
+localup-proto = { path = "../localup-proto" }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
