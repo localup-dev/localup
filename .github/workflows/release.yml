@@ -287,13 +287,18 @@ jobs:
           # Tauri updater signing
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # macOS code signing
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # macOS code signing - skip if not configured
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
           # macOS notarization
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          # Skip code signing if APPLE_SIGNING_IDENTITY is not set (use '-' to disable)
+          if [ "$APPLE_SIGNING_IDENTITY" = "-" ] || [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            echo "⚠️ No Apple signing identity configured, building without code signing"
+            export APPLE_SIGNING_IDENTITY="-"
+          fi
           bun run tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle_targets }}
 
       # Collect and rename artifacts for upload
@@ -368,9 +373,11 @@ jobs:
           retention-days: 1
 
   # Create GitHub Release with all artifacts
+  # Only requires CLI binaries - desktop apps are optional
   create-release:
     name: Create GitHub Release
-    needs: [build-binaries, build-tauri]
+    needs: [build-binaries]
+    if: always() && needs.build-binaries.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -381,6 +388,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
+        continue-on-error: true  # Desktop artifacts may not exist if build-tauri failed
 
       - name: Consolidate release files
         run: |
@@ -420,6 +428,12 @@ jobs:
 
       - name: Create latest.json for auto-updater
         run: |
+          # Only create latest.json if we have desktop artifacts
+          if ! ls release/*.dmg release/*.AppImage 1> /dev/null 2>&1; then
+            echo "No desktop artifacts found, skipping latest.json creation"
+            exit 0
+          fi
+
           VERSION="${{ steps.get_version.outputs.VERSION_NUM }}"
           RELEASE_URL="https://github.com/localup-dev/localup/releases/download/${{ steps.get_version.outputs.VERSION }}"
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
