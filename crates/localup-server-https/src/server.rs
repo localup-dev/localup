@@ -564,8 +564,13 @@ impl HttpsServer {
                 "Connection from {} denied by IP filter for host: {}",
                 peer_addr, host
             );
-            let response = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 13\r\n\r\nAccess denied";
-            tls_stream.write_all(response).await?;
+            let body = format!("Access denied for IP: {}", peer_addr.ip());
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            tls_stream.write_all(response.as_bytes()).await?;
             return Ok(());
         }
 
