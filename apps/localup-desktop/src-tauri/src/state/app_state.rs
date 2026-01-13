@@ -194,11 +194,19 @@ impl AppState {
                 }
             };
 
+            // Parse IP allowlist from JSON if set
+            let ip_allowlist: Vec<String> = tunnel
+                .ip_allowlist
+                .as_ref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+
             let client_config = ClientTunnelConfig {
                 local_host: tunnel.local_host.clone(),
                 protocols: vec![protocol_config],
                 auth_token: relay.jwt_token.clone().unwrap_or_default(),
                 exit_node: ExitNodeConfig::Custom(relay.address.clone()),
+                ip_allowlist,
                 ..Default::default()
             };
 

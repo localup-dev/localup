@@ -10,7 +10,7 @@ use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tokio::sync::oneshot;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::db::entities::{tunnel_config, RelayServer, TunnelConfig};
 use crate::state::app_state::run_tunnel;
@@ -352,11 +352,39 @@ pub async fn create_tunnel(
         .await
         .map_err(|e| format!("Failed to create tunnel: {}", e))?;
 
+    // Auto-start the tunnel if auto_start is enabled
+    let (status, public_url, localup_id, error_message) = if result.auto_start {
+        info!("Auto-starting newly created tunnel: {}", result.name);
+        match start_tunnel_in_process(&state, &result.id, &result, &relay).await {
+            Ok(_) => {
+                // Give it a moment to connect and check status
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                let manager = state.tunnel_manager.read().await;
+                if let Some(running) = manager.get(&result.id) {
+                    (
+                        running.status.as_str().to_string(),
+                        running.public_url.clone(),
+                        running.localup_id.clone(),
+                        running.error_message.clone(),
+                    )
+                } else {
+                    ("connecting".to_string(), None, None, None)
+                }
+            }
+            Err(e) => {
+                error!("Failed to auto-start tunnel {}: {}", result.name, e);
+                ("error".to_string(), None, None, Some(e))
+            }
+        }
+    } else {
+        ("disconnected".to_string(), None, None, None)
+    };
+
     Ok(TunnelResponse {
         id: result.id,
         name: result.name,
         relay_id: result.relay_server_id,
-        relay_name: Some(relay.name),
+        relay_name: Some(relay.name.clone()),
         local_host: result.local_host,
         local_port: result.local_port as u16,
         protocol: result.protocol,
@@ -365,10 +393,10 @@ pub async fn create_tunnel(
         auto_start: result.auto_start,
         enabled: result.enabled,
         ip_allowlist: parse_ip_allowlist(&result.ip_allowlist),
-        status: "disconnected".to_string(),
-        public_url: None,
-        localup_id: None,
-        error_message: None,
+        status,
+        public_url,
+        localup_id,
+        error_message,
         upstream_status: "unknown".to_string(), // New tunnel, no metrics yet
         recent_upstream_errors: None,
         recent_request_count: None,

@@ -850,8 +850,10 @@ impl HttpsServer {
                     tls_stream.write_all(content_length.as_bytes()).await?;
                     tls_stream.write_all(b"\r\n").await?;
                     tls_stream.write_all(body).await?;
+                    tls_stream.flush().await?; // Ensure all data is sent before handler returns
                 } else {
                     tls_stream.write_all(b"Content-Length: 0\r\n\r\n").await?;
+                    tls_stream.flush().await?;
                 }
 
                 debug!(

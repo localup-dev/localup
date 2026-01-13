@@ -63,6 +63,8 @@ import {
   Binary,
   Check,
   Download,
+  Pencil,
+  Shield,
 } from "lucide-react";
 import { toast } from "sonner";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -70,6 +72,7 @@ import {
   getTunnel,
   startTunnel,
   stopTunnel,
+  updateTunnel,
   getTunnelMetrics,
   clearTunnelMetrics,
   replayRequest,
@@ -79,7 +82,18 @@ import {
   type BodyData,
   type ReplayResponse,
   type TcpConnection,
+  type UpdateTunnelRequest,
 } from "@/api/tunnels";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 
 function getStatusBadge(status: string) {
   switch (status.toLowerCase()) {
@@ -709,6 +723,11 @@ export function TunnelDetail() {
   const [pathFilter, setPathFilter] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("");
 
+  // Edit dialog state
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editTunnel, setEditTunnel] = useState<UpdateTunnelRequest>({});
+  const [editTunnelIpAllowlist, setEditTunnelIpAllowlist] = useState("");
+
   const loadData = useCallback(async () => {
     if (!id) return;
     try {
@@ -854,6 +873,55 @@ export function TunnelDetail() {
     }
   };
 
+  const openEditDialog = () => {
+    if (!tunnel) return;
+    setEditTunnel({
+      name: tunnel.name,
+      local_host: tunnel.local_host,
+      local_port: tunnel.local_port,
+      subdomain: tunnel.subdomain || "",
+      auto_start: tunnel.auto_start,
+    });
+    setEditTunnelIpAllowlist(tunnel.ip_allowlist?.join(", ") || "");
+    setEditDialogOpen(true);
+  };
+
+  const handleEditTunnel = async () => {
+    if (!tunnel) return;
+
+    if (editTunnel.local_port !== undefined && (editTunnel.local_port < 1 || editTunnel.local_port > 65535)) {
+      toast.error("Invalid port number");
+      return;
+    }
+
+    setActionLoading("edit");
+    try {
+      const ipAllowlist = editTunnelIpAllowlist
+        .split(",")
+        .map((ip) => ip.trim())
+        .filter((ip) => ip.length > 0);
+
+      const updated = await updateTunnel(tunnel.id, {
+        ...editTunnel,
+        subdomain: editTunnel.subdomain?.toLowerCase(),
+        ip_allowlist: ipAllowlist,
+      });
+      setTunnel(updated);
+      setEditDialogOpen(false);
+      setEditTunnel({});
+      setEditTunnelIpAllowlist("");
+      toast.success("Tunnel updated", {
+        description: `Updated tunnel "${updated.name}"`,
+      });
+    } catch (error) {
+      toast.error("Failed to update tunnel", {
+        description: String(error),
+      });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -983,6 +1051,15 @@ export function TunnelDetail() {
         <div className="flex items-center gap-2">
           <Button variant="outline" size="icon" onClick={loadData}>
             <RefreshCw className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            onClick={openEditDialog}
+            disabled={isRunning}
+            title={isRunning ? "Stop tunnel to edit" : "Edit tunnel"}
+          >
+            <Pencil className="h-4 w-4" />
           </Button>
           {isRunning ? (
             <Button
@@ -1489,6 +1566,130 @@ export function TunnelDetail() {
         onOpenChange={setDetailDialogOpen}
         tunnelId={id!}
       />
+
+      {/* Edit Tunnel Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent className="sm:max-w-[500px]">
+          <DialogHeader>
+            <DialogTitle>Edit Tunnel</DialogTitle>
+            <DialogDescription>
+              Modify the tunnel configuration. Changes will take effect on next start.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="edit-name" className="text-right">
+                Name
+              </Label>
+              <Input
+                id="edit-name"
+                value={editTunnel.name || ""}
+                onChange={(e) =>
+                  setEditTunnel({ ...editTunnel, name: e.target.value })
+                }
+                className="col-span-3"
+              />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="edit-local-host" className="text-right">
+                Local Host
+              </Label>
+              <Input
+                id="edit-local-host"
+                value={editTunnel.local_host || ""}
+                onChange={(e) =>
+                  setEditTunnel({ ...editTunnel, local_host: e.target.value })
+                }
+                className="col-span-3"
+                placeholder="localhost"
+              />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="edit-local-port" className="text-right">
+                Local Port
+              </Label>
+              <Input
+                id="edit-local-port"
+                type="number"
+                value={editTunnel.local_port || ""}
+                onChange={(e) =>
+                  setEditTunnel({
+                    ...editTunnel,
+                    local_port: parseInt(e.target.value) || 0,
+                  })
+                }
+                className="col-span-3"
+                placeholder="3000"
+                min={1}
+                max={65535}
+              />
+            </div>
+            {(tunnel?.protocol === "http" || tunnel?.protocol === "https") && (
+              <div className="grid grid-cols-4 items-center gap-4">
+                <Label htmlFor="edit-subdomain" className="text-right">
+                  Subdomain
+                </Label>
+                <Input
+                  id="edit-subdomain"
+                  value={editTunnel.subdomain || ""}
+                  onChange={(e) =>
+                    setEditTunnel({ ...editTunnel, subdomain: e.target.value })
+                  }
+                  className="col-span-3"
+                  placeholder="my-app"
+                />
+              </div>
+            )}
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="edit-ip-allowlist" className="text-right">
+                <div className="flex items-center gap-1">
+                  <Shield className="h-3 w-3" />
+                  IP Allowlist
+                </div>
+              </Label>
+              <div className="col-span-3">
+                <Input
+                  id="edit-ip-allowlist"
+                  value={editTunnelIpAllowlist}
+                  onChange={(e) => setEditTunnelIpAllowlist(e.target.value)}
+                  placeholder="192.168.1.1, 10.0.0.0/8"
+                />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Comma-separated IPs or CIDRs. Leave empty to allow all.
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="edit-auto-start" className="text-right">
+                Auto Start
+              </Label>
+              <div className="col-span-3 flex items-center gap-2">
+                <Switch
+                  id="edit-auto-start"
+                  checked={editTunnel.auto_start || false}
+                  onCheckedChange={(checked) =>
+                    setEditTunnel({ ...editTunnel, auto_start: checked })
+                  }
+                />
+                <span className="text-sm text-muted-foreground">
+                  Start tunnel when app launches
+                </span>
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleEditTunnel} disabled={actionLoading === "edit"}>
+              {actionLoading === "edit" ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : null}
+              Save Changes
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
