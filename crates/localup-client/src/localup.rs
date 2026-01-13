@@ -2017,7 +2017,7 @@ impl TunnelConnection {
 
         // Read response - first read to get headers
         let mut response_buf = Vec::new();
-        let mut temp_buf = vec![0u8; 8192];
+        let mut temp_buf = vec![0u8; 65536]; // 64KB buffer for better performance with large responses
 
         // Read until we have headers (looking for \r\n\r\n or \n\n)
         let mut headers_complete = false;
@@ -2131,10 +2131,10 @@ impl TunnelConnection {
             let mut chunked_data = response_buf[header_end_pos..].to_vec();
 
             // Keep reading until connection closes or end marker
-            // Use a short timeout per read to avoid waiting unnecessarily after last chunk
+            // Use a reasonable timeout per read - 5 seconds should handle most cases
             loop {
                 let read_result = tokio::time::timeout(
-                    std::time::Duration::from_millis(100), // Short timeout - 100ms
+                    std::time::Duration::from_secs(5),
                     local_socket.read(&mut temp_buf),
                 )
                 .await;
@@ -2169,9 +2169,9 @@ impl TunnelConnection {
                         break;
                     }
                     Err(_) => {
-                        // Timeout - assume response is complete (after 100ms of no data)
-                        debug!(
-                            "Chunked response: read timeout, assuming complete ({} bytes)",
+                        // Timeout after 5 seconds of no data
+                        warn!(
+                            "Chunked response: read timeout after 5s ({} bytes received so far)",
                             chunked_data.len()
                         );
                         break;
@@ -2197,10 +2197,10 @@ impl TunnelConnection {
             // No Content-Length and not chunked - read until connection closes
             let mut body_data = response_buf[header_end_pos..].to_vec();
 
-            // Use short timeout to avoid unnecessary waiting
+            // Use reasonable timeout - 5 seconds between reads
             loop {
                 let read_result = tokio::time::timeout(
-                    std::time::Duration::from_millis(100),
+                    std::time::Duration::from_secs(5),
                     local_socket.read(&mut temp_buf),
                 )
                 .await;
@@ -2215,9 +2215,9 @@ impl TunnelConnection {
                         break;
                     }
                     Err(_) => {
-                        // Timeout - assume response is complete
-                        debug!(
-                            "Response read timeout, assuming complete ({} bytes)",
+                        // Timeout after 5 seconds of no data
+                        warn!(
+                            "Response read timeout after 5s ({} bytes received)",
                             body_data.len()
                         );
                         break;
