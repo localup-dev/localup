@@ -41,8 +41,8 @@ impl QuicConfig {
             security: TransportSecurityConfig::default(),
             server_cert_path: None,
             server_key_path: None,
-            keep_alive_interval: Duration::from_secs(5),
-            max_idle_timeout: Duration::from_secs(30),
+            keep_alive_interval: Duration::from_secs(3), // Faster keep-alive for quicker disconnect detection
+            max_idle_timeout: Duration::from_secs(10), // Detect dead connections within 10 seconds
             max_concurrent_streams: 100,
         }
     }
@@ -64,8 +64,8 @@ impl QuicConfig {
             security: TransportSecurityConfig::default(),
             server_cert_path: Some(cert_path.to_string()),
             server_key_path: Some(key_path.to_string()),
-            keep_alive_interval: Duration::from_secs(5),
-            max_idle_timeout: Duration::from_secs(30),
+            keep_alive_interval: Duration::from_secs(3),
+            max_idle_timeout: Duration::from_secs(10),
             max_concurrent_streams: 1000,
         })
     }
@@ -148,8 +148,8 @@ impl QuicConfig {
             security: TransportSecurityConfig::default(),
             server_cert_path: Some(cert_path.to_str().unwrap().to_string()),
             server_key_path: Some(key_path.to_str().unwrap().to_string()),
-            keep_alive_interval: Duration::from_secs(5),
-            max_idle_timeout: Duration::from_secs(30),
+            keep_alive_interval: Duration::from_secs(3),
+            max_idle_timeout: Duration::from_secs(10),
             max_concurrent_streams: 1000,
         })
     }
@@ -191,8 +191,8 @@ impl QuicConfig {
             security: TransportSecurityConfig::default(),
             server_cert_path: Some(cert_path.to_str().unwrap().to_string()),
             server_key_path: Some(key_path.to_str().unwrap().to_string()),
-            keep_alive_interval: Duration::from_secs(5),
-            max_idle_timeout: Duration::from_secs(30),
+            keep_alive_interval: Duration::from_secs(3),
+            max_idle_timeout: Duration::from_secs(10),
             max_concurrent_streams: 1000,
         })
     }
@@ -445,7 +445,8 @@ mod tests {
     #[test]
     fn test_client_config_default() {
         let config = QuicConfig::client_default();
-        assert_eq!(config.keep_alive_interval, Duration::from_secs(5));
+        assert_eq!(config.keep_alive_interval, Duration::from_secs(3));
+        assert_eq!(config.max_idle_timeout, Duration::from_secs(10));
         assert_eq!(config.max_concurrent_streams, 100);
     }
 

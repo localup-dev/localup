@@ -326,6 +326,12 @@ pub async fn run_tunnel(
             reconnect_attempt + 1
         );
 
+        // Update status to Connecting
+        {
+            let mut manager = tunnel_manager.write().await;
+            manager.update_status(&config_id, TunnelStatus::Connecting, None, None, None);
+        }
+
         match TunnelClient::connect(config.clone()).await {
             Ok(client) => {
                 reconnect_attempt = 0;
@@ -442,10 +448,18 @@ pub async fn run_tunnel(
                 // Abort metrics task when connection ends
                 metrics_task.abort();
 
+                // Update status to Disconnected (will change to Connecting on next loop iteration)
+                {
+                    let mut manager = tunnel_manager.write().await;
+                    manager.update_status(&config_id, TunnelStatus::Disconnected, None, None, None);
+                }
+
                 info!(
                     "[{}] Connection lost, attempting to reconnect...",
                     config_id
                 );
+
+                reconnect_attempt += 1;
             }
             Err(e) => {
                 error!("[{}] Failed to connect: {}", config_id, e);
