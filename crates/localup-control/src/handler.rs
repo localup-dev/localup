@@ -2152,7 +2152,6 @@ impl TunnelHandler {
             Protocol::Tls { sni_patterns, .. } => {
                 // Register TLS routes for all SNI patterns (supports multiple patterns including wildcards)
                 for sni_pattern in sni_patterns {
-                    let route_key = RouteKey::TlsSni(sni_pattern.clone());
                     let route_target = RouteTarget {
                         localup_id: localup_id.to_string(),
                         target_addr: format!("tunnel:{}", localup_id), // Special marker for tunnel routing
@@ -2160,20 +2159,42 @@ impl TunnelHandler {
                         ip_filter: ip_filter.clone(),
                     };
 
-                    self.route_registry
-                        .register(route_key, route_target)
-                        .map_err(|e| e.to_string())?;
+                    // Check if this is a wildcard pattern (e.g., *.example.com)
+                    if WildcardPattern::is_wildcard_pattern(sni_pattern) {
+                        // Register as wildcard for pattern matching
+                        self.route_registry
+                            .register_wildcard(sni_pattern, route_target)
+                            .map_err(|e| e.to_string())?;
 
-                    if ip_filter.is_empty() {
-                        debug!(
-                            "Registered TLS route for SNI pattern {} -> tunnel:{}",
-                            sni_pattern, localup_id
-                        );
+                        if ip_filter.is_empty() {
+                            debug!(
+                                "Registered TLS wildcard route for SNI pattern {} -> tunnel:{}",
+                                sni_pattern, localup_id
+                            );
+                        } else {
+                            debug!(
+                                "Registered TLS wildcard route for SNI pattern {} -> tunnel:{} (IP filter: {} entries)",
+                                sni_pattern, localup_id, ip_filter.len()
+                            );
+                        }
                     } else {
-                        debug!(
-                            "Registered TLS route for SNI pattern {} -> tunnel:{} (IP filter: {} entries)",
-                            sni_pattern, localup_id, ip_filter.len()
-                        );
+                        // Register as exact match
+                        let route_key = RouteKey::TlsSni(sni_pattern.clone());
+                        self.route_registry
+                            .register(route_key, route_target)
+                            .map_err(|e| e.to_string())?;
+
+                        if ip_filter.is_empty() {
+                            debug!(
+                                "Registered TLS route for SNI {} -> tunnel:{}",
+                                sni_pattern, localup_id
+                            );
+                        } else {
+                            debug!(
+                                "Registered TLS route for SNI {} -> tunnel:{} (IP filter: {} entries)",
+                                sni_pattern, localup_id, ip_filter.len()
+                            );
+                        }
                     }
                 }
                 Ok(None)
@@ -2250,9 +2271,19 @@ impl TunnelHandler {
             Protocol::Tls { sni_patterns, .. } => {
                 // Unregister all SNI patterns for this tunnel
                 for sni_pattern in sni_patterns {
-                    let route_key = RouteKey::TlsSni(sni_pattern.clone());
-                    let _ = self.route_registry.unregister(&route_key);
-                    debug!("Unregistered TLS route for SNI pattern: {}", sni_pattern);
+                    if WildcardPattern::is_wildcard_pattern(sni_pattern) {
+                        // Unregister wildcard pattern
+                        let _ = self.route_registry.unregister_wildcard(sni_pattern);
+                        debug!(
+                            "Unregistered TLS wildcard route for SNI pattern: {}",
+                            sni_pattern
+                        );
+                    } else {
+                        // Unregister exact match
+                        let route_key = RouteKey::TlsSni(sni_pattern.clone());
+                        let _ = self.route_registry.unregister(&route_key);
+                        debug!("Unregistered TLS route for SNI: {}", sni_pattern);
+                    }
                 }
             }
         }
