@@ -1,6 +1,6 @@
 # Makefile for localup development
 
-.PHONY: build build-release relay relay-https relay-http tunnel tunnel-https tunnel-custom-domain test test-server test-daemon clean gen-cert gen-cert-if-needed gen-cert-custom-domain gen-token register-custom-domain list-custom-domains daemon-config daemon-start daemon-stop daemon-status daemon-tunnel-start daemon-tunnel-stop daemon-reload daemon-quick-test help
+.PHONY: build build-release relay relay-https relay-http relay-tls tunnel tunnel-https tunnel-custom-domain tunnel-tls test test-server tls-server https-server test-daemon clean gen-cert gen-cert-if-needed gen-cert-custom-domain gen-cert-tls gen-token register-custom-domain list-custom-domains daemon-config daemon-start daemon-stop daemon-status daemon-tunnel-start daemon-tunnel-stop daemon-reload daemon-quick-test help
 
 # Default target
 help:
@@ -14,11 +14,13 @@ help:
 	@echo "  make relay          - Start HTTPS relay with localho.st domain (default)"
 	@echo "  make relay-https    - Start HTTPS relay with localho.st domain"
 	@echo "  make relay-http     - Start HTTP-only relay with localho.st domain"
+	@echo "  make relay-tls      - Start TLS/SNI relay (passthrough, no termination)"
 	@echo ""
 	@echo "Client targets:"
 	@echo "  make tunnel         - Start HTTPS tunnel client (LOCAL_PORT=8080, SUBDOMAIN=myapp)"
 	@echo "  make tunnel-https   - Same as tunnel"
 	@echo "  make tunnel-custom-domain CUSTOM_DOMAIN=api.example.com - Start tunnel with custom domain"
+	@echo "  make tunnel-tls SNI_DOMAINS=test1.example.com,test2.example.com - Start TLS tunnel with SNI patterns"
 	@echo ""
 	@echo "Custom Domain targets:"
 	@echo "  make gen-cert-custom-domain CUSTOM_DOMAIN=api.example.com - Generate cert for custom domain"
@@ -33,6 +35,14 @@ help:
 	@echo "  make daemon-tunnel-stop TUNNEL_NAME=api  - Stop tunnel via IPC"
 	@echo "  make daemon-reload          - Reload config via IPC"
 	@echo "  make test-daemon            - Show full daemon test instructions"
+	@echo ""
+	@echo "TLS/SNI Testing targets:"
+	@echo "  make relay-tls      - Start TLS/SNI passthrough relay"
+	@echo "  make tls-server     - Start TLS echo test server on port 9443"
+	@echo "  make https-server   - Start HTTPS test server on port 9443 (HTTP over TLS)"
+	@echo "  make tunnel-tls     - Start TLS tunnel with SNI patterns"
+	@echo "  make gen-cert-tls   - Generate TLS certificates for backend server"
+	@echo "  make test-tls       - Show full TLS testing instructions"
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  make gen-cert       - Generate self-signed certificates for localho.st"
@@ -60,6 +70,7 @@ HTTP_ADDR ?= 0.0.0.0:28080
 HTTPS_ADDR ?= 0.0.0.0:28443
 API_ADDR ?= 0.0.0.0:3080
 DOMAIN ?= localho.st
+# Log level: info, debug, trace (use LOG_LEVEL=debug make <target> for verbose output)
 LOG_LEVEL ?= info
 ADMIN_EMAIL ?= admin@localho.st
 ADMIN_PASSWORD ?= admin123
@@ -74,6 +85,12 @@ USER_ID ?= 1
 # Custom domain configuration
 CUSTOM_DOMAIN ?= api.example.com
 CUSTOM_DOMAIN_CERT_DIR ?= ./certs
+
+# TLS/SNI configuration
+TLS_ADDR ?= 0.0.0.0:28443
+TLS_BACKEND_PORT ?= 9443
+TLS_CERT_DIR ?= ./certs/tls
+SNI_DOMAINS ?= test1.example.com,test2.example.com,*.example.com
 
 # Certificate paths
 CERT_FILE ?= localhost-cert.pem
@@ -293,6 +310,216 @@ test-server:
 				self.wfile.write(b'Hello from localup test server!\\n'); \
 		print('Test server running on http://localhost:$(LOCAL_PORT)'); \
 		HTTPServer(('', $(LOCAL_PORT)), H).serve_forever()"
+
+# ==========================================
+# TLS/SNI Passthrough Testing Targets
+# ==========================================
+
+# Generate TLS certificates for backend server
+gen-cert-tls:
+	@mkdir -p $(TLS_CERT_DIR)
+	@echo "Generating TLS backend certificates..."
+	openssl genpkey -algorithm RSA -out $(TLS_CERT_DIR)/backend.key -pkeyopt rsa_keygen_bits:2048
+	openssl req -new -key $(TLS_CERT_DIR)/backend.key -out $(TLS_CERT_DIR)/backend.csr \
+		-subj "/CN=localhost"
+	@echo "basicConstraints=CA:FALSE" > $(TLS_CERT_DIR)/backend.ext
+	@echo "keyUsage=digitalSignature,keyEncipherment" >> $(TLS_CERT_DIR)/backend.ext
+	@echo "subjectAltName=DNS:localhost,DNS:test1.example.com,DNS:test2.example.com,DNS:*.example.com,IP:127.0.0.1" >> $(TLS_CERT_DIR)/backend.ext
+	openssl x509 -req -in $(TLS_CERT_DIR)/backend.csr -signkey $(TLS_CERT_DIR)/backend.key \
+		-out $(TLS_CERT_DIR)/backend.crt -days 365 \
+		-extfile $(TLS_CERT_DIR)/backend.ext
+	@rm -f $(TLS_CERT_DIR)/backend.csr $(TLS_CERT_DIR)/backend.ext
+	@echo ""
+	@echo "TLS backend certificates generated:"
+	@echo "  Cert: $(TLS_CERT_DIR)/backend.crt"
+	@echo "  Key:  $(TLS_CERT_DIR)/backend.key"
+
+# Start TLS/SNI passthrough relay
+relay-tls: build gen-cert-if-needed
+	@echo ""
+	@echo "Starting TLS/SNI passthrough relay..."
+	@echo "======================================"
+	@echo "  QUIC Control: $(LOCALUP_ADDR)"
+	@echo "  TLS Server:   $(TLS_ADDR)"
+	@echo "  API HTTP:     $(API_ADDR)"
+	@echo "  JWT Secret:   $(JWT_SECRET)"
+	@echo ""
+	@echo "TLS traffic is passed through without termination."
+	@echo "SNI is extracted from ClientHello for routing."
+	@echo ""
+	@echo "Generate a token with: make gen-token"
+	@echo "======================================"
+	@echo ""
+	RUST_LOG=$(LOG_LEVEL) ./target/debug/localup relay tls \
+		--localup-addr $(LOCALUP_ADDR) \
+		--tls-addr $(TLS_ADDR) \
+		--jwt-secret "$(JWT_SECRET)" \
+		--api-http-addr $(API_ADDR) \
+		--log-level $(LOG_LEVEL)
+
+# Start TLS echo test server (Python)
+tls-server: gen-cert-tls
+	@echo ""
+	@echo "Starting TLS echo server on port $(TLS_BACKEND_PORT)..."
+	@echo "======================================================="
+	@echo "  Cert: $(TLS_CERT_DIR)/backend.crt"
+	@echo "  Key:  $(TLS_CERT_DIR)/backend.key"
+	@echo ""
+	@echo "This server echoes back received data with 'TLS BACKEND RESPONSE:' prefix"
+	@echo "======================================================="
+	@echo ""
+	@python3 -c "$$TLS_SERVER_SCRIPT"
+
+define TLS_SERVER_SCRIPT
+import ssl, socket, sys, datetime
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain('$(TLS_CERT_DIR)/backend.crt', '$(TLS_CERT_DIR)/backend.key')
+context.check_hostname = False
+context.verify_mode = ssl.CERT_NONE
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+sock.bind(('127.0.0.1', $(TLS_BACKEND_PORT)))
+sock.listen(5)
+print('TLS Echo Server running on port $(TLS_BACKEND_PORT)', file=sys.stderr, flush=True)
+ssock = context.wrap_socket(sock, server_side=True)
+request_count = 0
+while True:
+    try:
+        conn, addr = ssock.accept()
+        request_count += 1
+        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'[{ts}] #{request_count} Connection from {addr}', file=sys.stderr, flush=True)
+        data = conn.recv(4096)
+        print(f'[{ts}] #{request_count} Received {len(data)} bytes: {data[:100]}...', file=sys.stderr, flush=True)
+        conn.sendall(b'TLS BACKEND RESPONSE: ' + data)
+        conn.close()
+        print(f'[{ts}] #{request_count} Response sent, connection closed', file=sys.stderr, flush=True)
+    except Exception as e:
+        print(f'[ERROR] {e}', file=sys.stderr, flush=True)
+endef
+export TLS_SERVER_SCRIPT
+
+# Start HTTPS test server (Python) - serves HTTP over TLS
+https-server: gen-cert-tls
+	@echo ""
+	@echo "Starting HTTPS test server on port $(TLS_BACKEND_PORT)..."
+	@echo "=========================================================="
+	@echo "  Cert: $(TLS_CERT_DIR)/backend.crt"
+	@echo "  Key:  $(TLS_CERT_DIR)/backend.key"
+	@echo ""
+	@echo "This serves HTTP responses over TLS (proper HTTPS)"
+	@echo "=========================================================="
+	@echo ""
+	@python3 -c "$$HTTPS_SERVER_SCRIPT"
+
+define HTTPS_SERVER_SCRIPT
+import ssl, http.server, datetime
+
+class LoggingHandler(http.server.BaseHTTPRequestHandler):
+    request_count = 0
+
+    def log_message(self, format, *args):
+        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'[{ts}] {self.address_string()} - {format % args}', flush=True)
+
+    def do_GET(self):
+        LoggingHandler.request_count += 1
+        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f'[{ts}] #{LoggingHandler.request_count} GET {self.path} from {self.address_string()}', flush=True)
+        print(f'[{ts}] #{LoggingHandler.request_count} Headers: {dict(self.headers)}', flush=True)
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        response = f'HTTPS Backend Response\nRequest #{LoggingHandler.request_count}\nPath: {self.path}\nTime: {ts}\n'
+        self.wfile.write(response.encode())
+        print(f'[{ts}] #{LoggingHandler.request_count} Response sent: 200 OK', flush=True)
+
+    def do_POST(self):
+        LoggingHandler.request_count += 1
+        ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length)
+        print(f'[{ts}] #{LoggingHandler.request_count} POST {self.path} from {self.address_string()}', flush=True)
+        print(f'[{ts}] #{LoggingHandler.request_count} Headers: {dict(self.headers)}', flush=True)
+        print(f'[{ts}] #{LoggingHandler.request_count} Body ({content_length} bytes): {body[:200]}', flush=True)
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        response = f'HTTPS Backend Response\nRequest #{LoggingHandler.request_count}\nPath: {self.path}\nBody received: {content_length} bytes\n'
+        self.wfile.write(response.encode())
+        print(f'[{ts}] #{LoggingHandler.request_count} Response sent: 200 OK', flush=True)
+
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain('$(TLS_CERT_DIR)/backend.crt', '$(TLS_CERT_DIR)/backend.key')
+server = http.server.HTTPServer(('127.0.0.1', $(TLS_BACKEND_PORT)), LoggingHandler)
+server.socket = context.wrap_socket(server.socket, server_side=True)
+print(f'HTTPS Server running on https://127.0.0.1:$(TLS_BACKEND_PORT)', flush=True)
+print(f'Test with: curl -k https://localhost:$(TLS_BACKEND_PORT)/', flush=True)
+server.serve_forever()
+endef
+export HTTPS_SERVER_SCRIPT
+
+# Start TLS tunnel with SNI patterns
+tunnel-tls: build
+	@echo ""
+	@echo "Starting TLS tunnel with SNI patterns..."
+	@echo "========================================="
+	@echo "  Backend:     localhost:$(TLS_BACKEND_PORT)"
+	@echo "  Relay:       $(RELAY_ADDR)"
+	@echo "  Protocol:    tls"
+	@echo "  SNI Domains: $(SNI_DOMAINS)"
+	@echo ""
+	@echo "Incoming TLS connections matching these SNI patterns"
+	@echo "will be routed to localhost:$(TLS_BACKEND_PORT)"
+	@echo "========================================="
+	@echo ""
+	@TOKEN=$$(./target/debug/localup generate-token --secret "$(JWT_SECRET)" --sub "tls-tunnel" --user-id "$(USER_ID)" --hours 24 --token-only); \
+	CUSTOM_DOMAIN_ARGS=$$(echo "$(SNI_DOMAINS)" | tr ',' '\n' | sed 's/^/--custom-domain /' | tr '\n' ' '); \
+	RUST_LOG=$(LOG_LEVEL) ./target/debug/localup \
+		--port $(TLS_BACKEND_PORT) \
+		--relay $(RELAY_ADDR) \
+		--protocol tls \
+		$$CUSTOM_DOMAIN_ARGS \
+		--token "$$TOKEN"
+
+# Full TLS testing instructions
+test-tls:
+	@echo ""
+	@echo "=========================================="
+	@echo "TLS/SNI Passthrough Testing Guide"
+	@echo "=========================================="
+	@echo ""
+	@echo "This tests TLS passthrough routing based on SNI (Server Name Indication)."
+	@echo "The relay extracts SNI from ClientHello without decrypting TLS traffic."
+	@echo ""
+	@echo "Prerequisites:"
+	@echo "  - Add to /etc/hosts: 127.0.0.1 test1.example.com test2.example.com"
+	@echo ""
+	@echo "Test Steps:"
+	@echo ""
+	@echo "  # Terminal 1: Start TLS relay"
+	@echo "  make relay-tls"
+	@echo ""
+	@echo "  # Terminal 2: Start TLS backend server"
+	@echo "  make tls-server"
+	@echo ""
+	@echo "  # Terminal 3: Start TLS tunnel"
+	@echo "  make tunnel-tls"
+	@echo ""
+	@echo "  # Terminal 4: Test TLS connection"
+	@echo "  echo 'Hello TLS' | openssl s_client -connect localhost:28443 \\"
+	@echo "    -servername test1.example.com -quiet 2>/dev/null"
+	@echo ""
+	@echo "  # Expected output: 'TLS BACKEND RESPONSE: Hello TLS'"
+	@echo ""
+	@echo "Custom SNI domains (comma-separated):"
+	@echo "  make tunnel-tls SNI_DOMAINS=app1.test,app2.test,*.test"
+	@echo ""
+	@echo "Verify SNI extraction in relay logs:"
+	@echo "  Look for: 'Extracted SNI: test1.example.com'"
+	@echo "  Look for: 'Routing SNI test1.example.com to backend'"
+	@echo ""
+	@echo "=========================================="
 
 # ==========================================
 # Daemon + IPC Testing Targets

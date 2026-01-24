@@ -12,11 +12,15 @@ localup-transport = { path = "../localup-transport" }
 localup-transport-quic = { path = "../localup-transport-quic" }
 localup-control = { path = "../localup-control" }
 localup-cert = { path = "../localup-cert" }
+localup-relay-db = { path = "../localup-relay-db" }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+sea-orm = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
