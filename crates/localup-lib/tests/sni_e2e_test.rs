@@ -17,6 +17,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use localup_client::ProtocolConfig;
+use localup_proto::IpFilter;
 use localup_router::{RouteRegistry, SniRouter};
 
 // ============================================================================
@@ -98,6 +99,7 @@ impl SniRelay {
             sni_hostname: sni_hostname.to_string(),
             localup_id: tunnel_id.to_string(),
             target_addr: target_addr.to_string(),
+            ip_filter: IpFilter::new(),
         };
 
         self.router.register_route(route)?;
@@ -226,19 +228,24 @@ async fn test_sni_multi_tenant_api_workflow() {
     info!("\n📍 Step 7: Verify TLS Protocol Configuration");
     let tls_config = ProtocolConfig::Tls {
         local_port: 3443,
-        sni_hostname: Some("api-001.company.com".to_string()),
+        sni_hostnames: vec![
+            "api-001.company.com".to_string(),
+            "*.local.company.com".to_string(),
+        ],
     };
 
     match tls_config {
         ProtocolConfig::Tls {
             local_port,
-            sni_hostname,
+            sni_hostnames,
         } => {
             assert_eq!(local_port, 3443);
-            assert_eq!(sni_hostname, Some("api-001.company.com".to_string()));
+            assert_eq!(sni_hostnames.len(), 2);
+            assert_eq!(sni_hostnames[0], "api-001.company.com");
+            assert_eq!(sni_hostnames[1], "*.local.company.com");
             info!(
-                "✓ TLS config valid: local_port={}, sni_hostname={:?}",
-                local_port, sni_hostname
+                "✓ TLS config valid: local_port={}, sni_hostnames={:?}",
+                local_port, sni_hostnames
             );
         }
         _ => panic!("Invalid protocol config"),

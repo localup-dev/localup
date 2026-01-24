@@ -207,9 +207,9 @@ pub async fn list_tunnels(
                             }
                             localup_proto::Protocol::Tls {
                                 port: _,
-                                sni_pattern,
+                                sni_patterns,
                             } => TunnelProtocol::Tls {
-                                domain: sni_pattern.clone(),
+                                domains: sni_patterns.clone(),
                             },
                         },
                         public_url: e.public_url.clone(),
@@ -342,9 +342,9 @@ pub async fn get_tunnel(
                         }
                         localup_proto::Protocol::Tls {
                             port: _,
-                            sni_pattern,
+                            sni_patterns,
                         } => TunnelProtocol::Tls {
-                            domain: sni_pattern.clone(),
+                            domains: sni_patterns.clone(),
                         },
                     },
                     public_url: e.public_url.clone(),

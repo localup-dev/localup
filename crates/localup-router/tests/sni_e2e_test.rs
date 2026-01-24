@@ -7,6 +7,7 @@
 //! 4. Concurrent access to SNI router
 //! 5. Proper error handling for malformed ClientHellos
 
+use localup_proto::IpFilter;
 use localup_router::{RouteRegistry, SniRouter};
 use std::sync::Arc;
 
@@ -31,18 +32,21 @@ fn test_sni_routing_workflow() {
         sni_hostname: "api.example.com".to_string(),
         localup_id: "tunnel-api-001".to_string(),
         target_addr: "127.0.0.1:3443".to_string(),
+        ip_filter: IpFilter::new(),
     };
 
     let web_route = localup_router::sni::SniRoute {
         sni_hostname: "web.example.com".to_string(),
         localup_id: "tunnel-web-001".to_string(),
         target_addr: "127.0.0.1:3444".to_string(),
+        ip_filter: IpFilter::new(),
     };
 
     let db_route = localup_router::sni::SniRoute {
         sni_hostname: "db.example.com".to_string(),
         localup_id: "tunnel-db-001".to_string(),
         target_addr: "127.0.0.1:3445".to_string(),
+        ip_filter: IpFilter::new(),
     };
 
     router
@@ -146,6 +150,7 @@ fn test_sni_with_certificates_on_different_domains() {
             sni_hostname: domain.to_string(),
             localup_id: format!("tunnel-{:03}", idx),
             target_addr: addr.to_string(),
+            ip_filter: IpFilter::new(),
         };
         router
             .register_route(route)
@@ -226,6 +231,7 @@ fn test_concurrent_sni_routing() {
                 sni_hostname: hostname.clone(),
                 localup_id: tunnel_id.clone(),
                 target_addr: target_addr.clone(),
+                ip_filter: IpFilter::new(),
             };
 
             router_clone.register_route(route).unwrap();
@@ -279,6 +285,7 @@ fn test_sni_route_persistence() {
         sni_hostname: "persistent.example.com".to_string(),
         localup_id: "tunnel-persistent".to_string(),
         target_addr: "127.0.0.1:3443".to_string(),
+        ip_filter: IpFilter::new(),
     };
 
     router.register_route(route).unwrap();

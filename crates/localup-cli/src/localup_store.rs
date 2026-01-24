@@ -203,6 +203,7 @@ mod tests {
                 connection_timeout: Duration::from_secs(30),
                 preferred_transport: None,
                 http_auth: HttpAuthConfig::None,
+                ip_allowlist: Vec::new(),
             },
         }
     }

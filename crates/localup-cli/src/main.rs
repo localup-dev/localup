@@ -46,14 +46,16 @@ struct Cli {
     #[arg(short, long)]
     subdomain: Option<String>,
 
-    /// Custom domain for HTTP/HTTPS tunnels (standalone mode only)
-    /// Requires DNS pointing to relay and valid TLS certificate.
-    /// Takes precedence over subdomain when both are set.
+    /// Custom domain for HTTP/HTTPS/TLS tunnels (standalone mode only)
+    /// For HTTP/HTTPS: Requires DNS pointing to relay and valid TLS certificate.
+    /// For TLS: No validation - relay routes based on SNI match (you manage certificates).
+    /// Can be specified multiple times for TLS tunnels.
     /// Supports wildcard domains (e.g., *.mycompany.com) for multi-subdomain tunnels.
     /// Example: --custom-domain api.mycompany.com
     /// Example: --custom-domain "*.mycompany.com"
+    /// Example (TLS multi): --custom-domain "*.local.example.com" --custom-domain "api.example.com"
     #[arg(long = "custom-domain")]
-    custom_domain: Option<String>,
+    custom_domain: Vec<String>,
 
     /// Relay server address (standalone mode only)
     #[arg(short, long, env)]
@@ -120,12 +122,14 @@ enum Commands {
         /// Subdomain for HTTP/HTTPS/TLS tunnels
         #[arg(short, long)]
         subdomain: Option<String>,
-        /// Custom domain for HTTP/HTTPS tunnels (requires DNS and certificate)
+        /// Custom domain for HTTP/HTTPS/TLS tunnels
+        /// For TLS: No validation - relay routes based on SNI match (you manage certificates).
+        /// Can be specified multiple times for TLS tunnels.
         /// Supports wildcard domains (e.g., *.mycompany.com) for multi-subdomain tunnels.
         /// Example: --custom-domain api.mycompany.com
         /// Example: --custom-domain "*.mycompany.com"
         #[arg(long = "custom-domain")]
-        custom_domain: Option<String>,
+        custom_domain: Vec<String>,
         /// Relay server address (host:port)
         #[arg(short, long)]
         relay: Option<String>,
@@ -664,10 +668,11 @@ enum DaemonCommands {
         /// Subdomain for HTTP/HTTPS tunnels
         #[arg(short, long)]
         subdomain: Option<String>,
-        /// Custom domain for HTTP/HTTPS tunnels
+        /// Custom domain for HTTP/HTTPS/TLS tunnels
+        /// Can be specified multiple times for TLS tunnels.
         /// Supports wildcard domains (e.g., *.mycompany.com) for multi-subdomain tunnels.
         #[arg(long = "custom-domain")]
-        custom_domain: Option<String>,
+        custom_domain: Vec<String>,
     },
     /// Remove a tunnel from .localup.yml
     Remove {
@@ -1136,12 +1141,19 @@ async fn handle_daemon_command(command: DaemonCommands) -> Result<()> {
             }
 
             // Create new tunnel entry
+            // For TLS, use custom_domain as sni_hostnames; for HTTP/HTTPS use as custom_domain
+            let (custom_domain_opt, sni_hostnames) = if protocol == "tls" {
+                (None, custom_domain)
+            } else {
+                (custom_domain.into_iter().next(), Vec::new())
+            };
             let tunnel = TunnelEntry {
                 name: name.clone(),
                 port,
                 protocol,
                 subdomain,
-                custom_domain,
+                custom_domain: custom_domain_opt,
+                sni_hostnames,
                 enabled: true,
                 ..Default::default()
             };
@@ -1232,7 +1244,7 @@ fn handle_add_tunnel(
     protocol: String,
     token: Option<String>,
     subdomain: Option<String>,
-    custom_domain: Option<String>,
+    custom_domains: Vec<String>,
     relay: Option<String>,
     transport: Option<String>,
     remote_port: Option<u16>,
@@ -1255,8 +1267,14 @@ fn handle_add_tunnel(
     };
 
     // Parse protocol - custom_domain takes precedence over subdomain for HTTP/HTTPS
-    let protocol_config =
-        parse_protocol(&protocol, local_port, subdomain, custom_domain, remote_port)?;
+    // For TLS, all custom_domains are used as SNI patterns
+    let protocol_config = parse_protocol(
+        &protocol,
+        local_port,
+        subdomain,
+        custom_domains,
+        remote_port,
+    )?;
 
     // Parse exit node
     let exit_node = if let Some(relay_addr) = relay {
@@ -1373,11 +1391,11 @@ fn handle_list_tunnels() -> Result<()> {
                 }
                 ProtocolConfig::Tls {
                     local_port,
-                    sni_hostname,
+                    sni_hostnames,
                 } => {
                     print!("    Protocol: TLS, Port: {}", local_port);
-                    if let Some(sni) = sni_hostname {
-                        print!(", SNI: {}", sni);
+                    if !sni_hostnames.is_empty() {
+                        print!(", SNI: {}", sni_hostnames.join(", "));
                     }
                     println!();
                 }
@@ -1787,28 +1805,39 @@ fn parse_protocol(
     protocol: &str,
     port: u16,
     subdomain: Option<String>,
-    custom_domain: Option<String>,
+    custom_domains: Vec<String>,
     remote_port: Option<u16>,
 ) -> Result<ProtocolConfig> {
     match protocol.to_lowercase().as_str() {
         "http" => Ok(ProtocolConfig::Http {
             local_port: port,
             subdomain,
-            custom_domain,
+            // For HTTP, use first custom_domain if provided
+            custom_domain: custom_domains.into_iter().next(),
         }),
         "https" => Ok(ProtocolConfig::Https {
             local_port: port,
             subdomain,
-            custom_domain,
+            // For HTTPS, use first custom_domain if provided
+            custom_domain: custom_domains.into_iter().next(),
         }),
         "tcp" => Ok(ProtocolConfig::Tcp {
             local_port: port,
             remote_port,
         }),
-        "tls" => Ok(ProtocolConfig::Tls {
-            local_port: port,
-            sni_hostname: subdomain,
-        }),
+        "tls" => {
+            // For TLS, use all custom_domains as SNI patterns
+            // If no custom_domains, fall back to subdomain
+            let sni_hostnames = if custom_domains.is_empty() {
+                subdomain.into_iter().collect()
+            } else {
+                custom_domains
+            };
+            Ok(ProtocolConfig::Tls {
+                local_port: port,
+                sni_hostnames,
+            })
+        }
         _ => Err(anyhow::anyhow!(
             "Invalid protocol: {}. Valid options: http, https, tcp, tls",
             protocol

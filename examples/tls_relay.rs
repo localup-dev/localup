@@ -189,7 +189,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         local_host: "127.0.0.1".to_string(),
         protocols: vec![ProtocolConfig::Tls {
             local_port: api_port,
-            sni_hostname: Some("api.localho.st".to_string()),
+            sni_hostnames: vec!["api.localho.st".to_string()],
         }],
         auth_token,
         exit_node: ExitNodeConfig::Custom("127.0.0.1:4443".to_string()),

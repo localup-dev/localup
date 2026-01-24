@@ -704,10 +704,15 @@ impl TunnelConnector {
 
                 ProtocolConfig::Tls {
                     local_port: _,
-                    sni_hostname,
+                    sni_hostnames,
                 } => Protocol::Tls {
                     port: 8443, // TLS server port (SNI-based routing)
-                    sni_pattern: sni_hostname.clone().unwrap_or_else(|| "*".to_string()),
+                    // Use all provided SNI patterns, or default to "*" if none
+                    sni_patterns: if sni_hostnames.is_empty() {
+                        vec!["*".to_string()]
+                    } else {
+                        sni_hostnames.clone()
+                    },
                 },
             })
             .collect();

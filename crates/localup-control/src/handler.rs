@@ -1890,18 +1890,20 @@ impl TunnelHandler {
                         port: Some(*port),
                     });
                 }
-                Protocol::Tls { port, sni_pattern } => {
+                Protocol::Tls { port, sni_patterns } => {
                     // TLS endpoint - use actual relay TLS port if configured, otherwise use client's requested port
                     let actual_port = self.tls_port.unwrap_or(*port);
                     debug!(
-                        "Building TLS endpoint: relay_port={:?}, client_port={}, actual_port={}",
-                        self.tls_port, port, actual_port
+                        "Building TLS endpoint: relay_port={:?}, client_port={}, actual_port={}, patterns={:?}",
+                        self.tls_port, port, actual_port, sni_patterns
                     );
+                    // Display all SNI patterns
+                    let patterns_display = sni_patterns.join(", ");
                     endpoints.push(Endpoint {
                         protocol: protocol.clone(),
                         public_url: format!(
                             "tls://{}:{} (SNI: {})",
-                            self.domain, actual_port, sni_pattern
+                            self.domain, actual_port, patterns_display
                         ),
                         port: Some(actual_port),
                     });
@@ -2147,30 +2149,32 @@ impl TunnelHandler {
                     Err("TCP tunnels not supported (no port allocator)".to_string())
                 }
             }
-            Protocol::Tls { sni_pattern, .. } => {
-                // Register TLS route based on SNI pattern
-                let route_key = RouteKey::TlsSni(sni_pattern.clone());
-                let route_target = RouteTarget {
-                    localup_id: localup_id.to_string(),
-                    target_addr: format!("tunnel:{}", localup_id), // Special marker for tunnel routing
-                    metadata: Some("via-tunnel".to_string()),
-                    ip_filter: ip_filter.clone(),
-                };
+            Protocol::Tls { sni_patterns, .. } => {
+                // Register TLS routes for all SNI patterns (supports multiple patterns including wildcards)
+                for sni_pattern in sni_patterns {
+                    let route_key = RouteKey::TlsSni(sni_pattern.clone());
+                    let route_target = RouteTarget {
+                        localup_id: localup_id.to_string(),
+                        target_addr: format!("tunnel:{}", localup_id), // Special marker for tunnel routing
+                        metadata: Some("via-tunnel".to_string()),
+                        ip_filter: ip_filter.clone(),
+                    };
 
-                self.route_registry
-                    .register(route_key, route_target)
-                    .map_err(|e| e.to_string())?;
+                    self.route_registry
+                        .register(route_key, route_target)
+                        .map_err(|e| e.to_string())?;
 
-                if ip_filter.is_empty() {
-                    debug!(
-                        "Registered TLS route for SNI pattern {} -> tunnel:{}",
-                        sni_pattern, localup_id
-                    );
-                } else {
-                    debug!(
-                        "Registered TLS route for SNI pattern {} -> tunnel:{} (IP filter: {} entries)",
-                        sni_pattern, localup_id, ip_filter.len()
-                    );
+                    if ip_filter.is_empty() {
+                        debug!(
+                            "Registered TLS route for SNI pattern {} -> tunnel:{}",
+                            sni_pattern, localup_id
+                        );
+                    } else {
+                        debug!(
+                            "Registered TLS route for SNI pattern {} -> tunnel:{} (IP filter: {} entries)",
+                            sni_pattern, localup_id, ip_filter.len()
+                        );
+                    }
                 }
                 Ok(None)
             }
@@ -2243,10 +2247,13 @@ impl TunnelHandler {
                     info!("Deallocated TCP port for tunnel {}", localup_id);
                 }
             }
-            Protocol::Tls { sni_pattern, .. } => {
-                let route_key = RouteKey::TlsSni(sni_pattern.clone());
-                let _ = self.route_registry.unregister(&route_key);
-                debug!("Unregistered TLS route for SNI pattern: {}", sni_pattern);
+            Protocol::Tls { sni_patterns, .. } => {
+                // Unregister all SNI patterns for this tunnel
+                for sni_pattern in sni_patterns {
+                    let route_key = RouteKey::TlsSni(sni_pattern.clone());
+                    let _ = self.route_registry.unregister(&route_key);
+                    debug!("Unregistered TLS route for SNI pattern: {}", sni_pattern);
+                }
             }
         }
     }
@@ -2505,7 +2512,7 @@ mod tests {
         let localup_id = "test-tunnel";
         let protocols = vec![Protocol::Tls {
             port: 443,
-            sni_pattern: "*.example.com".to_string(),
+            sni_patterns: vec!["*.example.com".to_string()],
         }];
         let config = TunnelConfig::default();
 

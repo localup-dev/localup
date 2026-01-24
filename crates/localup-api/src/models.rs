@@ -21,10 +21,10 @@ pub enum TunnelProtocol {
         /// Local port to forward
         port: u16,
     },
-    /// TLS tunnel with SNI
+    /// TLS tunnel with SNI (supports multiple domains/patterns)
     Tls {
-        /// Domain for SNI routing
-        domain: String,
+        /// Domains/patterns for SNI routing (can include wildcards like *.example.com)
+        domains: Vec<String>,
     },
 }
 
