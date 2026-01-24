@@ -492,6 +492,23 @@ impl TunnelHandler {
             );
         }
 
+        // Log endpoint details including SNI patterns for TLS
+        for endpoint in &endpoints {
+            match &endpoint.protocol {
+                Protocol::Tls { sni_patterns, .. } => {
+                    info!(
+                        "  📍 Endpoint: {} with {} SNI patterns: {:?}",
+                        endpoint.public_url,
+                        sni_patterns.len(),
+                        sni_patterns
+                    );
+                }
+                _ => {
+                    info!("  📍 Endpoint: {}", endpoint.public_url);
+                }
+            }
+        }
+
         info!(
             "✅ Tunnel registered: {} with {} endpoints",
             localup_id,

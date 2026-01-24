@@ -400,7 +400,6 @@ async fn test_disconnect_delivery_concurrent_clients() {
     let mut handles = Vec::new();
 
     for i in 0..num_clients {
-        let server_addr = server_addr;
         let handle = tokio::spawn(async move {
             let client_config = Arc::new(QuicConfig::client_insecure());
             let connector = QuicConnector::new(client_config).unwrap();
