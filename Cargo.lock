@@ -3384,6 +3384,7 @@ name = "localup-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "clap",
  "dirs 5.0.1",

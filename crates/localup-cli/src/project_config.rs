@@ -85,6 +85,11 @@ pub struct ProjectTunnel {
     #[serde(default)]
     pub sni_hostnames: Vec<String>,
 
+    /// HTTP backend port for TLS tunnels with HTTP passthrough
+    /// When the relay sends plain HTTP traffic through a TLS tunnel, it will be
+    /// forwarded to this port instead of the main port.
+    pub http_port: Option<u16>,
+
     /// Override relay server for this tunnel
     pub relay: Option<String>,
 
@@ -125,6 +130,7 @@ impl Default for ProjectTunnel {
             custom_domain: None,
             remote_port: None,
             sni_hostnames: Vec::new(),
+            http_port: None,
             relay: None,
             token: None,
             transport: None,
@@ -349,6 +355,7 @@ impl ProjectTunnel {
             "tls" => ProtocolConfig::Tls {
                 local_port: self.port,
                 sni_hostnames: self.sni_hostnames.clone(),
+                http_port: self.http_port,
             },
             _ => anyhow::bail!("Unknown protocol: {}", self.protocol),
         };
@@ -620,6 +627,7 @@ tunnels:
             custom_domain: None,
             remote_port: None,
             sni_hostnames: Vec::new(),
+            http_port: None,
             relay: None,
             token: None,
             transport: None,
@@ -659,6 +667,7 @@ tunnels:
             custom_domain: None,
             remote_port: Some(15432),
             sni_hostnames: Vec::new(),
+            http_port: None,
             relay: Some("custom-relay:4443".to_string()),
             token: Some("custom-token".to_string()),
             transport: Some("quic".to_string()),
@@ -702,6 +711,7 @@ tunnels:
             custom_domain: None,
             remote_port: None,
             sni_hostnames: Vec::new(),
+            http_port: None,
             relay: None,
             token: None,
             transport: None,
@@ -837,6 +847,7 @@ tunnels:
         if let ProtocolConfig::Tls {
             local_port,
             sni_hostnames,
+            ..
         } = &tunnel_config.protocols[0]
         {
             assert_eq!(*local_port, 443);
@@ -892,6 +903,7 @@ tunnels:
             custom_domain: None,
             remote_port: None,
             sni_hostnames: Vec::new(),
+            http_port: None,
             relay: None,
             token: None,
             transport: None,
@@ -949,6 +961,7 @@ tunnels:
         if let ProtocolConfig::Tls {
             local_port,
             sni_hostnames,
+            ..
         } = &tunnel_config.protocols[0]
         {
             assert_eq!(*local_port, 443);
@@ -982,6 +995,7 @@ tunnels:
         if let ProtocolConfig::Tls {
             local_port,
             sni_hostnames,
+            ..
         } = &tunnel_config.protocols[0]
         {
             assert_eq!(*local_port, 8443);

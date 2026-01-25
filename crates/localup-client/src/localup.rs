@@ -705,6 +705,7 @@ impl TunnelConnector {
                 ProtocolConfig::Tls {
                     local_port: _,
                     sni_hostnames,
+                    http_port: _,
                 } => Protocol::Tls {
                     port: 8443, // TLS server port (SNI-based routing)
                     // Use all provided SNI patterns, or default to "*" if none
@@ -1766,14 +1767,19 @@ impl TunnelConnection {
                 return;
             }
         };
-        // Get local TLS port from first TLS protocol
-        let local_port = config.protocols.first().and_then(|p| match p {
-            ProtocolConfig::Tls { local_port, .. } => Some(*local_port),
+
+        // Get TLS protocol config
+        let tls_config = config.protocols.first().and_then(|p| match p {
+            ProtocolConfig::Tls {
+                local_port,
+                http_port,
+                ..
+            } => Some((*local_port, *http_port)),
             _ => None,
         });
 
-        let local_port = match local_port {
-            Some(port) => port,
+        let (tls_port, http_port) = match tls_config {
+            Some(config) => config,
             None => {
                 error!("No TLS protocol configured");
                 let _ = stream
@@ -1783,14 +1789,43 @@ impl TunnelConnection {
             }
         };
 
-        // Connect to local TLS service
+        // Detect if this is HTTP traffic (not TLS)
+        // TLS ClientHello starts with 0x16 (handshake) followed by version bytes
+        // HTTP requests start with method names like "GET ", "POST ", "PUT ", etc.
+        let is_http = !client_hello.is_empty()
+            && (client_hello.starts_with(b"GET ")
+                || client_hello.starts_with(b"POST ")
+                || client_hello.starts_with(b"PUT ")
+                || client_hello.starts_with(b"DELETE ")
+                || client_hello.starts_with(b"HEAD ")
+                || client_hello.starts_with(b"OPTIONS ")
+                || client_hello.starts_with(b"PATCH ")
+                || client_hello.starts_with(b"CONNECT "));
+
+        // Choose the appropriate port
+        let local_port = if is_http {
+            http_port.unwrap_or(tls_port)
+        } else {
+            tls_port
+        };
+
+        if is_http {
+            debug!(
+                "Detected HTTP traffic on TLS stream {}, routing to port {}",
+                stream_id, local_port
+            );
+        }
+
+        // Connect to local service
         let local_addr = format!("{}:{}", config.local_host, local_port);
         let local_socket = match TcpStream::connect(&local_addr).await {
             Ok(sock) => sock,
             Err(e) => {
                 error!(
-                    "Failed to connect to local TLS service at {}: {}",
-                    local_addr, e
+                    "Failed to connect to local {} service at {}: {}",
+                    if is_http { "HTTP" } else { "TLS" },
+                    local_addr,
+                    e
                 );
                 let _ = stream
                     .send_message(&TunnelMessage::TlsClose { stream_id })
@@ -1799,7 +1834,11 @@ impl TunnelConnection {
             }
         };
 
-        debug!("Connected to local TLS service at {}", local_addr);
+        debug!(
+            "Connected to local {} service at {}",
+            if is_http { "HTTP" } else { "TLS" },
+            local_addr
+        );
 
         // Split both streams for bidirectional communication WITHOUT MUTEXES
         let (mut local_read, mut local_write) = local_socket.into_split();
