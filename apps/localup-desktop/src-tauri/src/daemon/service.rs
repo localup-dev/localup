@@ -124,7 +124,8 @@ impl DaemonService {
                 },
                 "tls" => ProtocolConfig::Tls {
                     local_port,
-                    sni_hostname: custom_domain.clone(),
+                    sni_hostnames: custom_domain.clone().map(|d| vec![d]).unwrap_or_default(),
+                    http_port: None,
                 },
                 other => {
                     return DaemonResponse::Error {
@@ -474,7 +475,8 @@ async fn handle_request(
                 },
                 "tls" => ProtocolConfig::Tls {
                     local_port,
-                    sni_hostname: custom_domain.clone(),
+                    sni_hostnames: custom_domain.clone().map(|d| vec![d]).unwrap_or_default(),
+                    http_port: None,
                 },
                 other => {
                     return DaemonResponse::Error {
