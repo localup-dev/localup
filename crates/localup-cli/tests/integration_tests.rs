@@ -24,6 +24,7 @@ fn create_test_config(name: &str, port: u16) -> StoredTunnel {
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
             http_auth: HttpAuthConfig::None,
+            ip_allowlist: Vec::new(),
         },
     }
 }
@@ -264,6 +265,7 @@ fn test_localup_store_protocol_types() {
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
             http_auth: HttpAuthConfig::None,
+            ip_allowlist: Vec::new(),
         },
     };
     store.save(&http_tunnel).unwrap();
@@ -285,6 +287,7 @@ fn test_localup_store_protocol_types() {
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
             http_auth: HttpAuthConfig::None,
+            ip_allowlist: Vec::new(),
         },
     };
     store.save(&https_tunnel).unwrap();
@@ -305,6 +308,7 @@ fn test_localup_store_protocol_types() {
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
             http_auth: HttpAuthConfig::None,
+            ip_allowlist: Vec::new(),
         },
     };
     store.save(&tcp_tunnel).unwrap();
@@ -317,7 +321,8 @@ fn test_localup_store_protocol_types() {
             local_host: "localhost".to_string(),
             protocols: vec![ProtocolConfig::Tls {
                 local_port: 9000,
-                sni_hostname: Some("tls-test.example.com".to_string()),
+                sni_hostnames: vec!["tls-test.example.com".to_string()],
+                http_port: None,
             }],
             auth_token: "test-token".to_string(),
             exit_node: ExitNodeConfig::Auto,
@@ -325,6 +330,7 @@ fn test_localup_store_protocol_types() {
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
             http_auth: HttpAuthConfig::None,
+            ip_allowlist: Vec::new(),
         },
     };
     store.save(&tls_tunnel).unwrap();
@@ -380,6 +386,7 @@ fn test_localup_store_exit_node_configs() {
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
             http_auth: HttpAuthConfig::None,
+            ip_allowlist: Vec::new(),
         },
     };
     store.save(&auto_tunnel).unwrap();
@@ -401,6 +408,7 @@ fn test_localup_store_exit_node_configs() {
             connection_timeout: Duration::from_secs(30),
             preferred_transport: None,
             http_auth: HttpAuthConfig::None,
+            ip_allowlist: Vec::new(),
         },
     };
     store.save(&custom_tunnel).unwrap();
@@ -434,6 +442,7 @@ fn test_localup_store_serialization_roundtrip() {
             connection_timeout: Duration::from_secs(60),
             preferred_transport: None,
             http_auth: HttpAuthConfig::None,
+            ip_allowlist: Vec::new(),
         },
     };
 

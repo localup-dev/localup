@@ -381,4 +381,162 @@ mod tests {
         let result = SniRouter::extract_sni(&client_hello);
         assert!(result.is_err());
     }
+
+    #[test]
+    fn test_multiple_sni_routes_registration() {
+        let registry = Arc::new(RouteRegistry::new());
+        let router = SniRouter::new(registry);
+
+        // Register multiple SNI hostnames for the same tunnel
+        let hostnames = vec!["api.example.com", "web.example.com", "admin.example.com"];
+
+        for hostname in &hostnames {
+            let route = SniRoute {
+                sni_hostname: hostname.to_string(),
+                localup_id: "tunnel-multi".to_string(),
+                target_addr: "localhost:3000".to_string(),
+                ip_filter: IpFilter::new(),
+            };
+            router.register_route(route).unwrap();
+        }
+
+        // Verify all routes exist
+        for hostname in &hostnames {
+            assert!(router.has_route(hostname));
+            let target = router.lookup(hostname).unwrap();
+            assert_eq!(target.localup_id, "tunnel-multi");
+        }
+    }
+
+    #[test]
+    fn test_multiple_wildcard_patterns() {
+        let registry = Arc::new(RouteRegistry::new());
+        let router = SniRouter::new(registry);
+
+        // Register multiple wildcard patterns
+        let patterns = vec![
+            "*.local-abc123.myapp.dev",
+            "*.staging.myapp.dev",
+            "*.production.myapp.dev",
+        ];
+
+        for pattern in &patterns {
+            let route = SniRoute {
+                sni_hostname: pattern.to_string(),
+                localup_id: "tunnel-wildcards".to_string(),
+                target_addr: "localhost:8443".to_string(),
+                ip_filter: IpFilter::new(),
+            };
+            router.register_route(route).unwrap();
+        }
+
+        // Verify all patterns are registered
+        for pattern in &patterns {
+            assert!(router.has_route(pattern));
+        }
+    }
+
+    #[test]
+    fn test_mixed_specific_and_wildcard_patterns() {
+        let registry = Arc::new(RouteRegistry::new());
+        let router = SniRouter::new(registry);
+
+        // Register mix of specific hostnames and wildcards
+        let routes = vec![
+            ("api.specific.com", "tunnel-api"),
+            ("*.wildcard.example.com", "tunnel-wildcard"),
+            ("web.specific.com", "tunnel-web"),
+            ("*.another.wildcard.io", "tunnel-another"),
+        ];
+
+        for (hostname, tunnel_id) in &routes {
+            let route = SniRoute {
+                sni_hostname: hostname.to_string(),
+                localup_id: tunnel_id.to_string(),
+                target_addr: "localhost:443".to_string(),
+                ip_filter: IpFilter::new(),
+            };
+            router.register_route(route).unwrap();
+        }
+
+        // Verify each route exists with correct tunnel ID
+        for (hostname, tunnel_id) in &routes {
+            assert!(router.has_route(hostname));
+            let target = router.lookup(hostname).unwrap();
+            assert_eq!(target.localup_id, *tunnel_id);
+        }
+    }
+
+    #[test]
+    fn test_unregister_multiple_patterns() {
+        let registry = Arc::new(RouteRegistry::new());
+        let router = SniRouter::new(registry);
+
+        let patterns = vec![
+            "pattern1.example.com",
+            "pattern2.example.com",
+            "*.wildcard.example.com",
+        ];
+
+        // Register all
+        for pattern in &patterns {
+            let route = SniRoute {
+                sni_hostname: pattern.to_string(),
+                localup_id: "tunnel-test".to_string(),
+                target_addr: "localhost:443".to_string(),
+                ip_filter: IpFilter::new(),
+            };
+            router.register_route(route).unwrap();
+        }
+
+        // Verify all exist
+        for pattern in &patterns {
+            assert!(router.has_route(pattern));
+        }
+
+        // Unregister one
+        router.unregister("pattern1.example.com").unwrap();
+        assert!(!router.has_route("pattern1.example.com"));
+
+        // Others should still exist
+        assert!(router.has_route("pattern2.example.com"));
+        assert!(router.has_route("*.wildcard.example.com"));
+
+        // Unregister remaining
+        router.unregister("pattern2.example.com").unwrap();
+        router.unregister("*.wildcard.example.com").unwrap();
+
+        assert!(!router.has_route("pattern2.example.com"));
+        assert!(!router.has_route("*.wildcard.example.com"));
+    }
+
+    #[test]
+    fn test_same_tunnel_different_patterns() {
+        let registry = Arc::new(RouteRegistry::new());
+        let router = SniRouter::new(registry);
+
+        // Same tunnel ID can serve multiple domains
+        let tunnel_id = "desktop-app-tunnel";
+        let patterns = vec![
+            "*.local-rqe59t.dviejo.temps.dev",
+            "api.production.temps.dev",
+            "*.staging.temps.dev",
+        ];
+
+        for pattern in &patterns {
+            let route = SniRoute {
+                sni_hostname: pattern.to_string(),
+                localup_id: tunnel_id.to_string(),
+                target_addr: "localhost:443".to_string(),
+                ip_filter: IpFilter::new(),
+            };
+            router.register_route(route).unwrap();
+        }
+
+        // All patterns should resolve to the same tunnel
+        for pattern in &patterns {
+            let target = router.lookup(pattern).unwrap();
+            assert_eq!(target.localup_id, tunnel_id);
+        }
+    }
 }

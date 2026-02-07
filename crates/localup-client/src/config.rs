@@ -14,10 +14,20 @@ pub enum ProtocolConfig {
     },
     /// TLS/SNI-based routing
     /// Routes incoming TLS connections based on Server Name Indication (SNI)
+    /// Supports multiple patterns including wildcards (e.g., "*.example.com")
+    /// No domain validation - relay simply routes based on SNI match
     Tls {
         local_port: u16,
-        /// SNI hostname for routing (e.g., "api.example.com")
-        sni_hostname: Option<String>,
+        /// SNI hostnames/patterns for routing
+        /// Examples: "api.example.com", "*.local.example.com", "*.example.com"
+        #[serde(default)]
+        sni_hostnames: Vec<String>,
+        /// Optional port for HTTP passthrough traffic
+        /// When the relay sends HTTP traffic (via TlsConnect with HTTP payload),
+        /// it will be forwarded to this port instead of local_port
+        /// If not set, HTTP passthrough traffic goes to local_port
+        #[serde(default)]
+        http_port: Option<u16>,
     },
     /// HTTP with host-based routing
     Http {
@@ -247,5 +257,175 @@ mod tests {
             .build();
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tls_config_with_single_sni_hostname() {
+        let config = TunnelConfig::builder()
+            .protocol(ProtocolConfig::Tls {
+                local_port: 443,
+                sni_hostnames: vec!["api.example.com".to_string()],
+                http_port: None,
+            })
+            .auth_token("test-token".to_string())
+            .build()
+            .unwrap();
+
+        match &config.protocols[0] {
+            ProtocolConfig::Tls {
+                local_port,
+                sni_hostnames,
+                http_port,
+            } => {
+                assert_eq!(*local_port, 443);
+                assert_eq!(sni_hostnames.len(), 1);
+                assert_eq!(sni_hostnames[0], "api.example.com");
+                assert!(http_port.is_none());
+            }
+            _ => panic!("Expected TLS protocol"),
+        }
+    }
+
+    #[test]
+    fn test_tls_config_with_multiple_sni_hostnames() {
+        let config = TunnelConfig::builder()
+            .protocol(ProtocolConfig::Tls {
+                local_port: 443,
+                sni_hostnames: vec![
+                    "api.example.com".to_string(),
+                    "web.example.com".to_string(),
+                    "admin.example.com".to_string(),
+                ],
+                http_port: None,
+            })
+            .auth_token("test-token".to_string())
+            .build()
+            .unwrap();
+
+        match &config.protocols[0] {
+            ProtocolConfig::Tls {
+                local_port,
+                sni_hostnames,
+                ..
+            } => {
+                assert_eq!(*local_port, 443);
+                assert_eq!(sni_hostnames.len(), 3);
+                assert_eq!(sni_hostnames[0], "api.example.com");
+                assert_eq!(sni_hostnames[1], "web.example.com");
+                assert_eq!(sni_hostnames[2], "admin.example.com");
+            }
+            _ => panic!("Expected TLS protocol"),
+        }
+    }
+
+    #[test]
+    fn test_tls_config_with_wildcard_patterns() {
+        let config = TunnelConfig::builder()
+            .protocol(ProtocolConfig::Tls {
+                local_port: 443,
+                sni_hostnames: vec![
+                    "*.example.com".to_string(),
+                    "*.local.myapp.dev".to_string(),
+                    "api.specific.com".to_string(),
+                ],
+                http_port: None,
+            })
+            .auth_token("test-token".to_string())
+            .build()
+            .unwrap();
+
+        match &config.protocols[0] {
+            ProtocolConfig::Tls { sni_hostnames, .. } => {
+                assert_eq!(sni_hostnames.len(), 3);
+                assert!(sni_hostnames[0].starts_with("*."));
+                assert!(sni_hostnames[1].starts_with("*."));
+                assert!(!sni_hostnames[2].starts_with("*."));
+            }
+            _ => panic!("Expected TLS protocol"),
+        }
+    }
+
+    #[test]
+    fn test_tls_config_with_empty_sni_hostnames() {
+        // Empty hostnames should be valid - relay will assign default
+        let config = TunnelConfig::builder()
+            .protocol(ProtocolConfig::Tls {
+                local_port: 443,
+                sni_hostnames: vec![],
+                http_port: None,
+            })
+            .auth_token("test-token".to_string())
+            .build()
+            .unwrap();
+
+        match &config.protocols[0] {
+            ProtocolConfig::Tls { sni_hostnames, .. } => {
+                assert!(sni_hostnames.is_empty());
+            }
+            _ => panic!("Expected TLS protocol"),
+        }
+    }
+
+    #[test]
+    fn test_tls_config_serialization_roundtrip() {
+        let original = TunnelConfig::builder()
+            .protocol(ProtocolConfig::Tls {
+                local_port: 8443,
+                sni_hostnames: vec![
+                    "*.local-abc123.myapp.dev".to_string(),
+                    "api.production.com".to_string(),
+                ],
+                http_port: Some(8080),
+            })
+            .auth_token("test-token".to_string())
+            .build()
+            .unwrap();
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&original).unwrap();
+
+        // Deserialize back
+        let restored: TunnelConfig = serde_json::from_str(&json).unwrap();
+
+        match &restored.protocols[0] {
+            ProtocolConfig::Tls {
+                local_port,
+                sni_hostnames,
+                http_port,
+            } => {
+                assert_eq!(*local_port, 8443);
+                assert_eq!(sni_hostnames.len(), 2);
+                assert_eq!(sni_hostnames[0], "*.local-abc123.myapp.dev");
+                assert_eq!(sni_hostnames[1], "api.production.com");
+                assert_eq!(*http_port, Some(8080));
+            }
+            _ => panic!("Expected TLS protocol"),
+        }
+    }
+
+    #[test]
+    fn test_tls_config_with_http_port() {
+        let config = TunnelConfig::builder()
+            .protocol(ProtocolConfig::Tls {
+                local_port: 9443,
+                sni_hostnames: vec!["*.example.com".to_string()],
+                http_port: Some(9080),
+            })
+            .auth_token("test-token".to_string())
+            .build()
+            .unwrap();
+
+        match &config.protocols[0] {
+            ProtocolConfig::Tls {
+                local_port,
+                sni_hostnames,
+                http_port,
+            } => {
+                assert_eq!(*local_port, 9443);
+                assert_eq!(sni_hostnames.len(), 1);
+                assert_eq!(*http_port, Some(9080));
+            }
+            _ => panic!("Expected TLS protocol"),
+        }
     }
 }

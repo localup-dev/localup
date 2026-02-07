@@ -184,7 +184,9 @@ pub use localup_control::{
 pub use localup_server_https::{HttpsServer, HttpsServerConfig};
 pub use localup_server_tcp::{TcpServer, TcpServerConfig, TcpServerError};
 pub use localup_server_tcp_proxy::{TcpProxyServer, TcpProxyServerConfig};
-pub use localup_server_tls::{TlsServer, TlsServerConfig};
+pub use localup_server_tls::{
+    HttpPassthroughConfig, HttpPassthroughError, HttpPassthroughServer, TlsServer, TlsServerConfig,
+};
 
 // Re-export router types
 pub use localup_router::{RouteKey, RouteRegistry, RouteTarget};

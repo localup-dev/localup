@@ -561,8 +561,10 @@ impl HttpsServer {
         // Check IP filtering
         if !target.is_ip_allowed(&peer_addr) {
             warn!(
-                "Connection from {} denied by IP filter for host: {}",
-                peer_addr, host
+                "Connection f   rom IP {} denied by IP filter for host: {} (allowed: {:?})",
+                peer_addr.ip(),
+                host,
+                target.ip_filter
             );
             let response = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 13\r\n\r\nAccess denied";
             tls_stream.write_all(response).await?;

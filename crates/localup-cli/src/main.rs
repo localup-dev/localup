@@ -46,14 +46,16 @@ struct Cli {
     #[arg(short, long)]
     subdomain: Option<String>,
 
-    /// Custom domain for HTTP/HTTPS tunnels (standalone mode only)
-    /// Requires DNS pointing to relay and valid TLS certificate.
-    /// Takes precedence over subdomain when both are set.
+    /// Custom domain for HTTP/HTTPS/TLS tunnels (standalone mode only)
+    /// For HTTP/HTTPS: Requires DNS pointing to relay and valid TLS certificate.
+    /// For TLS: No validation - relay routes based on SNI match (you manage certificates).
+    /// Can be specified multiple times for TLS tunnels.
     /// Supports wildcard domains (e.g., *.mycompany.com) for multi-subdomain tunnels.
     /// Example: --custom-domain api.mycompany.com
     /// Example: --custom-domain "*.mycompany.com"
+    /// Example (TLS multi): --custom-domain "*.local.example.com" --custom-domain "api.example.com"
     #[arg(long = "custom-domain")]
-    custom_domain: Option<String>,
+    custom_domain: Vec<String>,
 
     /// Relay server address (standalone mode only)
     #[arg(short, long, env)]
@@ -66,6 +68,13 @@ struct Cli {
     /// Remote port for TCP/TLS tunnels (standalone mode only)
     #[arg(long)]
     remote_port: Option<u16>,
+
+    /// HTTP backend port for TLS tunnels with HTTP passthrough (standalone mode only)
+    /// When the relay sends plain HTTP traffic through a TLS tunnel, it will be
+    /// forwarded to this port instead of the main --port.
+    /// Example: --port 9443 --http-port 9080 (HTTPS to 9443, HTTP to 9080)
+    #[arg(long)]
+    http_port: Option<u16>,
 
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, default_value = "info")]
@@ -120,12 +129,14 @@ enum Commands {
         /// Subdomain for HTTP/HTTPS/TLS tunnels
         #[arg(short, long)]
         subdomain: Option<String>,
-        /// Custom domain for HTTP/HTTPS tunnels (requires DNS and certificate)
+        /// Custom domain for HTTP/HTTPS/TLS tunnels
+        /// For TLS: No validation - relay routes based on SNI match (you manage certificates).
+        /// Can be specified multiple times for TLS tunnels.
         /// Supports wildcard domains (e.g., *.mycompany.com) for multi-subdomain tunnels.
         /// Example: --custom-domain api.mycompany.com
         /// Example: --custom-domain "*.mycompany.com"
         #[arg(long = "custom-domain")]
-        custom_domain: Option<String>,
+        custom_domain: Vec<String>,
         /// Relay server address (host:port)
         #[arg(short, long)]
         relay: Option<String>,
@@ -135,6 +146,12 @@ enum Commands {
         /// Remote port for TCP/TLS tunnels
         #[arg(long)]
         remote_port: Option<u16>,
+        /// HTTP backend port for TLS tunnels with HTTP passthrough
+        /// When the relay sends plain HTTP traffic through a TLS tunnel, it will be
+        /// forwarded to this port instead of the main --port.
+        /// Example: --port 9443 --http-port 9080 (HTTPS to 9443, HTTP to 9080)
+        #[arg(long)]
+        http_port: Option<u16>,
         /// Auto-enable (start with daemon)
         #[arg(long)]
         enabled: bool,
@@ -440,6 +457,24 @@ enum RelayCommands {
         #[arg(long, default_value = "0.0.0.0:4443")]
         tls_addr: String,
 
+        /// Optional HTTP server for redirecting to HTTPS
+        /// When set, starts an HTTP server that redirects all requests to HTTPS
+        /// Example: --http-redirect-addr 0.0.0.0:80
+        #[arg(long)]
+        http_redirect_addr: Option<String>,
+
+        /// HTTPS port to redirect to (default: 443)
+        /// Used when http_redirect_addr is set
+        #[arg(long, default_value = "443")]
+        https_redirect_port: u16,
+
+        /// Optional HTTP passthrough server for plain HTTP traffic
+        /// Routes HTTP requests based on Host header (no TLS)
+        /// Use this to serve HTTP traffic on port 80 with passthrough routing
+        /// Example: --http-passthrough-addr 0.0.0.0:80
+        #[arg(long)]
+        http_passthrough_addr: Option<String>,
+
         /// Public domain name for this relay
         #[arg(long, default_value = "localhost")]
         domain: String,
@@ -664,10 +699,11 @@ enum DaemonCommands {
         /// Subdomain for HTTP/HTTPS tunnels
         #[arg(short, long)]
         subdomain: Option<String>,
-        /// Custom domain for HTTP/HTTPS tunnels
+        /// Custom domain for HTTP/HTTPS/TLS tunnels
+        /// Can be specified multiple times for TLS tunnels.
         /// Supports wildcard domains (e.g., *.mycompany.com) for multi-subdomain tunnels.
         #[arg(long = "custom-domain")]
-        custom_domain: Option<String>,
+        custom_domain: Vec<String>,
     },
     /// Remove a tunnel from .localup.yml
     Remove {
@@ -721,6 +757,7 @@ async fn main() -> Result<()> {
             relay,
             transport,
             remote_port,
+            http_port,
             enabled,
             allow_ips,
         }) => handle_add_tunnel(
@@ -734,6 +771,7 @@ async fn main() -> Result<()> {
             relay,
             transport,
             remote_port,
+            http_port,
             enabled,
             allow_ips,
         ),
@@ -1136,12 +1174,19 @@ async fn handle_daemon_command(command: DaemonCommands) -> Result<()> {
             }
 
             // Create new tunnel entry
+            // For TLS, use custom_domain as sni_hostnames; for HTTP/HTTPS use as custom_domain
+            let (custom_domain_opt, sni_hostnames) = if protocol == "tls" {
+                (None, custom_domain)
+            } else {
+                (custom_domain.into_iter().next(), Vec::new())
+            };
             let tunnel = TunnelEntry {
                 name: name.clone(),
                 port,
                 protocol,
                 subdomain,
-                custom_domain,
+                custom_domain: custom_domain_opt,
+                sni_hostnames,
                 enabled: true,
                 ..Default::default()
             };
@@ -1232,10 +1277,11 @@ fn handle_add_tunnel(
     protocol: String,
     token: Option<String>,
     subdomain: Option<String>,
-    custom_domain: Option<String>,
+    custom_domains: Vec<String>,
     relay: Option<String>,
     transport: Option<String>,
     remote_port: Option<u16>,
+    http_port: Option<u16>,
     enabled: bool,
     allow_ips: Vec<String>,
 ) -> Result<()> {
@@ -1255,8 +1301,15 @@ fn handle_add_tunnel(
     };
 
     // Parse protocol - custom_domain takes precedence over subdomain for HTTP/HTTPS
-    let protocol_config =
-        parse_protocol(&protocol, local_port, subdomain, custom_domain, remote_port)?;
+    // For TLS, all custom_domains are used as SNI patterns
+    let protocol_config = parse_protocol(
+        &protocol,
+        local_port,
+        subdomain,
+        custom_domains,
+        remote_port,
+        http_port,
+    )?;
 
     // Parse exit node
     let exit_node = if let Some(relay_addr) = relay {
@@ -1373,11 +1426,15 @@ fn handle_list_tunnels() -> Result<()> {
                 }
                 ProtocolConfig::Tls {
                     local_port,
-                    sni_hostname,
+                    sni_hostnames,
+                    http_port,
                 } => {
                     print!("    Protocol: TLS, Port: {}", local_port);
-                    if let Some(sni) = sni_hostname {
-                        print!(", SNI: {}", sni);
+                    if let Some(hp) = http_port {
+                        print!(", HTTP Port: {}", hp);
+                    }
+                    if !sni_hostnames.is_empty() {
+                        print!(", SNI: {}", sni_hostnames.join(", "));
                     }
                     println!();
                 }
@@ -1510,6 +1567,7 @@ async fn run_standalone(cli: Cli) -> Result<()> {
         cli.subdomain.clone(),
         cli.custom_domain.clone(),
         cli.remote_port,
+        cli.http_port,
     )?;
 
     // Parse exit node configuration
@@ -1787,28 +1845,41 @@ fn parse_protocol(
     protocol: &str,
     port: u16,
     subdomain: Option<String>,
-    custom_domain: Option<String>,
+    custom_domains: Vec<String>,
     remote_port: Option<u16>,
+    http_port: Option<u16>,
 ) -> Result<ProtocolConfig> {
     match protocol.to_lowercase().as_str() {
         "http" => Ok(ProtocolConfig::Http {
             local_port: port,
             subdomain,
-            custom_domain,
+            // For HTTP, use first custom_domain if provided
+            custom_domain: custom_domains.into_iter().next(),
         }),
         "https" => Ok(ProtocolConfig::Https {
             local_port: port,
             subdomain,
-            custom_domain,
+            // For HTTPS, use first custom_domain if provided
+            custom_domain: custom_domains.into_iter().next(),
         }),
         "tcp" => Ok(ProtocolConfig::Tcp {
             local_port: port,
             remote_port,
         }),
-        "tls" => Ok(ProtocolConfig::Tls {
-            local_port: port,
-            sni_hostname: subdomain,
-        }),
+        "tls" => {
+            // For TLS, use all custom_domains as SNI patterns
+            // If no custom_domains, fall back to subdomain
+            let sni_hostnames = if custom_domains.is_empty() {
+                subdomain.into_iter().collect()
+            } else {
+                custom_domains
+            };
+            Ok(ProtocolConfig::Tls {
+                local_port: port,
+                sni_hostnames,
+                http_port,
+            })
+        }
         _ => Err(anyhow::anyhow!(
             "Invalid protocol: {}. Valid options: http, https, tcp, tls",
             protocol
@@ -2210,12 +2281,18 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 None,                   // acme_email (not used for TCP)
                 false,                  // acme_staging
                 "/opt/localup/certs/acme".to_string(), // acme_cert_dir (default)
+                None,                   // http_redirect_addr (not used for TCP)
+                443,                    // https_redirect_port (default)
+                None,                   // http_passthrough_addr (not used for TCP)
             )
             .await
         }
         RelayCommands::Tls {
             localup_addr,
             tls_addr,
+            http_redirect_addr,
+            https_redirect_port,
+            http_passthrough_addr,
             domain,
             jwt_secret,
             log_level,
@@ -2258,6 +2335,9 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 None,                   // acme_email (not used for TLS passthrough)
                 false,                  // acme_staging
                 "/opt/localup/certs/acme".to_string(), // acme_cert_dir (default)
+                http_redirect_addr,     // HTTP redirect server
+                https_redirect_port,    // HTTPS port to redirect to
+                http_passthrough_addr,  // HTTP passthrough server (Host-based routing)
             )
             .await
         }
@@ -2312,6 +2392,9 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 acme_email,
                 acme_staging,
                 acme_cert_dir,
+                None, // http_redirect_addr (not used for HTTP relay)
+                443,  // https_redirect_port (default)
+                None, // http_passthrough_addr (not used for HTTP relay)
             )
             .await
         }
@@ -2345,6 +2428,9 @@ async fn handle_relay_command(
     acme_email: Option<String>,
     acme_staging: bool,
     acme_cert_dir: String,
+    http_redirect_addr: Option<String>,
+    https_redirect_port: u16,
+    http_passthrough_addr: Option<String>,
 ) -> Result<()> {
     use localup_auth::JwtValidator;
     use localup_control::{
@@ -2353,7 +2439,9 @@ async fn handle_relay_command(
     use localup_router::RouteRegistry;
     use localup_server_https::{HttpsServer, HttpsServerConfig};
     use localup_server_tcp::{TcpServer, TcpServerConfig};
-    use localup_server_tls::{TlsServer, TlsServerConfig};
+    use localup_server_tls::{
+        HttpPassthroughConfig, HttpPassthroughServer, TlsServer, TlsServerConfig,
+    };
     use localup_transport::TransportListener;
     use localup_transport_quic::QuicListener;
     use std::net::SocketAddr;
@@ -2607,6 +2695,99 @@ async fn handle_relay_command(
     } else {
         None
     };
+
+    // Start HTTP redirect server for TLS (redirects HTTP to HTTPS)
+    let _http_redirect_handle = if let Some(ref http_redirect_addr_str) = http_redirect_addr {
+        use axum::{
+            http::{header, Request},
+            response::Redirect,
+            Router,
+        };
+
+        let http_redirect_addr_parsed: SocketAddr = http_redirect_addr_str.parse()?;
+        let https_port = https_redirect_port;
+
+        info!(
+            "🔀 HTTP redirect server configured on {} -> HTTPS port {}",
+            http_redirect_addr_str, https_port
+        );
+
+        let app = Router::new().fallback(move |request: Request<axum::body::Body>| async move {
+            // Extract host from Host header
+            let host = request
+                .headers()
+                .get(header::HOST)
+                .and_then(|h| h.to_str().ok())
+                .unwrap_or("localhost");
+
+            // Remove port from host if present
+            let hostname = host.split(':').next().unwrap_or(host);
+
+            // Get the URI path and query
+            let path_and_query = request
+                .uri()
+                .path_and_query()
+                .map(|pq| pq.as_str())
+                .unwrap_or("/");
+
+            // Build HTTPS URL
+            let https_url = if https_port == 443 {
+                format!("https://{}{}", hostname, path_and_query)
+            } else {
+                format!("https://{}:{}{}", hostname, https_port, path_and_query)
+            };
+
+            info!("🔀 Redirecting HTTP request to {}", https_url);
+            Redirect::permanent(&https_url)
+        });
+
+        let http_redirect_display = http_redirect_addr_str.clone();
+        Some(tokio::spawn(async move {
+            info!("Starting HTTP redirect server on {}", http_redirect_display);
+            let listener = match tokio::net::TcpListener::bind(http_redirect_addr_parsed).await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!("Failed to bind HTTP redirect server: {}", e);
+                    return;
+                }
+            };
+            if let Err(e) = axum::serve(listener, app).await {
+                error!("HTTP redirect server error: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
+
+    // Start HTTP passthrough server (Host-based routing, no TLS)
+    let _http_passthrough_handle =
+        if let Some(ref http_passthrough_addr_str) = http_passthrough_addr {
+            let http_passthrough_addr_parsed: SocketAddr = http_passthrough_addr_str.parse()?;
+            let http_passthrough_config = HttpPassthroughConfig {
+                bind_addr: http_passthrough_addr_parsed,
+            };
+
+            let http_passthrough_server =
+                HttpPassthroughServer::new(http_passthrough_config, registry.clone())
+                    .with_localup_manager(localup_manager.clone());
+            info!(
+                "✅ HTTP passthrough server configured on {} (routes based on Host header)",
+                http_passthrough_addr_str
+            );
+
+            let http_passthrough_display = http_passthrough_addr_str.clone();
+            Some(tokio::spawn(async move {
+                info!(
+                    "Starting HTTP passthrough server on {}",
+                    http_passthrough_display
+                );
+                if let Err(e) = http_passthrough_server.start().await {
+                    error!("HTTP passthrough server error: {}", e);
+                }
+            }))
+        } else {
+            None
+        };
 
     // Create tunnel handler
     let mut localup_handler = TunnelHandler::new(

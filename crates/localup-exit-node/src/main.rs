@@ -405,7 +405,9 @@ async fn main() -> Result<()> {
             bind_addr: tls_addr,
         };
 
-        let tls_server = TlsServer::new(tls_config, registry.clone());
+        let tls_server = TlsServer::new(tls_config, registry.clone())
+            .with_localup_manager(localup_manager.clone())
+            .with_database(db.clone());
         info!("✅ TLS/SNI server configured (routes based on Server Name Indication)");
 
         Some(tokio::spawn(async move {

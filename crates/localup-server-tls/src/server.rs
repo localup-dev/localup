@@ -6,15 +6,17 @@
 //! No TLS termination is performed - the TLS stream is forwarded as-is to preserve
 //! end-to-end encryption between the client and backend service.
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use localup_control::TunnelConnectionManager;
 use localup_proto::TunnelMessage;
 use localup_router::{RouteRegistry, SniRouter};
-use localup_transport::TransportConnection;
+use localup_transport::{TransportConnection, TransportStream};
+use localup_transport_quic::QuicStream;
+use sea_orm::DatabaseConnection;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -62,10 +64,18 @@ impl Default for TlsServerConfig {
     }
 }
 
+/// Tracks metrics for an individual TLS connection
+struct TlsConnectionMetrics {
+    bytes_received: Arc<AtomicU64>,
+    bytes_sent: Arc<AtomicU64>,
+    connected_at: chrono::DateTime<chrono::Utc>,
+}
+
 pub struct TlsServer {
     config: TlsServerConfig,
     sni_router: Arc<SniRouter>,
     tunnel_manager: Option<Arc<TunnelConnectionManager>>,
+    db: Option<DatabaseConnection>,
 }
 
 impl TlsServer {
@@ -76,12 +86,19 @@ impl TlsServer {
             config,
             sni_router,
             tunnel_manager: None,
+            db: None,
         }
     }
 
     /// Set the tunnel connection manager for forwarding to tunnels
     pub fn with_localup_manager(mut self, manager: Arc<TunnelConnectionManager>) -> Self {
         self.tunnel_manager = Some(manager);
+        self
+    }
+
+    /// Set database connection for metrics tracking
+    pub fn with_database(mut self, db: DatabaseConnection) -> Self {
+        self.db = Some(db);
         self
     }
 
@@ -122,12 +139,20 @@ impl TlsServer {
 
                     let sni_router = self.sni_router.clone();
                     let tunnel_manager = self.tunnel_manager.clone();
+                    let db = self.db.clone();
+                    let tls_port = self.config.bind_addr.port();
 
                     tokio::spawn(async move {
                         // Forward the raw TLS stream based on SNI extraction
-                        if let Err(e) =
-                            Self::forward_tls_stream(socket, &sni_router, tunnel_manager, peer_addr)
-                                .await
+                        if let Err(e) = Self::forward_tls_stream(
+                            socket,
+                            &sni_router,
+                            tunnel_manager,
+                            peer_addr,
+                            db,
+                            tls_port,
+                        )
+                        .await
                         {
                             debug!("Error forwarding TLS stream from {}: {}", peer_addr, e);
                         }
@@ -147,6 +172,8 @@ impl TlsServer {
         sni_router: &Arc<SniRouter>,
         tunnel_manager: Option<Arc<TunnelConnectionManager>>,
         peer_addr: SocketAddr,
+        db: Option<DatabaseConnection>,
+        tls_port: u16,
     ) -> Result<(), TlsServerError> {
         // Read the ClientHello from the incoming connection
         let mut client_hello_buf = [0u8; 16384];
@@ -168,7 +195,10 @@ impl TlsServer {
             TlsServerError::SniExtractionFailed
         })?;
 
-        debug!("Extracted SNI: {} from client {}", sni_hostname, peer_addr);
+        info!(
+            "📥 TLS connection from {} for SNI: {}",
+            peer_addr, sni_hostname
+        );
 
         // Look up the route for this SNI hostname
         let route = sni_router.lookup(&sni_hostname).map_err(|e| {
@@ -181,20 +211,60 @@ impl TlsServer {
 
         // Check IP filtering
         if !route.is_ip_allowed(&peer_addr) {
-            debug!(
-                "Connection from {} denied by IP filter for SNI: {}",
+            warn!(
+                "🚫 Connection from {} denied by IP filter for SNI: {}",
                 peer_addr, sni_hostname
             );
             return Err(TlsServerError::AccessDenied(peer_addr.to_string()));
         }
 
-        debug!(
-            "Routing SNI {} to backend: {}",
-            sni_hostname, route.target_addr
+        info!(
+            "🔀 Routing SNI {} to backend: {} (localup: {})",
+            sni_hostname, route.target_addr, route.localup_id
         );
 
+        // Create connection metrics tracker
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let metrics = TlsConnectionMetrics {
+            bytes_received: Arc::new(AtomicU64::new(n as u64)), // Include ClientHello bytes
+            bytes_sent: Arc::new(AtomicU64::new(0)),
+            connected_at: chrono::Utc::now(),
+        };
+
+        // Save active connection to database
+        if let Some(ref db_conn) = db {
+            let active_connection =
+                localup_relay_db::entities::captured_tcp_connection::ActiveModel {
+                    id: sea_orm::Set(connection_id.clone()),
+                    localup_id: sea_orm::Set(route.localup_id.clone()),
+                    client_addr: sea_orm::Set(format!("{}|sni:{}", peer_addr, sni_hostname)),
+                    target_port: sea_orm::Set(tls_port as i32),
+                    bytes_received: sea_orm::Set(n as i64),
+                    bytes_sent: sea_orm::Set(0),
+                    connected_at: sea_orm::Set(metrics.connected_at.into()),
+                    disconnected_at: sea_orm::NotSet,
+                    duration_ms: sea_orm::NotSet,
+                    disconnect_reason: sea_orm::NotSet,
+                };
+
+            use sea_orm::EntityTrait;
+            if let Err(e) = localup_relay_db::entities::prelude::CapturedTcpConnection::insert(
+                active_connection,
+            )
+            .exec(db_conn)
+            .await
+            {
+                warn!(
+                    "Failed to save active TLS connection {}: {}",
+                    connection_id, e
+                );
+            } else {
+                debug!("Saved active TLS connection {} to database", connection_id);
+            }
+        }
+
         // Check if this is a tunnel target (format: tunnel:localup_id)
-        if route.target_addr.starts_with("tunnel:") {
+        let result = if route.target_addr.starts_with("tunnel:") {
             // Extract localup_id from "tunnel:localup_id"
             let localup_id = route.target_addr.strip_prefix("tunnel:").unwrap();
 
@@ -219,37 +289,105 @@ impl TlsServer {
             })?;
 
             // Forward using TransportStream methods
-            return Self::forward_via_transport_stream(
+            Self::forward_via_transport_stream(
                 client_socket,
                 backend_stream,
                 &client_hello_buf[..n],
                 peer_addr,
+                metrics.bytes_received.clone(),
+                metrics.bytes_sent.clone(),
             )
-            .await;
+            .await
+        } else {
+            // Regular TCP backend connection
+            let mut backend_socket = tokio::net::TcpStream::connect(&route.target_addr)
+                .await
+                .map_err(|e| {
+                    TlsServerError::TransportError(format!(
+                        "Failed to connect to backend {}: {}",
+                        route.target_addr, e
+                    ))
+                })?;
+
+            // Send the ClientHello to the backend
+            backend_socket
+                .write_all(&client_hello_buf[..n])
+                .await
+                .map_err(|e| TlsServerError::TransportError(e.to_string()))?;
+
+            // Bidirectionally forward data between client and backend with metrics
+            Self::forward_tcp_streams(
+                client_socket,
+                backend_socket,
+                metrics.bytes_received.clone(),
+                metrics.bytes_sent.clone(),
+            )
+            .await
+        };
+
+        // Update final metrics in database
+        let disconnected_at = chrono::Utc::now();
+        let duration_ms = (disconnected_at - metrics.connected_at).num_milliseconds() as i32;
+        let final_bytes_received = metrics.bytes_received.load(Ordering::Relaxed);
+        let final_bytes_sent = metrics.bytes_sent.load(Ordering::Relaxed);
+
+        info!(
+            "📤 TLS connection closed for SNI: {} ({}ms, ↓{}B ↑{}B)",
+            sni_hostname, duration_ms, final_bytes_received, final_bytes_sent
+        );
+
+        if let Some(ref db_conn) = db {
+            let disconnect_reason = match &result {
+                Ok(()) => "completed".to_string(),
+                Err(e) => format!("error: {}", e),
+            };
+
+            let update_connection =
+                localup_relay_db::entities::captured_tcp_connection::ActiveModel {
+                    id: sea_orm::Set(connection_id.clone()),
+                    localup_id: sea_orm::Unchanged(route.localup_id),
+                    client_addr: sea_orm::Unchanged(format!("{}|sni:{}", peer_addr, sni_hostname)),
+                    target_port: sea_orm::Unchanged(tls_port as i32),
+                    bytes_received: sea_orm::Set(final_bytes_received as i64),
+                    bytes_sent: sea_orm::Set(final_bytes_sent as i64),
+                    connected_at: sea_orm::Unchanged(metrics.connected_at.into()),
+                    disconnected_at: sea_orm::Set(Some(disconnected_at.into())),
+                    duration_ms: sea_orm::Set(Some(duration_ms)),
+                    disconnect_reason: sea_orm::Set(Some(disconnect_reason)),
+                };
+
+            use sea_orm::EntityTrait;
+            if let Err(e) = localup_relay_db::entities::prelude::CapturedTcpConnection::update(
+                update_connection,
+            )
+            .exec(db_conn)
+            .await
+            {
+                warn!(
+                    "Failed to update TLS connection {} metrics: {}",
+                    connection_id, e
+                );
+            } else {
+                debug!("Updated TLS connection {} final metrics", connection_id);
+            }
         }
 
-        // Regular TCP backend connection
-        let mut backend_socket = tokio::net::TcpStream::connect(&route.target_addr)
-            .await
-            .map_err(|e| {
-                TlsServerError::TransportError(format!(
-                    "Failed to connect to backend {}: {}",
-                    route.target_addr, e
-                ))
-            })?;
+        result
+    }
 
-        // Send the ClientHello to the backend
-        backend_socket
-            .write_all(&client_hello_buf[..n])
-            .await
-            .map_err(|e| TlsServerError::TransportError(e.to_string()))?;
-
-        // Bidirectionally forward data between client and backend
+    /// Forward bidirectional TCP streams with metrics tracking
+    async fn forward_tcp_streams(
+        client_socket: tokio::net::TcpStream,
+        backend_socket: tokio::net::TcpStream,
+        bytes_received: Arc<AtomicU64>,
+        bytes_sent: Arc<AtomicU64>,
+    ) -> Result<(), TlsServerError> {
         let (mut client_read, mut client_write) = client_socket.into_split();
         let (mut backend_read, mut backend_write) = backend_socket.into_split();
 
-        let client_to_backend = async {
-            let mut buf = [0u8; 4096];
+        let bytes_received_clone = bytes_received.clone();
+        let client_to_backend = async move {
+            let mut buf = [0u8; 8192];
             loop {
                 match client_read.read(&mut buf).await {
                     Ok(0) => {
@@ -258,6 +396,7 @@ impl TlsServer {
                         break;
                     }
                     Ok(n) => {
+                        bytes_received_clone.fetch_add(n as u64, Ordering::Relaxed);
                         if let Err(e) = backend_write.write_all(&buf[..n]).await {
                             debug!("Error writing to backend: {}", e);
                             break;
@@ -271,8 +410,9 @@ impl TlsServer {
             }
         };
 
-        let backend_to_client = async {
-            let mut buf = [0u8; 4096];
+        let bytes_sent_clone = bytes_sent.clone();
+        let backend_to_client = async move {
+            let mut buf = [0u8; 8192];
             loop {
                 match backend_read.read(&mut buf).await {
                     Ok(0) => {
@@ -281,6 +421,7 @@ impl TlsServer {
                         break;
                     }
                     Ok(n) => {
+                        bytes_sent_clone.fetch_add(n as u64, Ordering::Relaxed);
                         if let Err(e) = client_write.write_all(&buf[..n]).await {
                             debug!("Error writing to client: {}", e);
                             break;
@@ -300,19 +441,17 @@ impl TlsServer {
             _ = backend_to_client => {},
         }
 
-        debug!(
-            "TLS passthrough connection closed for SNI: {}",
-            sni_hostname
-        );
         Ok(())
     }
 
     /// Forward TLS stream through a QUIC tunnel using TransportStream trait
-    async fn forward_via_transport_stream<S: localup_transport::TransportStream>(
+    async fn forward_via_transport_stream(
         client_socket: tokio::net::TcpStream,
-        mut tunnel_stream: S,
+        mut tunnel_stream: QuicStream,
         client_hello: &[u8],
         peer_addr: SocketAddr,
+        bytes_received: Arc<AtomicU64>,
+        bytes_sent: Arc<AtomicU64>,
     ) -> Result<(), TlsServerError> {
         // Generate stream ID for this tunnel connection
         static STREAM_COUNTER: AtomicU32 = AtomicU32::new(1);
@@ -349,30 +488,28 @@ impl TlsServer {
         // Split the client socket for bidirectional forwarding
         let (mut client_read, mut client_write) = client_socket.into_split();
 
-        // Wrap tunnel stream in Arc<Mutex<>> for shared access
-        let tunnel_stream = Arc::new(tokio::sync::Mutex::new(tunnel_stream));
-        let tunnel_send = tunnel_stream.clone();
-        let tunnel_recv = tunnel_stream.clone();
+        // Split the QUIC stream for concurrent send/receive without mutexes
+        let (mut tunnel_send, mut tunnel_recv) = tunnel_stream.split();
 
         // Bidirectional forwarding: client to tunnel
-        let client_to_tunnel = async {
-            let mut buf = [0u8; 4096];
+        let bytes_received_clone = bytes_received.clone();
+        let client_to_tunnel = async move {
+            let mut buf = [0u8; 8192];
             loop {
                 match client_read.read(&mut buf).await {
                     Ok(0) => {
                         debug!("Client closed TLS connection (stream {})", stream_id);
                         let close_msg = TunnelMessage::TlsClose { stream_id };
-                        let mut tunnel = tunnel_send.lock().await;
-                        let _ = tunnel.send_message(&close_msg).await;
+                        let _ = tunnel_send.send_message(&close_msg).await;
                         break;
                     }
                     Ok(n) => {
+                        bytes_received_clone.fetch_add(n as u64, Ordering::Relaxed);
                         let data_msg = TunnelMessage::TlsData {
                             stream_id,
                             data: buf[..n].to_vec(),
                         };
-                        let mut tunnel = tunnel_send.lock().await;
-                        if let Err(e) = tunnel.send_message(&data_msg).await {
+                        if let Err(e) = tunnel_send.send_message(&data_msg).await {
                             debug!("Error sending TLS data to tunnel: {}", e);
                             break;
                         }
@@ -380,8 +517,7 @@ impl TlsServer {
                     Err(e) => {
                         debug!("Error reading from TLS client: {}", e);
                         let close_msg = TunnelMessage::TlsClose { stream_id };
-                        let mut tunnel = tunnel_send.lock().await;
-                        let _ = tunnel.send_message(&close_msg).await;
+                        let _ = tunnel_send.send_message(&close_msg).await;
                         break;
                     }
                 }
@@ -389,12 +525,10 @@ impl TlsServer {
         };
 
         // Tunnel to client
-        let tunnel_to_client = async {
+        let bytes_sent_clone = bytes_sent.clone();
+        let tunnel_to_client = async move {
             loop {
-                let msg = {
-                    let mut tunnel = tunnel_recv.lock().await;
-                    tunnel.recv_message().await
-                };
+                let msg = tunnel_recv.recv_message().await;
 
                 match msg {
                     Ok(Some(TunnelMessage::TlsData {
@@ -408,6 +542,7 @@ impl TlsServer {
                             );
                             continue;
                         }
+                        bytes_sent_clone.fetch_add(data.len() as u64, Ordering::Relaxed);
                         if let Err(e) = client_write.write_all(&data).await {
                             debug!("Error writing TLS data to client: {}", e);
                             break;

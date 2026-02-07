@@ -412,12 +412,68 @@ fn generate_short_id(stream_id: u32) -> String {
     format!("{:08x}", (hash as u32))
 }
 
-/// Generate a deterministic localup_id from auth token
-/// This ensures the same token always gets the same localup_id (and thus same port/subdomain)
-fn generate_localup_id_from_token(token: &str) -> String {
+/// Generate a deterministic localup_id from auth token and protocol configs
+/// This ensures the same token + protocols always gets the same localup_id (and thus same port/subdomain)
+/// but different protocols with the same token get different localup_ids
+///
+/// ALL protocol parameters are included in the hash to ensure every unique tunnel
+/// configuration gets a unique ID.
+fn generate_localup_id_from_token_and_protocols(
+    token: &str,
+    protocols: &[ProtocolConfig],
+) -> String {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     token.hash(&mut hasher);
+
+    // Include ALL protocol parameters in the hash to differentiate tunnels
+    // Every unique tunnel configuration should get a unique ID
+    for protocol in protocols {
+        match protocol {
+            ProtocolConfig::Http {
+                local_port,
+                subdomain,
+                custom_domain,
+            } => {
+                "http".hash(&mut hasher);
+                local_port.hash(&mut hasher);
+                subdomain.hash(&mut hasher);
+                custom_domain.hash(&mut hasher);
+            }
+            ProtocolConfig::Https {
+                local_port,
+                subdomain,
+                custom_domain,
+            } => {
+                "https".hash(&mut hasher);
+                local_port.hash(&mut hasher);
+                subdomain.hash(&mut hasher);
+                custom_domain.hash(&mut hasher);
+            }
+            ProtocolConfig::Tcp {
+                local_port,
+                remote_port,
+            } => {
+                "tcp".hash(&mut hasher);
+                local_port.hash(&mut hasher);
+                remote_port.hash(&mut hasher);
+            }
+            ProtocolConfig::Tls {
+                local_port,
+                sni_hostnames,
+                http_port,
+            } => {
+                "tls".hash(&mut hasher);
+                local_port.hash(&mut hasher);
+                http_port.hash(&mut hasher);
+                // Hash all SNI hostnames to differentiate TLS tunnels
+                for hostname in sni_hostnames {
+                    hostname.hash(&mut hasher);
+                }
+            }
+        }
+    }
+
     let hash = hasher.finish();
 
     // Format as UUID-like string for compatibility
@@ -666,9 +722,13 @@ impl TunnelConnector {
 
         info!("✅ Connected to relay via {:?}", discovered.protocol);
 
-        // Generate deterministic tunnel ID from auth token
-        // This ensures the same token always gets the same localup_id (and thus same port/subdomain)
-        let localup_id = generate_localup_id_from_token(&self.config.auth_token);
+        // Generate deterministic tunnel ID from auth token AND protocols
+        // This ensures the same token + protocols always gets the same localup_id (and thus same port/subdomain)
+        // but different protocols (e.g., different TLS SNI hostnames) get different localup_ids
+        let localup_id = generate_localup_id_from_token_and_protocols(
+            &self.config.auth_token,
+            &self.config.protocols,
+        );
         info!("🎯 Using deterministic localup_id: {}", localup_id);
 
         // Convert ProtocolConfig to Protocol
@@ -704,10 +764,16 @@ impl TunnelConnector {
 
                 ProtocolConfig::Tls {
                     local_port: _,
-                    sni_hostname,
+                    sni_hostnames,
+                    http_port: _,
                 } => Protocol::Tls {
                     port: 8443, // TLS server port (SNI-based routing)
-                    sni_pattern: sni_hostname.clone().unwrap_or_else(|| "*".to_string()),
+                    // Use all provided SNI patterns, or default to "*" if none
+                    sni_patterns: if sni_hostnames.is_empty() {
+                        vec!["*".to_string()]
+                    } else {
+                        sni_hostnames.clone()
+                    },
                 },
             })
             .collect();
@@ -1761,14 +1827,19 @@ impl TunnelConnection {
                 return;
             }
         };
-        // Get local TLS port from first TLS protocol
-        let local_port = config.protocols.first().and_then(|p| match p {
-            ProtocolConfig::Tls { local_port, .. } => Some(*local_port),
+
+        // Get TLS protocol config
+        let tls_config = config.protocols.first().and_then(|p| match p {
+            ProtocolConfig::Tls {
+                local_port,
+                http_port,
+                ..
+            } => Some((*local_port, *http_port)),
             _ => None,
         });
 
-        let local_port = match local_port {
-            Some(port) => port,
+        let (tls_port, http_port) = match tls_config {
+            Some(config) => config,
             None => {
                 error!("No TLS protocol configured");
                 let _ = stream
@@ -1778,14 +1849,43 @@ impl TunnelConnection {
             }
         };
 
-        // Connect to local TLS service
+        // Detect if this is HTTP traffic (not TLS)
+        // TLS ClientHello starts with 0x16 (handshake) followed by version bytes
+        // HTTP requests start with method names like "GET ", "POST ", "PUT ", etc.
+        let is_http = !client_hello.is_empty()
+            && (client_hello.starts_with(b"GET ")
+                || client_hello.starts_with(b"POST ")
+                || client_hello.starts_with(b"PUT ")
+                || client_hello.starts_with(b"DELETE ")
+                || client_hello.starts_with(b"HEAD ")
+                || client_hello.starts_with(b"OPTIONS ")
+                || client_hello.starts_with(b"PATCH ")
+                || client_hello.starts_with(b"CONNECT "));
+
+        // Choose the appropriate port
+        let local_port = if is_http {
+            http_port.unwrap_or(tls_port)
+        } else {
+            tls_port
+        };
+
+        if is_http {
+            debug!(
+                "Detected HTTP traffic on TLS stream {}, routing to port {}",
+                stream_id, local_port
+            );
+        }
+
+        // Connect to local service
         let local_addr = format!("{}:{}", config.local_host, local_port);
         let local_socket = match TcpStream::connect(&local_addr).await {
             Ok(sock) => sock,
             Err(e) => {
                 error!(
-                    "Failed to connect to local TLS service at {}: {}",
-                    local_addr, e
+                    "Failed to connect to local {} service at {}: {}",
+                    if is_http { "HTTP" } else { "TLS" },
+                    local_addr,
+                    e
                 );
                 let _ = stream
                     .send_message(&TunnelMessage::TlsClose { stream_id })
@@ -1794,7 +1894,11 @@ impl TunnelConnection {
             }
         };
 
-        debug!("Connected to local TLS service at {}", local_addr);
+        debug!(
+            "Connected to local {} service at {}",
+            if is_http { "HTTP" } else { "TLS" },
+            local_addr
+        );
 
         // Split both streams for bidirectional communication WITHOUT MUTEXES
         let (mut local_read, mut local_write) = local_socket.into_split();
@@ -2017,7 +2121,7 @@ impl TunnelConnection {
 
         // Read response - first read to get headers
         let mut response_buf = Vec::new();
-        let mut temp_buf = vec![0u8; 8192];
+        let mut temp_buf = vec![0u8; 65536]; // 64KB buffer for better performance with large responses
 
         // Read until we have headers (looking for \r\n\r\n or \n\n)
         let mut headers_complete = false;
@@ -2131,10 +2235,10 @@ impl TunnelConnection {
             let mut chunked_data = response_buf[header_end_pos..].to_vec();
 
             // Keep reading until connection closes or end marker
-            // Use a short timeout per read to avoid waiting unnecessarily after last chunk
+            // Use a reasonable timeout per read - 5 seconds should handle most cases
             loop {
                 let read_result = tokio::time::timeout(
-                    std::time::Duration::from_millis(100), // Short timeout - 100ms
+                    std::time::Duration::from_secs(5),
                     local_socket.read(&mut temp_buf),
                 )
                 .await;
@@ -2169,9 +2273,9 @@ impl TunnelConnection {
                         break;
                     }
                     Err(_) => {
-                        // Timeout - assume response is complete (after 100ms of no data)
-                        debug!(
-                            "Chunked response: read timeout, assuming complete ({} bytes)",
+                        // Timeout after 5 seconds of no data
+                        warn!(
+                            "Chunked response: read timeout after 5s ({} bytes received so far)",
                             chunked_data.len()
                         );
                         break;
@@ -2197,10 +2301,10 @@ impl TunnelConnection {
             // No Content-Length and not chunked - read until connection closes
             let mut body_data = response_buf[header_end_pos..].to_vec();
 
-            // Use short timeout to avoid unnecessary waiting
+            // Use reasonable timeout - 5 seconds between reads
             loop {
                 let read_result = tokio::time::timeout(
-                    std::time::Duration::from_millis(100),
+                    std::time::Duration::from_secs(5),
                     local_socket.read(&mut temp_buf),
                 )
                 .await;
@@ -2215,9 +2319,9 @@ impl TunnelConnection {
                         break;
                     }
                     Err(_) => {
-                        // Timeout - assume response is complete
-                        debug!(
-                            "Response read timeout, assuming complete ({} bytes)",
+                        // Timeout after 5 seconds of no data
+                        warn!(
+                            "Response read timeout after 5s ({} bytes received)",
                             body_data.len()
                         );
                         break;
@@ -2466,6 +2570,279 @@ impl TunnelConnection {
         debug!(
             "TCP connection handler exiting (stream {}) - {} bytes sent, {} bytes received",
             stream_id, final_bytes_sent, final_bytes_received
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_localup_id_same_token_same_protocol_same_id() {
+        let token = "test-token-123";
+        let protocols = vec![ProtocolConfig::Http {
+            local_port: 3000,
+            subdomain: Some("myapp".to_string()),
+            custom_domain: None,
+        }];
+
+        let id1 = generate_localup_id_from_token_and_protocols(token, &protocols);
+        let id2 = generate_localup_id_from_token_and_protocols(token, &protocols);
+
+        assert_eq!(id1, id2, "Same token and protocols should produce same ID");
+    }
+
+    #[test]
+    fn test_generate_localup_id_same_token_different_http_subdomain() {
+        let token = "test-token-123";
+
+        let protocols1 = vec![ProtocolConfig::Http {
+            local_port: 3000,
+            subdomain: Some("app1".to_string()),
+            custom_domain: None,
+        }];
+
+        let protocols2 = vec![ProtocolConfig::Http {
+            local_port: 3000,
+            subdomain: Some("app2".to_string()),
+            custom_domain: None,
+        }];
+
+        let id1 = generate_localup_id_from_token_and_protocols(token, &protocols1);
+        let id2 = generate_localup_id_from_token_and_protocols(token, &protocols2);
+
+        assert_ne!(
+            id1, id2,
+            "Same token but different subdomains should produce different IDs"
+        );
+    }
+
+    #[test]
+    fn test_generate_localup_id_same_token_different_tls_sni() {
+        let token = "test-token-123";
+
+        let protocols1 = vec![ProtocolConfig::Tls {
+            local_port: 443,
+            sni_hostnames: vec!["api.example.com".to_string()],
+            http_port: None,
+        }];
+
+        let protocols2 = vec![ProtocolConfig::Tls {
+            local_port: 443,
+            sni_hostnames: vec!["web.example.com".to_string()],
+            http_port: None,
+        }];
+
+        let id1 = generate_localup_id_from_token_and_protocols(token, &protocols1);
+        let id2 = generate_localup_id_from_token_and_protocols(token, &protocols2);
+
+        assert_ne!(
+            id1, id2,
+            "Same token but different TLS SNI hostnames should produce different IDs"
+        );
+    }
+
+    #[test]
+    fn test_generate_localup_id_same_token_different_tcp_ports() {
+        let token = "test-token-123";
+
+        let protocols1 = vec![ProtocolConfig::Tcp {
+            local_port: 8080,
+            remote_port: Some(10000),
+        }];
+
+        let protocols2 = vec![ProtocolConfig::Tcp {
+            local_port: 8080,
+            remote_port: Some(10001),
+        }];
+
+        let id1 = generate_localup_id_from_token_and_protocols(token, &protocols1);
+        let id2 = generate_localup_id_from_token_and_protocols(token, &protocols2);
+
+        assert_ne!(
+            id1, id2,
+            "Same token but different TCP remote ports should produce different IDs"
+        );
+    }
+
+    #[test]
+    fn test_generate_localup_id_different_tokens_same_protocol() {
+        let protocols = vec![ProtocolConfig::Http {
+            local_port: 3000,
+            subdomain: Some("myapp".to_string()),
+            custom_domain: None,
+        }];
+
+        let id1 = generate_localup_id_from_token_and_protocols("token-a", &protocols);
+        let id2 = generate_localup_id_from_token_and_protocols("token-b", &protocols);
+
+        assert_ne!(
+            id1, id2,
+            "Different tokens should produce different IDs even with same protocol"
+        );
+    }
+
+    #[test]
+    fn test_generate_localup_id_uuid_format() {
+        let token = "test-token";
+        let protocols = vec![ProtocolConfig::Http {
+            local_port: 3000,
+            subdomain: None,
+            custom_domain: None,
+        }];
+
+        let id = generate_localup_id_from_token_and_protocols(token, &protocols);
+
+        // Should match UUID-like format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+        let parts: Vec<&str> = id.split('-').collect();
+        assert_eq!(parts.len(), 5, "ID should have 5 parts separated by dashes");
+        assert_eq!(parts[0].len(), 8, "First part should be 8 characters");
+        assert_eq!(parts[1].len(), 4, "Second part should be 4 characters");
+        assert_eq!(parts[2].len(), 4, "Third part should be 4 characters");
+        assert_eq!(parts[3].len(), 4, "Fourth part should be 4 characters");
+        assert_eq!(parts[4].len(), 12, "Fifth part should be 12 characters");
+    }
+
+    #[test]
+    fn test_generate_localup_id_multiple_tls_sni_patterns() {
+        let token = "test-token-123";
+
+        // Same set of SNI patterns (just different order) - but hashing is order-dependent
+        // so same order should give same ID
+        let protocols1 = vec![ProtocolConfig::Tls {
+            local_port: 443,
+            sni_hostnames: vec!["api.example.com".to_string(), "web.example.com".to_string()],
+            http_port: None,
+        }];
+
+        let protocols2 = vec![ProtocolConfig::Tls {
+            local_port: 443,
+            sni_hostnames: vec!["api.example.com".to_string(), "web.example.com".to_string()],
+            http_port: None,
+        }];
+
+        let id1 = generate_localup_id_from_token_and_protocols(token, &protocols1);
+        let id2 = generate_localup_id_from_token_and_protocols(token, &protocols2);
+
+        assert_eq!(
+            id1, id2,
+            "Same SNI patterns in same order should produce same ID"
+        );
+
+        // Different order should produce different ID
+        let protocols3 = vec![ProtocolConfig::Tls {
+            local_port: 443,
+            sni_hostnames: vec!["web.example.com".to_string(), "api.example.com".to_string()],
+            http_port: None,
+        }];
+
+        let id3 = generate_localup_id_from_token_and_protocols(token, &protocols3);
+        assert_ne!(
+            id1, id3,
+            "Same SNI patterns in different order should produce different IDs"
+        );
+    }
+
+    #[test]
+    fn test_generate_localup_id_different_local_ports() {
+        let token = "test-token-123";
+
+        // Same protocol, different local_port
+        let protocols1 = vec![ProtocolConfig::Http {
+            local_port: 3000,
+            subdomain: Some("myapp".to_string()),
+            custom_domain: None,
+        }];
+
+        let protocols2 = vec![ProtocolConfig::Http {
+            local_port: 3001,
+            subdomain: Some("myapp".to_string()),
+            custom_domain: None,
+        }];
+
+        let id1 = generate_localup_id_from_token_and_protocols(token, &protocols1);
+        let id2 = generate_localup_id_from_token_and_protocols(token, &protocols2);
+
+        assert_ne!(
+            id1, id2,
+            "Same subdomain but different local_port should produce different IDs"
+        );
+    }
+
+    #[test]
+    fn test_generate_localup_id_tls_different_local_ports() {
+        let token = "test-token-123";
+
+        // Same SNI hostname, different local_port
+        let protocols1 = vec![ProtocolConfig::Tls {
+            local_port: 443,
+            sni_hostnames: vec!["api.example.com".to_string()],
+            http_port: None,
+        }];
+
+        let protocols2 = vec![ProtocolConfig::Tls {
+            local_port: 8443,
+            sni_hostnames: vec!["api.example.com".to_string()],
+            http_port: None,
+        }];
+
+        let id1 = generate_localup_id_from_token_and_protocols(token, &protocols1);
+        let id2 = generate_localup_id_from_token_and_protocols(token, &protocols2);
+
+        assert_ne!(
+            id1, id2,
+            "Same SNI but different local_port should produce different IDs"
+        );
+    }
+
+    #[test]
+    fn test_generate_localup_id_tls_different_http_port() {
+        let token = "test-token-123";
+
+        // Same SNI and local_port, different http_port
+        let protocols1 = vec![ProtocolConfig::Tls {
+            local_port: 443,
+            sni_hostnames: vec!["api.example.com".to_string()],
+            http_port: Some(8080),
+        }];
+
+        let protocols2 = vec![ProtocolConfig::Tls {
+            local_port: 443,
+            sni_hostnames: vec!["api.example.com".to_string()],
+            http_port: Some(9090),
+        }];
+
+        let id1 = generate_localup_id_from_token_and_protocols(token, &protocols1);
+        let id2 = generate_localup_id_from_token_and_protocols(token, &protocols2);
+
+        assert_ne!(
+            id1, id2,
+            "Same SNI/local_port but different http_port should produce different IDs"
+        );
+    }
+
+    #[test]
+    fn test_generate_localup_id_tcp_different_local_ports() {
+        let token = "test-token-123";
+
+        // Same remote_port, different local_port
+        let protocols1 = vec![ProtocolConfig::Tcp {
+            local_port: 8080,
+            remote_port: Some(10000),
+        }];
+
+        let protocols2 = vec![ProtocolConfig::Tcp {
+            local_port: 9090,
+            remote_port: Some(10000),
+        }];
+
+        let id1 = generate_localup_id_from_token_and_protocols(token, &protocols1);
+        let id2 = generate_localup_id_from_token_and_protocols(token, &protocols2);
+
+        assert_ne!(
+            id1, id2,
+            "Same remote_port but different local_port should produce different IDs"
         );
     }
 }

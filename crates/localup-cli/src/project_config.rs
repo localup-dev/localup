@@ -80,8 +80,15 @@ pub struct ProjectTunnel {
     /// Remote port for TCP tunnels
     pub remote_port: Option<u16>,
 
-    /// SNI hostname for TLS tunnels
-    pub sni_hostname: Option<String>,
+    /// SNI hostnames/patterns for TLS tunnels (supports multiple including wildcards)
+    /// Example: ["*.local.example.com", "api.example.com"]
+    #[serde(default)]
+    pub sni_hostnames: Vec<String>,
+
+    /// HTTP backend port for TLS tunnels with HTTP passthrough
+    /// When the relay sends plain HTTP traffic through a TLS tunnel, it will be
+    /// forwarded to this port instead of the main port.
+    pub http_port: Option<u16>,
 
     /// Override relay server for this tunnel
     pub relay: Option<String>,
@@ -122,7 +129,8 @@ impl Default for ProjectTunnel {
             subdomain: None,
             custom_domain: None,
             remote_port: None,
-            sni_hostname: None,
+            sni_hostnames: Vec::new(),
+            http_port: None,
             relay: None,
             token: None,
             transport: None,
@@ -346,7 +354,8 @@ impl ProjectTunnel {
             },
             "tls" => ProtocolConfig::Tls {
                 local_port: self.port,
-                sni_hostname: self.sni_hostname.clone(),
+                sni_hostnames: self.sni_hostnames.clone(),
+                http_port: self.http_port,
             },
             _ => anyhow::bail!("Unknown protocol: {}", self.protocol),
         };
@@ -617,12 +626,14 @@ tunnels:
             subdomain: Some("my-api".to_string()),
             custom_domain: None,
             remote_port: None,
-            sni_hostname: None,
+            sni_hostnames: Vec::new(),
+            http_port: None,
             relay: None,
             token: None,
             transport: None,
             enabled: true,
             local_host: None,
+            ip_allowlist: Vec::new(),
         };
 
         let config = tunnel.to_tunnel_config(&defaults).unwrap();
@@ -655,12 +666,14 @@ tunnels:
             subdomain: None,
             custom_domain: None,
             remote_port: Some(15432),
-            sni_hostname: None,
+            sni_hostnames: Vec::new(),
+            http_port: None,
             relay: Some("custom-relay:4443".to_string()),
             token: Some("custom-token".to_string()),
             transport: Some("quic".to_string()),
             enabled: true,
             local_host: Some("127.0.0.1".to_string()),
+            ip_allowlist: Vec::new(),
         };
 
         let config = tunnel.to_tunnel_config(&defaults).unwrap();
@@ -697,12 +710,14 @@ tunnels:
             subdomain: None,
             custom_domain: None,
             remote_port: None,
-            sni_hostname: None,
+            sni_hostnames: Vec::new(),
+            http_port: None,
             relay: None,
             token: None,
             transport: None,
             enabled: true,
             local_host: None,
+            ip_allowlist: Vec::new(),
         };
 
         let config = tunnel.to_tunnel_config(&defaults).unwrap();
@@ -818,7 +833,9 @@ tunnels:
   - name: secure
     port: 443
     protocol: tls
-    sni_hostname: "example.com"
+    sni_hostnames:
+      - "example.com"
+      - "*.local.example.com"
 "#;
         let config = ProjectConfig::parse(yaml).unwrap();
         let tunnel = &config.tunnels[0];
@@ -829,11 +846,14 @@ tunnels:
 
         if let ProtocolConfig::Tls {
             local_port,
-            sni_hostname,
+            sni_hostnames,
+            ..
         } = &tunnel_config.protocols[0]
         {
             assert_eq!(*local_port, 443);
-            assert_eq!(sni_hostname, &Some("example.com".to_string()));
+            assert_eq!(sni_hostnames.len(), 2);
+            assert_eq!(sni_hostnames[0], "example.com");
+            assert_eq!(sni_hostnames[1], "*.local.example.com");
         } else {
             panic!("Expected TLS protocol");
         }
@@ -882,12 +902,14 @@ tunnels:
             subdomain: None,
             custom_domain: None,
             remote_port: None,
-            sni_hostname: None,
+            sni_hostnames: Vec::new(),
+            http_port: None,
             relay: None,
             token: None,
             transport: None,
             enabled: true,
             local_host: None,
+            ip_allowlist: Vec::new(),
         };
 
         let config = tunnel.to_tunnel_config(&defaults).unwrap();
@@ -914,5 +936,190 @@ tunnels:
             config_quic.preferred_transport,
             Some(TransportProtocol::Quic)
         );
+    }
+
+    #[test]
+    fn test_tls_protocol_with_multiple_wildcards() {
+        let yaml = r#"
+tunnels:
+  - name: multi-domain
+    port: 443
+    protocol: tls
+    sni_hostnames:
+      - "*.local-abc123.myapp.dev"
+      - "*.staging.myapp.dev"
+      - "api.production.com"
+      - "web.production.com"
+"#;
+        let config = ProjectConfig::parse(yaml).unwrap();
+        let tunnel = &config.tunnels[0];
+
+        let tunnel_config = tunnel
+            .to_tunnel_config(&ProjectDefaults::default())
+            .unwrap();
+
+        if let ProtocolConfig::Tls {
+            local_port,
+            sni_hostnames,
+            ..
+        } = &tunnel_config.protocols[0]
+        {
+            assert_eq!(*local_port, 443);
+            assert_eq!(sni_hostnames.len(), 4);
+            assert_eq!(sni_hostnames[0], "*.local-abc123.myapp.dev");
+            assert_eq!(sni_hostnames[1], "*.staging.myapp.dev");
+            assert_eq!(sni_hostnames[2], "api.production.com");
+            assert_eq!(sni_hostnames[3], "web.production.com");
+        } else {
+            panic!("Expected TLS protocol");
+        }
+    }
+
+    #[test]
+    fn test_tls_protocol_with_single_hostname() {
+        let yaml = r#"
+tunnels:
+  - name: single-domain
+    port: 8443
+    protocol: tls
+    sni_hostnames:
+      - "api.example.com"
+"#;
+        let config = ProjectConfig::parse(yaml).unwrap();
+        let tunnel = &config.tunnels[0];
+
+        let tunnel_config = tunnel
+            .to_tunnel_config(&ProjectDefaults::default())
+            .unwrap();
+
+        if let ProtocolConfig::Tls {
+            local_port,
+            sni_hostnames,
+            ..
+        } = &tunnel_config.protocols[0]
+        {
+            assert_eq!(*local_port, 8443);
+            assert_eq!(sni_hostnames.len(), 1);
+            assert_eq!(sni_hostnames[0], "api.example.com");
+        } else {
+            panic!("Expected TLS protocol");
+        }
+    }
+
+    #[test]
+    fn test_tls_protocol_with_empty_hostnames() {
+        // Empty hostnames should be valid - relay assigns default
+        let yaml = r#"
+tunnels:
+  - name: no-sni
+    port: 443
+    protocol: tls
+"#;
+        let config = ProjectConfig::parse(yaml).unwrap();
+        let tunnel = &config.tunnels[0];
+
+        let tunnel_config = tunnel
+            .to_tunnel_config(&ProjectDefaults::default())
+            .unwrap();
+
+        if let ProtocolConfig::Tls { sni_hostnames, .. } = &tunnel_config.protocols[0] {
+            assert!(sni_hostnames.is_empty());
+        } else {
+            panic!("Expected TLS protocol");
+        }
+    }
+
+    #[test]
+    fn test_tls_protocol_mixed_wildcards_and_specific() {
+        let yaml = r#"
+tunnels:
+  - name: desktop-app
+    port: 443
+    protocol: tls
+    sni_hostnames:
+      - "*.local-rqe59t.dviejo.temps.dev"
+      - "api.specific-domain.com"
+      - "*.another-wildcard.io"
+"#;
+        let config = ProjectConfig::parse(yaml).unwrap();
+        let tunnel = &config.tunnels[0];
+
+        assert_eq!(tunnel.sni_hostnames.len(), 3);
+        assert!(tunnel.sni_hostnames[0].starts_with("*."));
+        assert!(!tunnel.sni_hostnames[1].starts_with("*."));
+        assert!(tunnel.sni_hostnames[2].starts_with("*."));
+    }
+
+    #[test]
+    fn test_tls_protocol_config_serialization() {
+        let yaml = r#"
+tunnels:
+  - name: serialization-test
+    port: 443
+    protocol: tls
+    sni_hostnames:
+      - "*.example.com"
+      - "specific.example.com"
+"#;
+        let config = ProjectConfig::parse(yaml).unwrap();
+
+        // Serialize to YAML
+        let serialized = serde_yaml::to_string(&config).unwrap();
+
+        // Deserialize back
+        let restored: ProjectConfig = serde_yaml::from_str(&serialized).unwrap();
+
+        assert_eq!(restored.tunnels[0].sni_hostnames.len(), 2);
+        assert_eq!(
+            restored.tunnels[0].sni_hostnames[0],
+            config.tunnels[0].sni_hostnames[0]
+        );
+        assert_eq!(
+            restored.tunnels[0].sni_hostnames[1],
+            config.tunnels[0].sni_hostnames[1]
+        );
+    }
+
+    #[test]
+    fn test_multiple_tls_tunnels_different_domains() {
+        let yaml = r#"
+tunnels:
+  - name: app1
+    port: 3443
+    protocol: tls
+    sni_hostnames:
+      - "*.app1.example.com"
+
+  - name: app2
+    port: 4443
+    protocol: tls
+    sni_hostnames:
+      - "*.app2.example.com"
+      - "api.app2.example.com"
+
+  - name: app3
+    port: 5443
+    protocol: tls
+    sni_hostnames:
+      - "specific.domain.com"
+"#;
+        let config = ProjectConfig::parse(yaml).unwrap();
+
+        assert_eq!(config.tunnels.len(), 3);
+
+        assert_eq!(config.tunnels[0].sni_hostnames.len(), 1);
+        assert_eq!(config.tunnels[1].sni_hostnames.len(), 2);
+        assert_eq!(config.tunnels[2].sni_hostnames.len(), 1);
+
+        // Verify each tunnel converts correctly
+        for tunnel in &config.tunnels {
+            let tunnel_config = tunnel
+                .to_tunnel_config(&ProjectDefaults::default())
+                .unwrap();
+            assert!(matches!(
+                &tunnel_config.protocols[0],
+                ProtocolConfig::Tls { .. }
+            ));
+        }
     }
 }

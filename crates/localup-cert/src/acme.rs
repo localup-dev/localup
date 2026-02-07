@@ -15,7 +15,7 @@ use instant_acme::{
 use thiserror::Error;
 use tokio::fs;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::Certificate;
 

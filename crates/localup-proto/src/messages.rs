@@ -232,8 +232,12 @@ mod serde_bytes_option {
 pub enum Protocol {
     /// TCP tunnel - port will be allocated by server if 0
     Tcp { port: u16 },
-    /// TLS tunnel with SNI routing
-    Tls { port: u16, sni_pattern: String },
+    /// TLS tunnel with SNI routing (supports multiple patterns including wildcards)
+    /// No domain validation - relay simply routes based on SNI match
+    Tls {
+        port: u16,
+        sni_patterns: Vec<String>,
+    },
     /// HTTP tunnel - subdomain is optional (auto-generated if None)
     /// If custom_domain is set, it takes precedence over subdomain
     Http {
@@ -266,9 +270,10 @@ pub struct Endpoint {
 /// - Basic: HTTP Basic Auth (username:password)
 /// - BearerToken: Validate specific header token
 /// - OAuth/OIDC: (future) OpenID Connect
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum HttpAuthConfig {
     /// No authentication required
+    #[default]
     None,
     /// HTTP Basic Authentication
     /// Credentials are "username:password" pairs
@@ -284,12 +289,6 @@ pub enum HttpAuthConfig {
     },
     // Future: OAuth/OIDC configuration would go here
     // Oidc { provider_url: String, client_id: String, ... }
-}
-
-impl Default for HttpAuthConfig {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Tunnel configuration
@@ -425,5 +424,123 @@ mod tests {
         let serialized = bincode::serialize(&protocol).unwrap();
         let deserialized: Protocol = bincode::deserialize(&serialized).unwrap();
         assert_eq!(protocol, deserialized);
+    }
+
+    #[test]
+    fn test_tls_protocol_single_sni_pattern() {
+        let protocol = Protocol::Tls {
+            port: 443,
+            sni_patterns: vec!["api.example.com".to_string()],
+        };
+        let serialized = bincode::serialize(&protocol).unwrap();
+        let deserialized: Protocol = bincode::deserialize(&serialized).unwrap();
+        assert_eq!(protocol, deserialized);
+
+        if let Protocol::Tls { port, sni_patterns } = deserialized {
+            assert_eq!(port, 443);
+            assert_eq!(sni_patterns.len(), 1);
+            assert_eq!(sni_patterns[0], "api.example.com");
+        } else {
+            panic!("Expected TLS protocol");
+        }
+    }
+
+    #[test]
+    fn test_tls_protocol_multiple_sni_patterns() {
+        let protocol = Protocol::Tls {
+            port: 8443,
+            sni_patterns: vec![
+                "api.example.com".to_string(),
+                "web.example.com".to_string(),
+                "admin.example.com".to_string(),
+            ],
+        };
+        let serialized = bincode::serialize(&protocol).unwrap();
+        let deserialized: Protocol = bincode::deserialize(&serialized).unwrap();
+        assert_eq!(protocol, deserialized);
+
+        if let Protocol::Tls { port, sni_patterns } = deserialized {
+            assert_eq!(port, 8443);
+            assert_eq!(sni_patterns.len(), 3);
+            assert_eq!(sni_patterns[0], "api.example.com");
+            assert_eq!(sni_patterns[1], "web.example.com");
+            assert_eq!(sni_patterns[2], "admin.example.com");
+        } else {
+            panic!("Expected TLS protocol");
+        }
+    }
+
+    #[test]
+    fn test_tls_protocol_wildcard_patterns() {
+        let protocol = Protocol::Tls {
+            port: 443,
+            sni_patterns: vec![
+                "*.example.com".to_string(),
+                "*.local-abc123.myapp.dev".to_string(),
+                "specific.domain.com".to_string(),
+            ],
+        };
+        let serialized = bincode::serialize(&protocol).unwrap();
+        let deserialized: Protocol = bincode::deserialize(&serialized).unwrap();
+        assert_eq!(protocol, deserialized);
+
+        if let Protocol::Tls { sni_patterns, .. } = deserialized {
+            assert_eq!(sni_patterns.len(), 3);
+            assert!(sni_patterns[0].starts_with("*."));
+            assert!(sni_patterns[1].starts_with("*."));
+            assert!(!sni_patterns[2].starts_with("*."));
+        } else {
+            panic!("Expected TLS protocol");
+        }
+    }
+
+    #[test]
+    fn test_tls_protocol_empty_patterns() {
+        let protocol = Protocol::Tls {
+            port: 443,
+            sni_patterns: vec![],
+        };
+        let serialized = bincode::serialize(&protocol).unwrap();
+        let deserialized: Protocol = bincode::deserialize(&serialized).unwrap();
+        assert_eq!(protocol, deserialized);
+
+        if let Protocol::Tls { sni_patterns, .. } = deserialized {
+            assert!(sni_patterns.is_empty());
+        } else {
+            panic!("Expected TLS protocol");
+        }
+    }
+
+    #[test]
+    fn test_connect_message_with_tls_protocol() {
+        let msg = TunnelMessage::Connect {
+            localup_id: "tunnel-123".to_string(),
+            auth_token: "test-token".to_string(),
+            protocols: vec![Protocol::Tls {
+                port: 443,
+                sni_patterns: vec![
+                    "*.local-rqe59t.dviejo.temps.dev".to_string(),
+                    "api.production.com".to_string(),
+                ],
+            }],
+            config: TunnelConfig::default(),
+        };
+
+        let serialized = bincode::serialize(&msg).unwrap();
+        let deserialized: TunnelMessage = bincode::deserialize(&serialized).unwrap();
+        assert_eq!(msg, deserialized);
+
+        if let TunnelMessage::Connect { protocols, .. } = deserialized {
+            assert_eq!(protocols.len(), 1);
+            if let Protocol::Tls { sni_patterns, .. } = &protocols[0] {
+                assert_eq!(sni_patterns.len(), 2);
+                assert_eq!(sni_patterns[0], "*.local-rqe59t.dviejo.temps.dev");
+                assert_eq!(sni_patterns[1], "api.production.com");
+            } else {
+                panic!("Expected TLS protocol");
+            }
+        } else {
+            panic!("Expected Connect message");
+        }
     }
 }

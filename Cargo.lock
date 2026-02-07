@@ -3384,6 +3384,7 @@ name = "localup-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "clap",
  "dirs 5.0.1",
@@ -3737,17 +3738,21 @@ dependencies = [
 name = "localup-server-tls"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "localup-cert",
  "localup-control",
  "localup-proto",
+ "localup-relay-db",
  "localup-router",
  "localup-transport",
  "localup-transport-quic",
  "rustls 0.23.32",
+ "sea-orm",
  "thiserror 1.0.69",
  "tokio",
  "tokio-rustls 0.26.4",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
