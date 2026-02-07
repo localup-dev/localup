@@ -270,9 +270,10 @@ pub struct Endpoint {
 /// - Basic: HTTP Basic Auth (username:password)
 /// - BearerToken: Validate specific header token
 /// - OAuth/OIDC: (future) OpenID Connect
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub enum HttpAuthConfig {
     /// No authentication required
+    #[default]
     None,
     /// HTTP Basic Authentication
     /// Credentials are "username:password" pairs
@@ -288,12 +289,6 @@ pub enum HttpAuthConfig {
     },
     // Future: OAuth/OIDC configuration would go here
     // Oidc { provider_url: String, client_id: String, ... }
-}
-
-impl Default for HttpAuthConfig {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Tunnel configuration

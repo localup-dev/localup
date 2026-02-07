@@ -269,7 +269,11 @@ pub fn build_protocol_config(
         }),
         "tls" => Ok(ProtocolConfig::Tls {
             local_port,
-            sni_hostnames: config.custom_domain.clone().map(|d| vec![d]).unwrap_or_default(),
+            sni_hostnames: config
+                .custom_domain
+                .clone()
+                .map(|d| vec![d])
+                .unwrap_or_default(),
             http_port: None,
         }),
         other => Err(format!("Unknown protocol: {}", other)),
