@@ -1,6 +1,10 @@
 //! HTTPS server implementation with TLS termination
 //!
 //! Supports wildcard domain certificates (e.g., `*.example.com`) with fallback resolution.
+//! Supports both HTTP/1.1 and HTTP/2 via ALPN negotiation.
+use bytes::Bytes;
+use h2::server::SendResponse;
+use http::Request;
 use localup_control::{PendingRequests, TunnelConnectionManager};
 use localup_proto::TunnelMessage;
 use localup_relay_db::entities::custom_domain;
@@ -30,6 +34,9 @@ pub enum HttpsServerError {
 
     #[error("TLS error: {0}")]
     TlsError(String),
+
+    #[error("HTTP/2 error: {0}")]
+    H2Error(#[from] h2::Error),
 
     #[error("Route error: {0}")]
     RouteError(String),
@@ -393,10 +400,13 @@ impl HttpsServer {
             }
         }
 
-        // Build TLS config with custom resolver
-        let tls_config = ServerConfig::builder()
+        // Build TLS config with custom resolver and ALPN for HTTP/2 support
+        let mut tls_config = ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(cert_resolver);
+
+        // Configure ALPN protocols: prefer HTTP/2, fallback to HTTP/1.1
+        tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
         let acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
@@ -472,7 +482,30 @@ impl HttpsServer {
 
         debug!("TLS handshake completed for {}", peer_addr);
 
-        // Read HTTP request
+        // Check negotiated ALPN protocol
+        let alpn_protocol = tls_stream.get_ref().1.alpn_protocol();
+        let is_h2 = alpn_protocol == Some(b"h2".as_slice());
+
+        if is_h2 {
+            debug!("HTTP/2 connection from {} via ALPN", peer_addr);
+            return Self::handle_h2_connection(
+                tls_stream,
+                peer_addr,
+                route_registry,
+                localup_manager,
+                pending_requests,
+                db,
+            )
+            .await;
+        }
+
+        debug!(
+            "HTTP/1.1 connection from {} (ALPN: {:?})",
+            peer_addr,
+            alpn_protocol.map(|p| String::from_utf8_lossy(p))
+        );
+
+        // HTTP/1.1 path: Read HTTP request
         let mut buffer = vec![0u8; 8192];
         let n = tls_stream.read(&mut buffer).await?;
 
@@ -1116,6 +1149,380 @@ impl HttpsServer {
             headers: response_headers,
             body,
         })
+    }
+
+    /// Handle an HTTP/2 connection
+    /// Accepts multiple streams and forwards each request through the tunnel
+    async fn handle_h2_connection(
+        tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
+        peer_addr: SocketAddr,
+        route_registry: Arc<RouteRegistry>,
+        localup_manager: Option<Arc<TunnelConnectionManager>>,
+        pending_requests: Option<Arc<PendingRequests>>,
+        db: Option<DatabaseConnection>,
+    ) -> Result<(), HttpsServerError> {
+        // Perform HTTP/2 handshake
+        let mut h2_conn = match h2::server::handshake(tls_stream).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!("HTTP/2 handshake failed from {}: {}", peer_addr, e);
+                return Err(HttpsServerError::TlsError(format!(
+                    "H2 handshake failed: {}",
+                    e
+                )));
+            }
+        };
+
+        info!("HTTP/2 connection established from {}", peer_addr);
+
+        // Accept streams in a loop
+        while let Some(result) = h2_conn.accept().await {
+            match result {
+                Ok((request, send_response)) => {
+                    let registry = route_registry.clone();
+                    let manager = localup_manager.clone();
+                    let pending = pending_requests.clone();
+                    let db = db.clone();
+
+                    // Handle each HTTP/2 stream concurrently
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::handle_h2_stream(
+                            request,
+                            send_response,
+                            peer_addr,
+                            registry,
+                            manager,
+                            pending,
+                            db,
+                        )
+                        .await
+                        {
+                            debug!("HTTP/2 stream error from {}: {}", peer_addr, e);
+                        }
+                    });
+                }
+                Err(e) => {
+                    if e.is_go_away() || e.is_io() {
+                        debug!("HTTP/2 connection closed from {}: {}", peer_addr, e);
+                        break;
+                    }
+                    warn!("HTTP/2 accept error from {}: {}", peer_addr, e);
+                }
+            }
+        }
+
+        debug!("HTTP/2 connection ended from {}", peer_addr);
+        Ok(())
+    }
+
+    /// Handle a single HTTP/2 stream (request/response pair)
+    async fn handle_h2_stream(
+        request: Request<h2::RecvStream>,
+        mut send_response: SendResponse<Bytes>,
+        peer_addr: SocketAddr,
+        route_registry: Arc<RouteRegistry>,
+        localup_manager: Option<Arc<TunnelConnectionManager>>,
+        _pending_requests: Option<Arc<PendingRequests>>,
+        db: Option<DatabaseConnection>,
+    ) -> Result<(), HttpsServerError> {
+        let request_start = chrono::Utc::now();
+        let request_id = uuid::Uuid::new_v4().to_string();
+
+        // Extract request info from HTTP/2 pseudo-headers
+        let method = request.method().to_string();
+        let uri = request.uri().to_string();
+        let authority = request
+            .uri()
+            .authority()
+            .map(|a| a.to_string())
+            .or_else(|| {
+                request
+                    .headers()
+                    .get("host")
+                    .and_then(|h| h.to_str().ok())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default();
+
+        // Extract host without port
+        let host = authority.split(':').next().unwrap_or(&authority);
+
+        debug!(
+            "HTTP/2 request from {}: {} {} (host: {})",
+            peer_addr, method, uri, host
+        );
+
+        // Convert headers to Vec<(String, String)>
+        let headers: Vec<(String, String)> = request
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+
+        // Read request body
+        let mut body_stream = request.into_body();
+        let mut body_bytes = Vec::new();
+        while let Some(chunk) = body_stream.data().await {
+            match chunk {
+                Ok(data) => {
+                    body_bytes.extend_from_slice(&data);
+                    // Release flow control capacity
+                    let _ = body_stream.flow_control().release_capacity(data.len());
+                }
+                Err(e) => {
+                    warn!("Error reading HTTP/2 request body: {}", e);
+                    break;
+                }
+            }
+        }
+        let body = if body_bytes.is_empty() {
+            None
+        } else {
+            Some(body_bytes)
+        };
+
+        // Look up route
+        let route_key = RouteKey::HttpHost(host.to_string());
+        let target = match route_registry.lookup(&route_key) {
+            Ok(t) => t,
+            Err(_) => {
+                warn!("No HTTPS route found for host: {}", host);
+                let response = http::Response::builder().status(404).body(()).unwrap();
+                let mut send = send_response.send_response(response, false)?;
+                send.send_data(Bytes::from("Not Found"), true)?;
+                return Ok(());
+            }
+        };
+
+        // Check IP filtering
+        if !target.is_ip_allowed(&peer_addr) {
+            warn!(
+                "HTTP/2 connection from IP {} denied for host: {}",
+                peer_addr.ip(),
+                host
+            );
+            let response = http::Response::builder().status(403).body(()).unwrap();
+            let mut send = send_response.send_response(response, false)?;
+            send.send_data(Bytes::from("Access denied"), true)?;
+            return Ok(());
+        }
+
+        // Check if this is a tunnel route
+        if !target.target_addr.starts_with("tunnel:") {
+            warn!("HTTPS route is not a tunnel: {}", target.target_addr);
+            let response = http::Response::builder().status(502).body(()).unwrap();
+            let mut send = send_response.send_response(response, false)?;
+            send.send_data(Bytes::from("Bad Gateway"), true)?;
+            return Ok(());
+        }
+
+        // Extract tunnel ID
+        let localup_id = target.target_addr.strip_prefix("tunnel:").unwrap();
+
+        // Get tunnel manager
+        let localup_manager = match localup_manager {
+            Some(m) => m,
+            None => {
+                error!("Tunnel manager not configured for HTTPS");
+                let response = http::Response::builder().status(503).body(()).unwrap();
+                let mut send = send_response.send_response(response, false)?;
+                send.send_data(Bytes::from("Service Unavailable"), true)?;
+                return Ok(());
+            }
+        };
+
+        // Check HTTP authentication if configured
+        if let Some(authenticator) = localup_manager.get_http_authenticator(localup_id).await {
+            if authenticator.requires_auth() {
+                // Convert headers to slice format expected by authenticator
+                let auth_headers: Vec<(String, String)> = headers
+                    .iter()
+                    .map(|(k, v)| (k.to_lowercase(), v.clone()))
+                    .collect();
+
+                match authenticator.authenticate(&auth_headers) {
+                    localup_http_auth::AuthResult::Authenticated => {
+                        debug!("HTTP auth successful for tunnel: {}", localup_id);
+                    }
+                    localup_http_auth::AuthResult::Unauthorized(_) => {
+                        debug!("HTTP auth failed for tunnel: {}", localup_id);
+                        // For HTTP/2, return 401 with auth type header
+                        let www_auth = match authenticator.auth_type() {
+                            "basic" => "Basic",
+                            "bearer" => "Bearer",
+                            other => other,
+                        };
+                        let response = http::Response::builder()
+                            .status(401)
+                            .header("WWW-Authenticate", www_auth)
+                            .body(())
+                            .unwrap();
+                        let mut send = send_response.send_response(response, false)?;
+                        send.send_data(Bytes::from("Unauthorized"), true)?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Get tunnel connection
+        let connection = match localup_manager.get(localup_id).await {
+            Some(c) => c,
+            None => {
+                warn!("Tunnel not found: {}", localup_id);
+                let response = http::Response::builder().status(502).body(()).unwrap();
+                let mut send = send_response.send_response(response, false)?;
+                send.send_data(Bytes::from("Tunnel not found"), true)?;
+                return Ok(());
+            }
+        };
+
+        // Open QUIC stream to tunnel
+        let stream_id = rand::random::<u32>();
+        let stream = match connection.open_stream().await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to open QUIC stream: {}", e);
+                let response = http::Response::builder().status(502).body(()).unwrap();
+                let mut send = send_response.send_response(response, false)?;
+                send.send_data(Bytes::from("Tunnel stream error"), true)?;
+                return Ok(());
+            }
+        };
+
+        let (mut quic_send, mut quic_recv) = stream.split();
+
+        // Send HTTP request through tunnel
+        let http_request = TunnelMessage::HttpRequest {
+            stream_id,
+            method: method.clone(),
+            uri: uri.clone(),
+            headers: headers.clone(),
+            body: body.clone(),
+        };
+
+        if let Err(e) = quic_send.send_message(&http_request).await {
+            error!("Failed to send HTTP/2 request to tunnel: {}", e);
+            let response = http::Response::builder().status(502).body(()).unwrap();
+            let mut send = send_response.send_response(response, false)?;
+            send.send_data(Bytes::from("Tunnel send error"), true)?;
+            return Ok(());
+        }
+
+        debug!(
+            "HTTP/2 request sent to tunnel client (stream {})",
+            stream_id
+        );
+
+        // Wait for response from tunnel
+        let response =
+            tokio::time::timeout(std::time::Duration::from_secs(30), quic_recv.recv_message())
+                .await;
+
+        match response {
+            Ok(Ok(Some(TunnelMessage::HttpResponse {
+                stream_id: _,
+                status,
+                headers: resp_headers,
+                body: resp_body,
+            }))) => {
+                // Build HTTP/2 response
+                let mut response_builder = http::Response::builder().status(status);
+
+                // Add response headers (skip pseudo-headers and connection-specific headers)
+                for (name, value) in &resp_headers {
+                    let name_lower = name.to_lowercase();
+                    // Skip HTTP/2 forbidden headers
+                    if name_lower == "connection"
+                        || name_lower == "keep-alive"
+                        || name_lower == "transfer-encoding"
+                        || name_lower == "upgrade"
+                    {
+                        continue;
+                    }
+                    response_builder = response_builder.header(name, value);
+                }
+
+                let has_body = resp_body.is_some() && !resp_body.as_ref().unwrap().is_empty();
+                let response = response_builder.body(()).unwrap();
+                let mut send = send_response.send_response(response, !has_body)?;
+
+                // Send response body
+                if let Some(body_data) = resp_body.as_ref() {
+                    if !body_data.is_empty() {
+                        send.send_data(Bytes::copy_from_slice(body_data), true)?;
+                    }
+                }
+
+                debug!("HTTP/2 response forwarded to client: {}", status);
+
+                // Capture to database
+                if let Some(ref db_conn) = db {
+                    use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
+
+                    let response_end = chrono::Utc::now();
+                    let latency_ms = (response_end - request_start).num_milliseconds() as i32;
+
+                    let captured_request =
+                        localup_relay_db::entities::captured_request::ActiveModel {
+                            id: Set(request_id.clone()),
+                            localup_id: Set(localup_id.to_string()),
+                            method: Set(method),
+                            path: Set(uri),
+                            host: Set(Some(host.to_string())),
+                            headers: Set(serde_json::to_string(&headers).unwrap_or_default()),
+                            body: Set(body.as_ref().map(|b| BASE64.encode(b))),
+                            status: Set(Some(status as i32)),
+                            response_headers: Set(Some(
+                                serde_json::to_string(&resp_headers).unwrap_or_default(),
+                            )),
+                            response_body: Set(resp_body.as_ref().map(|b| BASE64.encode(b))),
+                            created_at: Set(request_start),
+                            responded_at: Set(Some(response_end)),
+                            latency_ms: Set(Some(latency_ms)),
+                        };
+
+                    use sea_orm::EntityTrait;
+                    if let Err(e) = localup_relay_db::entities::prelude::CapturedRequest::insert(
+                        captured_request,
+                    )
+                    .exec(db_conn)
+                    .await
+                    {
+                        warn!(
+                            "Failed to save captured HTTP/2 request {}: {}",
+                            request_id, e
+                        );
+                    }
+                }
+            }
+            Ok(Ok(Some(other))) => {
+                warn!("Unexpected tunnel message: {:?}", other);
+                let response = http::Response::builder().status(502).body(()).unwrap();
+                let mut send = send_response.send_response(response, false)?;
+                send.send_data(Bytes::from("Unexpected tunnel response"), true)?;
+            }
+            Ok(Ok(None)) => {
+                warn!("Tunnel stream closed without response");
+                let response = http::Response::builder().status(502).body(()).unwrap();
+                let mut send = send_response.send_response(response, false)?;
+                send.send_data(Bytes::from("Tunnel closed"), true)?;
+            }
+            Ok(Err(e)) => {
+                error!("Tunnel receive error: {}", e);
+                let response = http::Response::builder().status(502).body(()).unwrap();
+                let mut send = send_response.send_response(response, false)?;
+                send.send_data(Bytes::from("Tunnel error"), true)?;
+            }
+            Err(_) => {
+                error!("Tunnel response timeout after 30s");
+                let response = http::Response::builder().status(504).body(()).unwrap();
+                let mut send = send_response.send_response(response, false)?;
+                send.send_data(Bytes::from("Gateway Timeout"), true)?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Look up an ACME HTTP-01 challenge from the database
