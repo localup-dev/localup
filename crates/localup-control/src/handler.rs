@@ -359,8 +359,8 @@ impl TunnelHandler {
         debug!("Received Connect from localup_id: {}", localup_id);
 
         // Validate authentication with enhanced auth token validation
-        let user_id = match self.validate_auth_token(&auth_token).await {
-            Ok(user_id) => user_id,
+        let (user_id, jwt_claims) = match self.validate_auth_token(&auth_token).await {
+            Ok((user_id, claims)) => (user_id, claims),
             Err(e) => {
                 error!("Authentication failed for tunnel {}: {}", localup_id, e);
                 let _ = control_stream
@@ -376,6 +376,32 @@ impl TunnelHandler {
         };
 
         debug!("Tunnel {} authenticated for user {}", localup_id, user_id);
+
+        // Validate subdomain access if JWT claims contain restrictions
+        if let Some(ref claims) = jwt_claims {
+            for protocol in &protocols {
+                let subdomain = match protocol {
+                    Protocol::Http { subdomain, .. } | Protocol::Https { subdomain, .. } => {
+                        subdomain.as_ref()
+                    }
+                    _ => None,
+                };
+
+                if let Some(subdomain) = subdomain {
+                    if let Err(e) = claims.validate_subdomain_access(subdomain) {
+                        error!("Subdomain access denied for tunnel {}: {}", localup_id, e);
+                        let _ = control_stream
+                            .send_message(&TunnelMessage::Disconnect {
+                                reason: format!("Subdomain access denied: {}", e),
+                            })
+                            .await;
+                        let _ = control_stream.finish().await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        return Err(e);
+                    }
+                }
+            }
+        }
 
         // Build endpoints based on requested protocols
         let mut endpoints = self
@@ -1598,7 +1624,7 @@ impl TunnelHandler {
         info!("Agent {} disconnected", agent_id);
     }
 
-    /// Validate an auth token and return the user_id
+    /// Validate an auth token and return the user_id and optional JWT claims
     ///
     /// This method performs enhanced authentication by:
     /// 1. Validating JWT signature and expiration
@@ -1607,17 +1633,24 @@ impl TunnelHandler {
     /// 4. Verifying the token is active (not revoked)
     /// 5. Updating the last_used_at timestamp
     ///
-    /// Returns the user_id if authentication succeeds, otherwise returns an error
-    async fn validate_auth_token(&self, token: &str) -> Result<String, String> {
+    /// Returns (user_id, claims) if authentication succeeds, otherwise returns an error
+    /// The claims are used for additional authorization checks (e.g., subdomain restrictions)
+    async fn validate_auth_token(
+        &self,
+        token: &str,
+    ) -> Result<(String, Option<localup_auth::JwtClaims>), String> {
         // Step 1: Validate JWT signature and expiration
         let claims = if let Some(ref validator) = self.jwt_validator {
-            validator
-                .validate(token)
-                .map_err(|e| format!("Invalid JWT token: {}", e))?
+            Some(
+                validator
+                    .validate(token)
+                    .map_err(|e| format!("Invalid JWT token: {}", e))?,
+            )
         } else {
             // No JWT validator configured - skip database validation too
-            return Ok("anonymous".to_string());
+            return Ok(("anonymous".to_string(), None));
         };
+        let claims = claims.unwrap(); // Safe: we returned early if None
 
         // Step 2: Verify token type is "auth" (not "session")
         match &claims.token_type {
@@ -1637,7 +1670,7 @@ impl TunnelHandler {
         }
 
         // Extract user_id from claims (will be verified against database)
-        let claimed_user_id = claims.user_id.ok_or_else(|| {
+        let claimed_user_id = claims.user_id.clone().ok_or_else(|| {
             "Token missing 'user_id' claim. Auth tokens must include user_id".to_string()
         })?;
 
@@ -1682,11 +1715,11 @@ impl TunnelHandler {
                 warn!("Failed to update last_used_at for token: {}", e);
             }
 
-            Ok(claimed_user_id)
+            Ok((claimed_user_id, Some(claims)))
         } else {
             // No database configured - rely only on JWT validation
             debug!("Database not configured, skipping token database validation");
-            Ok(claimed_user_id)
+            Ok((claimed_user_id, Some(claims)))
         }
     }
 

@@ -335,6 +335,17 @@ enum Commands {
         #[arg(long = "allowed-address")]
         allowed_addresses: Vec<String>,
 
+        /// Allowed subdomain patterns for HTTP/HTTPS tunnels (repeatable)
+        /// Supports glob patterns:
+        /// - Exact: "myapp" - only allows subdomain "myapp"
+        /// - Prefix wildcard: "*-dviejo" - allows any subdomain ending with "-dviejo"
+        /// - Suffix wildcard: "myapp-*" - allows any subdomain starting with "myapp-"
+        /// - Full wildcard: "*" - allows any subdomain
+        /// Example: --allowed-subdomain "*-dviejo" --allowed-subdomain "api"
+        /// If not specified, all subdomains are allowed
+        #[arg(long = "allowed-subdomain")]
+        allowed_subdomains: Vec<String>,
+
         /// Output only the JWT token (useful for scripts)
         #[arg(long)]
         token_only: bool,
@@ -855,6 +866,7 @@ async fn main() -> Result<()> {
             reverse_tunnel,
             allowed_agents,
             allowed_addresses,
+            allowed_subdomains,
             token_only,
         }) => {
             handle_generate_token_command(
@@ -865,6 +877,7 @@ async fn main() -> Result<()> {
                 reverse_tunnel,
                 allowed_agents,
                 allowed_addresses,
+                allowed_subdomains,
                 token_only,
             )
             .await
@@ -3336,6 +3349,7 @@ async fn handle_generate_token_command(
     reverse_tunnel: bool,
     allowed_agents: Vec<String>,
     allowed_addresses: Vec<String>,
+    allowed_subdomains: Vec<String>,
     token_only: bool,
 ) -> Result<()> {
     use chrono::Duration;
@@ -3367,6 +3381,11 @@ async fn handle_generate_token_command(
         if !allowed_addresses.is_empty() {
             claims = claims.with_allowed_addresses(allowed_addresses.clone());
         }
+    }
+
+    // Add subdomain restrictions if specified
+    if !allowed_subdomains.is_empty() {
+        claims = claims.with_allowed_subdomains(allowed_subdomains.clone());
     }
 
     // Encode the token
@@ -3407,6 +3426,14 @@ async fn handle_generate_token_command(
                 println!("  - Allowed addresses: all");
             }
         }
+
+        // Show subdomain restrictions if specified
+        if let Some(ref subdomains) = claims.allowed_subdomains {
+            println!("  - Allowed subdomains: {}", subdomains.join(", "));
+        } else {
+            println!("  - Allowed subdomains: all");
+        }
+
         println!();
         println!("Use this token in your client configuration:");
         println!("  localup --token {}", token);
