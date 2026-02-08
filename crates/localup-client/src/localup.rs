@@ -2204,8 +2204,23 @@ impl TunnelConnection {
             }
         }
 
+        // HTTP status codes that MUST NOT have a message body (RFC 7230)
+        // - 1xx (Informational)
+        // - 204 (No Content)
+        // - 304 (Not Modified)
+        // Also HEAD requests never have response bodies
+        let status_has_no_body =
+            status < 200 || status == 204 || status == 304 || method.to_uppercase() == "HEAD";
+
         // Read body based on Content-Length or chunked encoding
-        let body = if let Some(expected_len) = content_length {
+        let body = if status_has_no_body {
+            // These status codes MUST NOT have a body - don't wait for one
+            debug!(
+                "Status {} has no body (or HEAD request), skipping body read",
+                status
+            );
+            None
+        } else if let Some(expected_len) = content_length {
             // Content-Length present - read exact number of bytes
             let mut body_data = response_buf[header_end_pos..].to_vec();
 
@@ -3030,6 +3045,63 @@ mod tests {
         assert!(
             decoded.iter().all(|&b| b == b'X'),
             "Should preserve chunk content"
+        );
+    }
+
+    // ==================== HTTP Status Code Tests ====================
+
+    #[test]
+    fn test_status_codes_with_no_body() {
+        // Test that these status codes are correctly identified as having no body
+        // Per RFC 7230: 1xx, 204, and 304 MUST NOT have a message body
+
+        // Helper to check if status has no body (matches the logic in forward_http_request)
+        fn status_has_no_body(status: u16, method: &str) -> bool {
+            status < 200 || status == 204 || status == 304 || method.to_uppercase() == "HEAD"
+        }
+
+        // 1xx Informational responses - no body
+        assert!(status_has_no_body(100, "GET"), "100 Continue has no body");
+        assert!(
+            status_has_no_body(101, "GET"),
+            "101 Switching Protocols has no body"
+        );
+        assert!(status_has_no_body(199, "GET"), "199 has no body");
+
+        // 204 No Content - no body
+        assert!(status_has_no_body(204, "GET"), "204 No Content has no body");
+        assert!(
+            status_has_no_body(204, "POST"),
+            "204 No Content has no body"
+        );
+
+        // 304 Not Modified - no body
+        assert!(
+            status_has_no_body(304, "GET"),
+            "304 Not Modified has no body"
+        );
+
+        // HEAD requests - no body regardless of status
+        assert!(status_has_no_body(200, "HEAD"), "HEAD 200 has no body");
+        assert!(status_has_no_body(404, "HEAD"), "HEAD 404 has no body");
+
+        // Regular status codes SHOULD have body processing
+        assert!(!status_has_no_body(200, "GET"), "200 OK can have body");
+        assert!(
+            !status_has_no_body(201, "POST"),
+            "201 Created can have body"
+        );
+        assert!(
+            !status_has_no_body(400, "GET"),
+            "400 Bad Request can have body"
+        );
+        assert!(
+            !status_has_no_body(404, "GET"),
+            "404 Not Found can have body"
+        );
+        assert!(
+            !status_has_no_body(500, "GET"),
+            "500 Internal Error can have body"
         );
     }
 }
