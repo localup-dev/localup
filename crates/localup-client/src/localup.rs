@@ -1264,25 +1264,74 @@ impl TunnelConnection {
         stream_id: u32,
         request: HttpRequestData,
     ) {
-        // Process HTTP request using existing logic
-        let response = Self::handle_http_request_static(
-            config,
-            metrics,
-            stream_id,
-            request.method,
-            request.uri,
-            request.headers,
-            request.body,
-        )
-        .await;
+        // Get local port from first protocol
+        let local_port = config.protocols.first().and_then(|p| match p {
+            ProtocolConfig::Http { local_port, .. } => Some(*local_port),
+            ProtocolConfig::Https { local_port, .. } => Some(*local_port),
+            _ => None,
+        });
 
-        // Send response on THIS stream
-        if let Err(e) = stream.send_message(&response).await {
-            error!(
-                "Failed to send HTTP response on stream {}: {}",
-                stream.stream_id(),
-                e
-            );
+        let local_port = match local_port {
+            Some(port) => port,
+            None => {
+                error!("No HTTP/HTTPS protocol configured");
+                let response = TunnelMessage::HttpResponse {
+                    stream_id,
+                    status: 500,
+                    headers: vec![],
+                    body: Some(b"No HTTP protocol configured".to_vec()),
+                };
+                let _ = stream.send_message(&response).await;
+                let _ = stream.finish().await;
+                return;
+            }
+        };
+
+        // Build raw HTTP request to pass to HttpProxy
+        let local_addr = format!("{}:{}", config.local_host, local_port);
+        let mut raw_request = format!("{} {} HTTP/1.1\r\n", request.method, request.uri);
+        for (name, value) in &request.headers {
+            raw_request.push_str(&format!("{}: {}\r\n", name, value));
+        }
+        raw_request.push_str("\r\n");
+        let mut request_bytes = raw_request.into_bytes();
+        if let Some(body) = &request.body {
+            request_bytes.extend_from_slice(body);
+        }
+
+        // Use HttpProxy for proper HTTP handling with connection pooling
+        let proxy = HttpProxy::new(local_addr, metrics.clone());
+        let base_stream_id = generate_short_id(stream_id);
+
+        match proxy.forward_request(&base_stream_id, &request_bytes).await {
+            Ok(proxy_result) => {
+                // Convert proxy result to TunnelMessage::HttpResponse
+                let response = TunnelMessage::HttpResponse {
+                    stream_id,
+                    status: proxy_result.status,
+                    headers: proxy_result.headers,
+                    body: proxy_result.body,
+                };
+
+                // Send response on THIS stream
+                if let Err(e) = stream.send_message(&response).await {
+                    error!(
+                        "Failed to send HTTP response on stream {}: {}",
+                        stream.stream_id(),
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                error!("HTTP proxy error: {}", e);
+                let response = TunnelMessage::HttpResponse {
+                    stream_id,
+                    status: 502,
+                    headers: vec![],
+                    body: Some(format!("Proxy error: {}", e).into_bytes()),
+                };
+                let _ = stream.send_message(&response).await;
+            }
         }
 
         // Close stream
@@ -2003,6 +2052,8 @@ impl TunnelConnection {
         debug!("TLS stream handler finished (stream {})", stream_id);
     }
 
+    /// Legacy manual HTTP request handler - kept for reference but replaced by HttpProxy
+    #[allow(dead_code)]
     async fn handle_http_request_static(
         config: &TunnelConfig,
         metrics: &MetricsStore,
@@ -2259,13 +2310,11 @@ impl TunnelConnection {
                 );
             } else {
                 // Keep reading until connection closes or end marker
-                // Use a reasonable timeout per read - 5 seconds should handle most cases
+                // Use a short timeout (1 second) - chunked responses should stream data continuously
+                let chunk_timeout = std::time::Duration::from_secs(1);
                 loop {
-                    let read_result = tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        local_socket.read(&mut temp_buf),
-                    )
-                    .await;
+                    let read_result =
+                        tokio::time::timeout(chunk_timeout, local_socket.read(&mut temp_buf)).await;
 
                     match read_result {
                         Ok(Ok(0)) => {
@@ -2293,9 +2342,9 @@ impl TunnelConnection {
                             break;
                         }
                         Err(_) => {
-                            // Timeout after 5 seconds of no data
-                            warn!(
-                                "Chunked response: read timeout after 5s ({} bytes received so far)",
+                            // Timeout - no more data coming
+                            debug!(
+                                "Chunked response: idle timeout after {} bytes (no end marker found)",
                                 chunked_data.len()
                             );
                             break;
@@ -2319,19 +2368,29 @@ impl TunnelConnection {
                 Some(body_data)
             }
         } else {
-            // No Content-Length and not chunked - read until connection closes
+            // No Content-Length and not chunked - read until connection closes or idle
             let mut body_data = response_buf[header_end_pos..].to_vec();
 
-            // Use reasonable timeout - 5 seconds between reads
+            // For responses without Content-Length or chunked encoding,
+            // we can't know when the body ends. Use a short idle timeout (500ms)
+            // to detect end of response on keep-alive connections.
+            // If we already have data from the initial read and no more comes in 500ms,
+            // the response is likely complete.
+            let idle_timeout = std::time::Duration::from_millis(500);
+
             loop {
-                let read_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    local_socket.read(&mut temp_buf),
-                )
-                .await;
+                let read_result =
+                    tokio::time::timeout(idle_timeout, local_socket.read(&mut temp_buf)).await;
 
                 match read_result {
-                    Ok(Ok(0)) => break, // Connection closed
+                    Ok(Ok(0)) => {
+                        // Connection closed - response complete
+                        debug!(
+                            "Response complete: connection closed after {} bytes",
+                            body_data.len()
+                        );
+                        break;
+                    }
                     Ok(Ok(n)) => {
                         body_data.extend_from_slice(&temp_buf[..n]);
                     }
@@ -2340,9 +2399,10 @@ impl TunnelConnection {
                         break;
                     }
                     Err(_) => {
-                        // Timeout after 5 seconds of no data
-                        warn!(
-                            "Response read timeout after 5s ({} bytes received)",
+                        // No more data after 500ms - assume response is complete
+                        // This is expected for HTTP/1.1 keep-alive connections
+                        debug!(
+                            "Response complete: idle timeout after {} bytes (no Content-Length or chunked encoding)",
                             body_data.len()
                         );
                         break;
@@ -2388,6 +2448,7 @@ impl TunnelConnection {
     /// Looks for the final chunk marker "0\r\n\r\n" anywhere in the data
     /// This is used to detect when we have received the complete response
     /// without needing to wait for the connection to close (important for HTTP/1.1 keep-alive)
+    #[allow(dead_code)]
     fn is_chunked_complete(data: &[u8]) -> bool {
         // Look for "0\r\n\r\n" pattern which marks end of chunked response
         // The pattern could appear as:
@@ -2398,6 +2459,7 @@ impl TunnelConnection {
 
     /// Decode chunked transfer encoding body
     /// Parses format: SIZE\r\n...DATA...\r\n...SIZE\r\n...DATA...\r\n0\r\n\r\n
+    #[allow(dead_code)]
     fn decode_chunked_body(chunked_data: &[u8]) -> Vec<u8> {
         let mut decoded = Vec::new();
         let mut pos = 0;
