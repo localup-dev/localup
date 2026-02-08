@@ -2234,51 +2234,57 @@ impl TunnelConnection {
             // Chunked transfer encoding - read until connection closes or we see end marker
             let mut chunked_data = response_buf[header_end_pos..].to_vec();
 
-            // Keep reading until connection closes or end marker
-            // Use a reasonable timeout per read - 5 seconds should handle most cases
-            loop {
-                let read_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    local_socket.read(&mut temp_buf),
-                )
-                .await;
+            // Check if we already have the complete response from the headers read
+            // This is crucial for HTTP/1.1 keep-alive connections where the server
+            // doesn't close the connection after sending the response
+            if Self::is_chunked_complete(&chunked_data) {
+                debug!(
+                    "Chunked response: already complete in initial buffer ({} bytes)",
+                    chunked_data.len()
+                );
+            } else {
+                // Keep reading until connection closes or end marker
+                // Use a reasonable timeout per read - 5 seconds should handle most cases
+                loop {
+                    let read_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        local_socket.read(&mut temp_buf),
+                    )
+                    .await;
 
-                match read_result {
-                    Ok(Ok(0)) => {
-                        // Connection closed
-                        debug!(
-                            "Chunked response: connection closed after {} bytes",
-                            chunked_data.len()
-                        );
-                        break;
-                    }
-                    Ok(Ok(n)) => {
-                        chunked_data.extend_from_slice(&temp_buf[..n]);
-
-                        // Check for chunked encoding end marker
-                        // Look for "\r\n0\r\n\r\n" or just "0\r\n\r\n" at the end
-                        if chunked_data.len() >= 5
-                            && (chunked_data.ends_with(b"0\r\n\r\n")
-                                || chunked_data.ends_with(b"\r\n0\r\n\r\n"))
-                        {
+                    match read_result {
+                        Ok(Ok(0)) => {
+                            // Connection closed
                             debug!(
-                                "Chunked response: found end marker after {} bytes",
+                                "Chunked response: connection closed after {} bytes",
                                 chunked_data.len()
                             );
                             break;
                         }
-                    }
-                    Ok(Err(e)) => {
-                        warn!("Error reading chunked body: {}", e);
-                        break;
-                    }
-                    Err(_) => {
-                        // Timeout after 5 seconds of no data
-                        warn!(
-                            "Chunked response: read timeout after 5s ({} bytes received so far)",
-                            chunked_data.len()
-                        );
-                        break;
+                        Ok(Ok(n)) => {
+                            chunked_data.extend_from_slice(&temp_buf[..n]);
+
+                            // Check for chunked encoding end marker
+                            if Self::is_chunked_complete(&chunked_data) {
+                                debug!(
+                                    "Chunked response: found end marker after {} bytes",
+                                    chunked_data.len()
+                                );
+                                break;
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            warn!("Error reading chunked body: {}", e);
+                            break;
+                        }
+                        Err(_) => {
+                            // Timeout after 5 seconds of no data
+                            warn!(
+                                "Chunked response: read timeout after 5s ({} bytes received so far)",
+                                chunked_data.len()
+                            );
+                            break;
+                        }
                     }
                 }
             }
@@ -2361,6 +2367,18 @@ impl TunnelConnection {
             headers: resp_headers,
             body,
         }
+    }
+
+    /// Check if a chunked transfer encoding response is complete
+    /// Looks for the final chunk marker "0\r\n\r\n" anywhere in the data
+    /// This is used to detect when we have received the complete response
+    /// without needing to wait for the connection to close (important for HTTP/1.1 keep-alive)
+    fn is_chunked_complete(data: &[u8]) -> bool {
+        // Look for "0\r\n\r\n" pattern which marks end of chunked response
+        // The pattern could appear as:
+        // - "\r\n0\r\n\r\n" after a chunk (7 bytes)
+        // - "0\r\n\r\n" at start of empty response (5 bytes)
+        data.windows(5).any(|w| w == b"0\r\n\r\n")
     }
 
     /// Decode chunked transfer encoding body
@@ -2843,6 +2861,175 @@ mod tests {
         assert_ne!(
             id1, id2,
             "Same remote_port but different local_port should produce different IDs"
+        );
+    }
+
+    // ==================== Chunked Response Handling Tests ====================
+
+    #[test]
+    fn test_is_chunked_complete_with_simple_response() {
+        // Simple chunked response: "20\r\n" + 32 bytes + "\r\n0\r\n\r\n"
+        // This represents a 32-byte body (0x20 = 32 in hex)
+        let body = b"{\"error\":\"Not authenticated\"}";
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(b"1d\r\n"); // 0x1d = 29 bytes
+        chunked.extend_from_slice(body);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        assert!(
+            TunnelConnection::is_chunked_complete(&chunked),
+            "Should detect complete chunked response"
+        );
+    }
+
+    #[test]
+    fn test_is_chunked_complete_incomplete_response() {
+        // Incomplete chunked response - missing the final chunk marker
+        let body = b"{\"error\":\"Not authenticated\"}";
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(b"1d\r\n"); // 0x1d = 29 bytes
+        chunked.extend_from_slice(body);
+        chunked.extend_from_slice(b"\r\n"); // Missing "0\r\n\r\n"
+
+        assert!(
+            !TunnelConnection::is_chunked_complete(&chunked),
+            "Should NOT detect incomplete chunked response as complete"
+        );
+    }
+
+    #[test]
+    fn test_is_chunked_complete_empty_response() {
+        // Empty chunked response - just the final marker
+        let chunked = b"0\r\n\r\n";
+
+        assert!(
+            TunnelConnection::is_chunked_complete(chunked),
+            "Should detect empty chunked response as complete"
+        );
+    }
+
+    #[test]
+    fn test_is_chunked_complete_multi_chunk_response() {
+        // Multi-chunk response
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(b"5\r\n"); // First chunk: 5 bytes
+        chunked.extend_from_slice(b"Hello");
+        chunked.extend_from_slice(b"\r\n");
+        chunked.extend_from_slice(b"6\r\n"); // Second chunk: 6 bytes
+        chunked.extend_from_slice(b" World");
+        chunked.extend_from_slice(b"\r\n");
+        chunked.extend_from_slice(b"0\r\n\r\n"); // Final chunk
+
+        assert!(
+            TunnelConnection::is_chunked_complete(&chunked),
+            "Should detect complete multi-chunk response"
+        );
+    }
+
+    #[test]
+    fn test_is_chunked_complete_partial_marker() {
+        // Response with partial marker - only "0\r\n" without final "\r\n"
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(b"5\r\n");
+        chunked.extend_from_slice(b"Hello");
+        chunked.extend_from_slice(b"\r\n0\r\n"); // Missing final \r\n
+
+        assert!(
+            !TunnelConnection::is_chunked_complete(&chunked),
+            "Should NOT detect partial end marker as complete"
+        );
+    }
+
+    #[test]
+    fn test_decode_chunked_body_simple() {
+        // Simple single chunk
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(b"5\r\n");
+        chunked.extend_from_slice(b"Hello");
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let decoded = TunnelConnection::decode_chunked_body(&chunked);
+        assert_eq!(decoded, b"Hello", "Should decode single chunk correctly");
+    }
+
+    #[test]
+    fn test_decode_chunked_body_multi_chunk() {
+        // Multiple chunks
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(b"5\r\n");
+        chunked.extend_from_slice(b"Hello");
+        chunked.extend_from_slice(b"\r\n");
+        chunked.extend_from_slice(b"1\r\n");
+        chunked.extend_from_slice(b" ");
+        chunked.extend_from_slice(b"\r\n");
+        chunked.extend_from_slice(b"6\r\n");
+        chunked.extend_from_slice(b"World!");
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let decoded = TunnelConnection::decode_chunked_body(&chunked);
+        assert_eq!(
+            decoded, b"Hello World!",
+            "Should decode multiple chunks correctly"
+        );
+    }
+
+    #[test]
+    fn test_decode_chunked_body_with_chunk_extensions() {
+        // Chunk with extensions (semicolon after size)
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(b"5;name=value\r\n"); // Extension ignored
+        chunked.extend_from_slice(b"Hello");
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let decoded = TunnelConnection::decode_chunked_body(&chunked);
+        assert_eq!(
+            decoded, b"Hello",
+            "Should handle chunk extensions correctly"
+        );
+    }
+
+    #[test]
+    fn test_decode_chunked_body_json_response() {
+        // Realistic JSON error response
+        let json = b"{\"error\":\"Not authenticated\"}";
+        let hex_len = format!("{:x}", json.len()); // "1d"
+
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(hex_len.as_bytes());
+        chunked.extend_from_slice(b"\r\n");
+        chunked.extend_from_slice(json);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let decoded = TunnelConnection::decode_chunked_body(&chunked);
+        assert_eq!(
+            decoded,
+            json.as_slice(),
+            "Should decode JSON response correctly"
+        );
+    }
+
+    #[test]
+    fn test_decode_chunked_body_empty() {
+        // Empty response (just the final chunk marker)
+        let chunked = b"0\r\n\r\n";
+        let decoded = TunnelConnection::decode_chunked_body(chunked);
+        assert!(decoded.is_empty(), "Should return empty for empty response");
+    }
+
+    #[test]
+    fn test_decode_chunked_body_large_hex_size() {
+        // Large chunk size in hex (3E8 = 1000 bytes)
+        let body = vec![b'X'; 1000];
+        let mut chunked = Vec::new();
+        chunked.extend_from_slice(b"3e8\r\n");
+        chunked.extend_from_slice(&body);
+        chunked.extend_from_slice(b"\r\n0\r\n\r\n");
+
+        let decoded = TunnelConnection::decode_chunked_body(&chunked);
+        assert_eq!(decoded.len(), 1000, "Should decode large chunk correctly");
+        assert!(
+            decoded.iter().all(|&b| b == b'X'),
+            "Should preserve chunk content"
         );
     }
 }
