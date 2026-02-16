@@ -49,8 +49,10 @@ pub struct ProxyResult {
     pub status: u16,
     /// Response headers
     pub headers: Vec<(String, String)>,
-    /// Response body (if text content)
+    /// Full response body for tunnel forwarding
     pub body: Option<Vec<u8>>,
+    /// Captured body for metrics display (text content only, capped at 512KB)
+    pub captured_body: Option<Vec<u8>>,
     /// Request duration in milliseconds
     pub duration_ms: u64,
     /// Raw response bytes to forward
@@ -162,9 +164,20 @@ impl HttpProxy {
     }
 
     /// Serialize a hyper Response to raw HTTP bytes
+    ///
+    /// Returns: (status, headers, raw_response, full_body, captured_body_for_metrics)
     async fn serialize_response(
         response: Response<Incoming>,
-    ) -> Result<(u16, Vec<(String, String)>, Vec<u8>, Option<Vec<u8>>), ProxyError> {
+    ) -> Result<
+        (
+            u16,
+            Vec<(String, String)>,
+            Vec<u8>,
+            Option<Vec<u8>>,
+            Option<Vec<u8>>,
+        ),
+        ProxyError,
+    > {
         let status = response.status().as_u16();
         let status_text = response.status().canonical_reason().unwrap_or("OK");
 
@@ -218,14 +231,21 @@ impl HttpProxy {
         // Body
         raw.extend_from_slice(&body_bytes);
 
-        // Only capture body for text content types (for metrics)
+        // Full body for tunnel forwarding (always included)
+        let full_body = if body_bytes.is_empty() {
+            None
+        } else {
+            Some(body_bytes.to_vec())
+        };
+
+        // Captured body for metrics display (text content only, capped at 512KB)
         let captured_body = if is_text_content && body_bytes.len() <= 512 * 1024 {
             Some(body_bytes.to_vec())
         } else {
             None
         };
 
-        Ok((status, headers, raw, captured_body))
+        Ok((status, headers, raw, full_body, captured_body))
     }
 
     /// Forward an HTTP request to the local server and return the response
@@ -291,7 +311,8 @@ impl HttpProxy {
         self.return_connection(sender).await;
 
         // Serialize response
-        let (status, headers, raw_response, body) = Self::serialize_response(response).await?;
+        let (status, headers, raw_response, body, captured_body) =
+            Self::serialize_response(response).await?;
 
         let duration_ms = start_time.elapsed().as_millis() as u64;
 
@@ -300,13 +321,13 @@ impl HttpProxy {
             method, uri, status, duration_ms
         );
 
-        // Record response in metrics
+        // Record response in metrics (uses captured_body which is text-only, capped at 512KB)
         self.metrics
             .record_response(
                 &metric_id,
                 status,
                 headers.clone(),
-                body.clone(),
+                captured_body.clone(),
                 duration_ms,
             )
             .await;
@@ -316,6 +337,7 @@ impl HttpProxy {
             status,
             headers,
             body,
+            captured_body,
             duration_ms,
             raw_response,
         })

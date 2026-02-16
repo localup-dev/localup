@@ -406,6 +406,10 @@ impl HttpsServer {
             .with_cert_resolver(cert_resolver);
 
         // Configure ALPN protocols: prefer HTTP/2, fallback to HTTP/1.1
+        // HTTP/2 is used for regular requests (multiplexing, header compression)
+        // WebSocket works via:
+        //   - HTTP/1.1: standard Upgrade mechanism (RFC 6455)
+        //   - HTTP/2: Extended CONNECT protocol (RFC 8441) with :protocol pseudo-header
         tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
         let acceptor = TlsAcceptor::from(Arc::new(tls_config));
@@ -659,11 +663,6 @@ impl HttpsServer {
             None
         };
 
-        // Check if this is a WebSocket upgrade request
-        let is_websocket = headers.iter().any(|(name, value)| {
-            name.to_lowercase() == "upgrade" && value.to_lowercase() == "websocket"
-        });
-
         // Check HTTP authentication if configured for this tunnel
         if let Some(authenticator) = localup_manager.get_http_authenticator(localup_id).await {
             if authenticator.requires_auth() {
@@ -715,251 +714,68 @@ impl HttpsServer {
             }
         };
 
-        // Use transparent streaming for WebSocket upgrades
-        if is_websocket {
-            debug!(
-                "WebSocket upgrade detected, using transparent streaming for tunnel: {}",
-                localup_id
-            );
-
-            let (mut quic_send, quic_recv) = stream.split();
-
-            let connect_msg = TunnelMessage::HttpStreamConnect {
-                stream_id,
-                host: localup_id.to_string(),
-                initial_data: request_bytes.to_vec(),
-            };
-
-            if let Err(e) = quic_send.send_message(&connect_msg).await {
-                error!("Failed to send WebSocket stream connect: {}", e);
-                let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 12\r\n\r\nTunnel error";
-                tls_stream.write_all(response).await?;
-                return Ok(());
-            }
-
-            // Bidirectional streaming for WebSocket
-            let response_capture =
-                Self::proxy_transparent_stream(tls_stream, quic_send, quic_recv, stream_id).await?;
-
-            // Save to database
-            if let Some(ref db_conn) = db {
-                use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
-
-                let response_end = chrono::Utc::now();
-                let latency_ms = (response_end - request_start).num_milliseconds() as i32;
-
-                let captured_request = localup_relay_db::entities::captured_request::ActiveModel {
-                    id: Set(request_id.clone()),
-                    localup_id: Set(localup_id.to_string()),
-                    method: Set(method.clone()),
-                    path: Set(uri.clone()),
-                    host: Set(host),
-                    headers: Set(serde_json::to_string(&headers).unwrap_or_default()),
-                    body: Set(body.as_ref().map(|b| BASE64.encode(b))),
-                    status: Set(response_capture.status.map(|s| s as i32)),
-                    response_headers: Set(response_capture
-                        .headers
-                        .as_ref()
-                        .map(|h| serde_json::to_string(h).unwrap_or_default())),
-                    response_body: Set(response_capture.body.as_ref().map(|b| BASE64.encode(b))),
-                    created_at: Set(request_start),
-                    responded_at: Set(Some(response_end)),
-                    latency_ms: Set(Some(latency_ms)),
-                };
-
-                use sea_orm::EntityTrait;
-                if let Err(e) =
-                    localup_relay_db::entities::prelude::CapturedRequest::insert(captured_request)
-                        .exec(db_conn)
-                        .await
-                {
-                    warn!(
-                        "Failed to save captured WebSocket request {}: {}",
-                        request_id, e
-                    );
-                }
-            }
-
-            return Ok(());
-        }
-
-        // Regular HTTP request - use HttpRequest/HttpResponse for metrics support
+        // Use transparent streaming for ALL requests (data in, data out)
+        // This handles WebSocket, SSE, chunked transfers, large files, and
+        // regular HTTP correctly without buffering the entire response body.
         debug!(
-            "HTTPS request for tunnel: {} {} {}",
+            "HTTPS request for tunnel: {} {} {} (transparent streaming)",
             localup_id, method, uri
         );
 
-        let (mut quic_send, mut quic_recv) = stream.split();
+        let (mut quic_send, quic_recv) = stream.split();
 
-        // Clone for database capture
-        let method_clone = method.clone();
-        let uri_clone = uri.clone();
-        let headers_clone = headers.clone();
-        let body_clone = body.clone();
-
-        // Send HTTP request through tunnel
-        let http_request = TunnelMessage::HttpRequest {
+        let connect_msg = TunnelMessage::HttpStreamConnect {
             stream_id,
-            method,
-            uri,
-            headers,
-            body,
+            host: localup_id.to_string(),
+            initial_data: request_bytes.to_vec(),
         };
 
-        if let Err(e) = quic_send.send_message(&http_request).await {
-            error!("Failed to send HTTPS request to tunnel: {}", e);
-            let response =
-                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 23\r\n\r\nTunnel send error\n";
+        if let Err(e) = quic_send.send_message(&connect_msg).await {
+            error!("Failed to send stream connect: {}", e);
+            let response = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 12\r\n\r\nTunnel error";
             tls_stream.write_all(response).await?;
             return Ok(());
         }
 
-        debug!("HTTPS request sent to tunnel client (stream {})", stream_id);
+        // Bidirectional transparent streaming
+        let response_capture =
+            Self::proxy_transparent_stream(tls_stream, quic_send, quic_recv, stream_id).await?;
 
-        // Wait for response from tunnel (with timeout)
-        let response =
-            tokio::time::timeout(std::time::Duration::from_secs(30), quic_recv.recv_message())
-                .await;
+        // Save to database
+        if let Some(ref db_conn) = db {
+            use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
 
-        match response {
-            Ok(Ok(Some(TunnelMessage::HttpResponse {
-                stream_id: _,
-                status,
-                headers: resp_headers,
-                body: resp_body,
-            }))) => {
-                // Clone values for database capture
-                let resp_headers_clone = resp_headers.clone();
-                let resp_body_clone = resp_body.clone();
+            let response_end = chrono::Utc::now();
+            let latency_ms = (response_end - request_start).num_milliseconds() as i32;
 
-                // Build HTTP response
-                let status_text = match status {
-                    200 => "OK",
-                    201 => "Created",
-                    204 => "No Content",
-                    301 => "Moved Permanently",
-                    302 => "Found",
-                    304 => "Not Modified",
-                    400 => "Bad Request",
-                    401 => "Unauthorized",
-                    403 => "Forbidden",
-                    404 => "Not Found",
-                    500 => "Internal Server Error",
-                    502 => "Bad Gateway",
-                    503 => "Service Unavailable",
-                    _ => "Unknown",
-                };
+            let captured_request = localup_relay_db::entities::captured_request::ActiveModel {
+                id: Set(request_id.clone()),
+                localup_id: Set(localup_id.to_string()),
+                method: Set(method),
+                path: Set(uri),
+                host: Set(host),
+                headers: Set(serde_json::to_string(&headers).unwrap_or_default()),
+                body: Set(body.as_ref().map(|b| BASE64.encode(b))),
+                status: Set(response_capture.status.map(|s| s as i32)),
+                response_headers: Set(response_capture
+                    .headers
+                    .as_ref()
+                    .map(|h| serde_json::to_string(h).unwrap_or_default())),
+                response_body: Set(response_capture.body.as_ref().map(|b| BASE64.encode(b))),
+                created_at: Set(request_start),
+                responded_at: Set(Some(response_end)),
+                latency_ms: Set(Some(latency_ms)),
+            };
 
-                let response_line = format!("HTTP/1.1 {} {}\r\n", status, status_text);
-                tls_stream.write_all(response_line.as_bytes()).await?;
-
-                // Forward response headers (skip Content-Length and Transfer-Encoding, we'll add our own Content-Length)
-                for (name, value) in resp_headers {
-                    let name_lower = name.to_lowercase();
-                    if name_lower == "content-length" || name_lower == "transfer-encoding" {
-                        continue;
-                    }
-                    let header_line = format!("{}: {}\r\n", name, value);
-                    tls_stream.write_all(header_line.as_bytes()).await?;
-                }
-
-                // Write body with correct Content-Length
-                if let Some(ref body) = resp_body {
-                    // Debug: Log if there's a Content-Encoding header with mismatched length
-                    let original_content_length = resp_headers_clone
-                        .iter()
-                        .find(|(n, _)| n.to_lowercase() == "content-length")
-                        .and_then(|(_, v)| v.parse::<usize>().ok());
-                    if let Some(orig_len) = original_content_length {
-                        if orig_len != body.len() {
-                            warn!(
-                                "Content-Length mismatch! Original: {}, Actual body: {}",
-                                orig_len,
-                                body.len()
-                            );
-                        }
-                    }
-
-                    let content_length = format!("Content-Length: {}\r\n", body.len());
-                    tls_stream.write_all(content_length.as_bytes()).await?;
-                    tls_stream.write_all(b"\r\n").await?;
-                    tls_stream.write_all(body).await?;
-                    tls_stream.flush().await?; // Ensure all data is sent before handler returns
-                } else {
-                    tls_stream.write_all(b"Content-Length: 0\r\n\r\n").await?;
-                    tls_stream.flush().await?;
-                }
-
-                debug!(
-                    "HTTPS response forwarded to client: {} {}",
-                    status, status_text
-                );
-
-                // Capture request/response to database
-                if let Some(ref db_conn) = db {
-                    use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
-
-                    let response_end = chrono::Utc::now();
-                    let latency_ms = (response_end - request_start).num_milliseconds() as i32;
-
-                    let captured_request =
-                        localup_relay_db::entities::captured_request::ActiveModel {
-                            id: Set(request_id.clone()),
-                            localup_id: Set(localup_id.to_string()),
-                            method: Set(method_clone),
-                            path: Set(uri_clone),
-                            host: Set(host),
-                            headers: Set(serde_json::to_string(&headers_clone).unwrap_or_default()),
-                            body: Set(body_clone.as_ref().map(|b| BASE64.encode(b))),
-                            status: Set(Some(status as i32)),
-                            response_headers: Set(Some(
-                                serde_json::to_string(&resp_headers_clone).unwrap_or_default(),
-                            )),
-                            response_body: Set(resp_body_clone.as_ref().map(|b| BASE64.encode(b))),
-                            created_at: Set(request_start),
-                            responded_at: Set(Some(response_end)),
-                            latency_ms: Set(Some(latency_ms)),
-                        };
-
-                    use sea_orm::EntityTrait;
-                    if let Err(e) = localup_relay_db::entities::prelude::CapturedRequest::insert(
-                        captured_request,
-                    )
+            use sea_orm::EntityTrait;
+            if let Err(e) =
+                localup_relay_db::entities::prelude::CapturedRequest::insert(captured_request)
                     .exec(db_conn)
                     .await
-                    {
-                        warn!(
-                            "Failed to save captured HTTPS request {}: {}",
-                            request_id, e
-                        );
-                    } else {
-                        debug!("Captured HTTPS request {} to database", request_id);
-                    }
-                }
-            }
-            Ok(Ok(Some(other))) => {
-                error!("Unexpected tunnel response: {:?}", other);
-                let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 19\r\n\r\nUnexpected response";
-                tls_stream.write_all(response).await?;
-            }
-            Ok(Ok(None)) => {
-                error!("Tunnel closed without response");
-                let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 13\r\n\r\nTunnel closed";
-                tls_stream.write_all(response).await?;
-            }
-            Ok(Err(e)) => {
-                error!("Failed to read tunnel response: {}", e);
-                let response =
-                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 12\r\n\r\nTunnel error";
-                tls_stream.write_all(response).await?;
-            }
-            Err(_) => {
-                error!("Tunnel response timeout");
-                let response = b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 7\r\n\r\nTimeout";
-                tls_stream.write_all(response).await?;
+            {
+                warn!("Failed to save captured request {}: {}", request_id, e);
+            } else {
+                debug!("Captured request {} to database", request_id);
             }
         }
 
@@ -1161,8 +977,13 @@ impl HttpsServer {
         pending_requests: Option<Arc<PendingRequests>>,
         db: Option<DatabaseConnection>,
     ) -> Result<(), HttpsServerError> {
-        // Perform HTTP/2 handshake
-        let mut h2_conn = match h2::server::handshake(tls_stream).await {
+        // Perform HTTP/2 handshake with Extended CONNECT support (RFC 8441)
+        // This enables WebSocket-over-HTTP/2 via the :protocol pseudo-header
+        let mut h2_conn = match h2::server::Builder::new()
+            .enable_connect_protocol()
+            .handshake(tls_stream)
+            .await
+        {
             Ok(conn) => conn,
             Err(e) => {
                 warn!("HTTP/2 handshake failed from {}: {}", peer_addr, e);
@@ -1173,7 +994,10 @@ impl HttpsServer {
             }
         };
 
-        info!("HTTP/2 connection established from {}", peer_addr);
+        info!(
+            "HTTP/2 connection established from {} (Extended CONNECT enabled)",
+            peer_addr
+        );
 
         // Accept streams in a loop
         while let Some(result) = h2_conn.accept().await {
@@ -1215,7 +1039,7 @@ impl HttpsServer {
         Ok(())
     }
 
-    /// Handle a single HTTP/2 stream (request/response pair)
+    /// Handle a single HTTP/2 stream (request/response pair, or WebSocket via Extended CONNECT)
     async fn handle_h2_stream(
         request: Request<h2::RecvStream>,
         mut send_response: SendResponse<Bytes>,
@@ -1227,6 +1051,15 @@ impl HttpsServer {
     ) -> Result<(), HttpsServerError> {
         let request_start = chrono::Utc::now();
         let request_id = uuid::Uuid::new_v4().to_string();
+
+        // Check if this is a WebSocket Extended CONNECT request (RFC 8441)
+        // Browser sends: CONNECT with :protocol=websocket, :path=/ws, :scheme=https
+        let is_websocket_connect = request.method() == http::Method::CONNECT
+            && request
+                .extensions()
+                .get::<h2::ext::Protocol>()
+                .map(|p| p.as_str().eq_ignore_ascii_case("websocket"))
+                .unwrap_or(false);
 
         // Extract request info from HTTP/2 pseudo-headers
         let method = request.method().to_string();
@@ -1248,8 +1081,8 @@ impl HttpsServer {
         let host = authority.split(':').next().unwrap_or(&authority);
 
         debug!(
-            "HTTP/2 request from {}: {} {} (host: {})",
-            peer_addr, method, uri, host
+            "HTTP/2 request from {}: {} {} (host: {}, websocket: {})",
+            peer_addr, method, uri, host, is_websocket_connect
         );
 
         // Convert headers to Vec<(String, String)>
@@ -1259,29 +1092,7 @@ impl HttpsServer {
             .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
 
-        // Read request body
-        let mut body_stream = request.into_body();
-        let mut body_bytes = Vec::new();
-        while let Some(chunk) = body_stream.data().await {
-            match chunk {
-                Ok(data) => {
-                    body_bytes.extend_from_slice(&data);
-                    // Release flow control capacity
-                    let _ = body_stream.flow_control().release_capacity(data.len());
-                }
-                Err(e) => {
-                    warn!("Error reading HTTP/2 request body: {}", e);
-                    break;
-                }
-            }
-        }
-        let body = if body_bytes.is_empty() {
-            None
-        } else {
-            Some(body_bytes)
-        };
-
-        // Look up route
+        // Route lookup (common for both regular and WebSocket requests)
         let route_key = RouteKey::HttpHost(host.to_string());
         let target = match route_registry.lookup(&route_key) {
             Ok(t) => t,
@@ -1334,7 +1145,6 @@ impl HttpsServer {
         // Check HTTP authentication if configured
         if let Some(authenticator) = localup_manager.get_http_authenticator(localup_id).await {
             if authenticator.requires_auth() {
-                // Convert headers to slice format expected by authenticator
                 let auth_headers: Vec<(String, String)> = headers
                     .iter()
                     .map(|(k, v)| (k.to_lowercase(), v.clone()))
@@ -1346,7 +1156,6 @@ impl HttpsServer {
                     }
                     localup_http_auth::AuthResult::Unauthorized(_) => {
                         debug!("HTTP auth failed for tunnel: {}", localup_id);
-                        // For HTTP/2, return 401 with auth type header
                         let www_auth = match authenticator.auth_type() {
                             "basic" => "Basic",
                             "bearer" => "Bearer",
@@ -1392,6 +1201,273 @@ impl HttpsServer {
 
         let (mut quic_send, mut quic_recv) = stream.split();
 
+        // =====================================================================
+        // WebSocket Extended CONNECT path (RFC 8441)
+        // =====================================================================
+        if is_websocket_connect {
+            debug!(
+                "WebSocket Extended CONNECT for tunnel: {} {} (stream {})",
+                localup_id, uri, stream_id
+            );
+
+            // Build an HTTP/1.1 WebSocket upgrade request to send through the tunnel
+            // The tunnel client expects raw HTTP/1.1 bytes for WebSocket handling
+            let path = request
+                .uri()
+                .path_and_query()
+                .map(|pq| pq.to_string())
+                .unwrap_or_else(|| "/".to_string());
+
+            let mut raw_request = format!(
+                "GET {} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n",
+                path, host
+            );
+
+            // Forward relevant headers (sec-websocket-*, origin, etc.)
+            for (name, value) in &headers {
+                let name_lower = name.to_lowercase();
+                // Skip h2-specific and already-added headers
+                if name_lower == "host" || name_lower == "upgrade" || name_lower == "connection" {
+                    continue;
+                }
+                raw_request.push_str(&format!("{}: {}\r\n", name, value));
+            }
+            raw_request.push_str("\r\n");
+
+            // Send as HttpStreamConnect (same as HTTP/1.1 WebSocket path)
+            let connect_msg = TunnelMessage::HttpStreamConnect {
+                stream_id,
+                host: localup_id.to_string(),
+                initial_data: raw_request.into_bytes(),
+            };
+
+            if let Err(e) = quic_send.send_message(&connect_msg).await {
+                error!("Failed to send WebSocket stream connect: {}", e);
+                let response = http::Response::builder().status(502).body(()).unwrap();
+                let mut send = send_response.send_response(response, false)?;
+                send.send_data(Bytes::from("Tunnel error"), true)?;
+                return Ok(());
+            }
+
+            // Wait for the 101 response from the tunnel (the local server's upgrade response)
+            let first_response =
+                tokio::time::timeout(std::time::Duration::from_secs(30), quic_recv.recv_message())
+                    .await;
+
+            match first_response {
+                Ok(Ok(Some(TunnelMessage::HttpStreamData { data, .. }))) => {
+                    // Parse the HTTP/1.1 response to check for 101
+                    let response_str = String::from_utf8_lossy(&data);
+                    let is_upgrade = response_str.contains("101");
+
+                    if !is_upgrade {
+                        // Not an upgrade response - forward as error
+                        warn!(
+                            "WebSocket upgrade failed, got: {}",
+                            response_str.lines().next().unwrap_or("")
+                        );
+                        let response = http::Response::builder().status(502).body(()).unwrap();
+                        let mut send = send_response.send_response(response, false)?;
+                        send.send_data(Bytes::from("WebSocket upgrade failed"), true)?;
+                        return Ok(());
+                    }
+
+                    debug!("WebSocket upgrade successful, starting bidirectional streaming");
+
+                    // Send 200 OK to the h2 client (RFC 8441: use 200, not 101)
+                    // The browser treats this as a successful WebSocket connection
+                    let mut response_builder = http::Response::builder().status(200);
+
+                    // Parse and forward response headers from the 101
+                    if let Some(header_end) = response_str.find("\r\n\r\n") {
+                        let header_section = &response_str[..header_end];
+                        for line in header_section.lines().skip(1) {
+                            if let Some(colon_pos) = line.find(':') {
+                                let name = line[..colon_pos].trim().to_lowercase();
+                                let value = line[colon_pos + 1..].trim();
+                                // Skip hop-by-hop headers forbidden in h2
+                                if name == "connection"
+                                    || name == "upgrade"
+                                    || name == "keep-alive"
+                                    || name == "transfer-encoding"
+                                {
+                                    continue;
+                                }
+                                response_builder = response_builder.header(&name, value);
+                            }
+                        }
+                    }
+
+                    let response = response_builder.body(()).unwrap();
+                    let mut h2_send = send_response.send_response(response, false)?;
+
+                    // Get the h2 RecvStream for reading client data
+                    let mut h2_recv = request.into_body();
+
+                    // Bidirectional streaming: h2 stream <-> QUIC tunnel
+                    loop {
+                        tokio::select! {
+                            // Browser → Tunnel (h2 RecvStream → QUIC)
+                            chunk = h2_recv.data() => {
+                                match chunk {
+                                    Some(Ok(data)) => {
+                                        let len = data.len();
+                                        // Release h2 flow control
+                                        let _ = h2_recv.flow_control().release_capacity(len);
+
+                                        let data_msg = TunnelMessage::HttpStreamData {
+                                            stream_id,
+                                            data: data.to_vec(),
+                                        };
+                                        if let Err(e) = quic_send.send_message(&data_msg).await {
+                                            debug!("QUIC send error in WebSocket h2 proxy: {}", e);
+                                            break;
+                                        }
+                                    }
+                                    Some(Err(e)) => {
+                                        debug!("h2 recv error in WebSocket proxy: {}", e);
+                                        let _ = quic_send.send_message(
+                                            &TunnelMessage::HttpStreamClose { stream_id }
+                                        ).await;
+                                        break;
+                                    }
+                                    None => {
+                                        // Client closed the stream (END_STREAM)
+                                        debug!("h2 WebSocket stream closed by client");
+                                        let _ = quic_send.send_message(
+                                            &TunnelMessage::HttpStreamClose { stream_id }
+                                        ).await;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Tunnel → Browser (QUIC → h2 SendStream)
+                            result = quic_recv.recv_message() => {
+                                match result {
+                                    Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
+                                        if let Err(e) = h2_send.send_data(Bytes::from(data), false) {
+                                            debug!("h2 send error in WebSocket proxy: {}", e);
+                                            break;
+                                        }
+                                    }
+                                    Ok(Some(TunnelMessage::HttpStreamClose { .. })) => {
+                                        debug!("Tunnel closed WebSocket stream {}", stream_id);
+                                        // Send END_STREAM to close the h2 stream
+                                        let _ = h2_send.send_data(Bytes::new(), true);
+                                        break;
+                                    }
+                                    Ok(None) => {
+                                        debug!("QUIC stream ended for WebSocket {}", stream_id);
+                                        let _ = h2_send.send_data(Bytes::new(), true);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        debug!("QUIC recv error in WebSocket proxy: {}", e);
+                                        break;
+                                    }
+                                    _ => {
+                                        warn!("Unexpected message on WebSocket h2 stream");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    debug!("WebSocket h2 proxy ended (stream {})", stream_id);
+
+                    // Capture to database
+                    if let Some(ref db_conn) = db {
+                        let response_end = chrono::Utc::now();
+                        let latency_ms = (response_end - request_start).num_milliseconds() as i32;
+
+                        let captured_request =
+                            localup_relay_db::entities::captured_request::ActiveModel {
+                                id: Set(request_id.clone()),
+                                localup_id: Set(localup_id.to_string()),
+                                method: Set("WEBSOCKET".to_string()),
+                                path: Set(uri),
+                                host: Set(Some(host.to_string())),
+                                headers: Set(serde_json::to_string(&headers).unwrap_or_default()),
+                                body: Set(None),
+                                status: Set(Some(101)),
+                                response_headers: Set(None),
+                                response_body: Set(None),
+                                created_at: Set(request_start),
+                                responded_at: Set(Some(response_end)),
+                                latency_ms: Set(Some(latency_ms)),
+                            };
+
+                        use sea_orm::EntityTrait;
+                        if let Err(e) =
+                            localup_relay_db::entities::prelude::CapturedRequest::insert(
+                                captured_request,
+                            )
+                            .exec(db_conn)
+                            .await
+                        {
+                            warn!("Failed to save WebSocket request {}: {}", request_id, e);
+                        }
+                    }
+
+                    return Ok(());
+                }
+                Ok(Ok(Some(TunnelMessage::HttpStreamClose { .. }))) | Ok(Ok(None)) => {
+                    warn!("Tunnel closed before WebSocket upgrade completed");
+                    let response = http::Response::builder().status(502).body(()).unwrap();
+                    let mut send = send_response.send_response(response, false)?;
+                    send.send_data(Bytes::from("Tunnel closed"), true)?;
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    error!("Tunnel error during WebSocket upgrade: {}", e);
+                    let response = http::Response::builder().status(502).body(()).unwrap();
+                    let mut send = send_response.send_response(response, false)?;
+                    send.send_data(Bytes::from("Tunnel error"), true)?;
+                    return Ok(());
+                }
+                Err(_) => {
+                    error!("WebSocket upgrade timeout after 30s");
+                    let response = http::Response::builder().status(504).body(()).unwrap();
+                    let mut send = send_response.send_response(response, false)?;
+                    send.send_data(Bytes::from("Gateway Timeout"), true)?;
+                    return Ok(());
+                }
+                _ => {
+                    warn!("Unexpected message during WebSocket upgrade");
+                    let response = http::Response::builder().status(502).body(()).unwrap();
+                    let mut send = send_response.send_response(response, false)?;
+                    send.send_data(Bytes::from("Unexpected response"), true)?;
+                    return Ok(());
+                }
+            }
+        }
+
+        // =====================================================================
+        // Regular HTTP/2 request-response path
+        // =====================================================================
+
+        // Read request body
+        let mut body_stream = request.into_body();
+        let mut body_bytes = Vec::new();
+        while let Some(chunk) = body_stream.data().await {
+            match chunk {
+                Ok(data) => {
+                    body_bytes.extend_from_slice(&data);
+                    let _ = body_stream.flow_control().release_capacity(data.len());
+                }
+                Err(e) => {
+                    warn!("Error reading HTTP/2 request body: {}", e);
+                    break;
+                }
+            }
+        }
+        let body = if body_bytes.is_empty() {
+            None
+        } else {
+            Some(body_bytes)
+        };
+
         // Send HTTP request through tunnel
         let http_request = TunnelMessage::HttpRequest {
             stream_id,
@@ -1432,7 +1508,6 @@ impl HttpsServer {
                 // Add response headers (skip pseudo-headers and connection-specific headers)
                 for (name, value) in &resp_headers {
                     let name_lower = name.to_lowercase();
-                    // Skip HTTP/2 forbidden headers
                     if name_lower == "connection"
                         || name_lower == "keep-alive"
                         || name_lower == "transfer-encoding"
@@ -1447,7 +1522,6 @@ impl HttpsServer {
                 let response = response_builder.body(()).unwrap();
                 let mut send = send_response.send_response(response, !has_body)?;
 
-                // Send response body
                 if let Some(body_data) = resp_body.as_ref() {
                     if !body_data.is_empty() {
                         send.send_data(Bytes::copy_from_slice(body_data), true)?;

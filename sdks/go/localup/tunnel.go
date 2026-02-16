@@ -780,11 +780,31 @@ func generateTunnelID() string {
 	return fmt.Sprintf("tunnel-%d", time.Now().UnixNano())
 }
 
+// hopByHopHeaders are headers that should be stripped when proxying HTTP responses.
+// These are connection-specific and must not be forwarded (RFC 7230 Section 6.1).
+var hopByHopHeaders = map[string]bool{
+	"connection":          true,
+	"keep-alive":          true,
+	"proxy-authenticate":  true,
+	"proxy-authorization": true,
+	"te":                  true,
+	"trailer":             true,
+	"transfer-encoding":   true,
+	"upgrade":             true,
+}
+
+// statusHasNoBody returns true for HTTP status codes that MUST NOT have a body (RFC 7230).
+func statusHasNoBody(status int, method string) bool {
+	return status < 200 || status == 204 || status == 304 || strings.EqualFold(method, "HEAD")
+}
+
 // httpForwarder handles forwarding HTTP requests to the local service.
+// Mirrors the Rust HttpProxy approach: collects the full body, strips hop-by-hop
+// and transfer-encoding headers, and sets a correct content-length.
 type httpForwarder struct {
-	client    *http.Client
-	upstream  *url.URL
-	useHTTPS  bool
+	client   *http.Client
+	upstream *url.URL
+	useHTTPS bool
 }
 
 func newHTTPForwarder(config *TunnelConfig) *httpForwarder {
@@ -799,9 +819,22 @@ func newHTTPForwarder(config *TunnelConfig) *httpForwarder {
 
 	u, _ := url.Parse(upstream)
 
+	// Configure a transport with proper connection pooling
+	// (matches Rust HttpProxy MAX_POOL_SIZE = 10)
+	transport := &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 10,
+		IdleConnTimeout:     90 * time.Second,
+	}
+
 	return &httpForwarder{
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout:   30 * time.Second,
+			Transport: transport,
+			// Don't follow redirects — the tunnel client should forward them as-is
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		upstream: u,
 		useHTTPS: config.LocalHTTPS,
@@ -837,19 +870,36 @@ func (f *httpForwarder) forward(ctx context.Context, req *HttpRequestMessage) (*
 	}
 	defer resp.Body.Close()
 
-	// Read response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	// Build response headers
-	headers := make(map[string]string)
-	for k, v := range resp.Header {
-		if len(v) > 0 {
-			headers[k] = v[0]
+	// Read response body (unless status code forbids it)
+	var body []byte
+	if !statusHasNoBody(resp.StatusCode, req.Method) {
+		body, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, err
 		}
 	}
+
+	// Build response headers:
+	// - Strip hop-by-hop headers (transfer-encoding, connection, etc.)
+	// - Strip content-length (we'll set our own based on actual body size)
+	// - Join multi-value headers with ", " (RFC 7230 Section 3.2.2)
+	headers := make(map[string]string)
+	for k, v := range resp.Header {
+		lk := strings.ToLower(k)
+		// Skip hop-by-hop headers
+		if hopByHopHeaders[lk] {
+			continue
+		}
+		// Skip content-length — we set it below based on the actual body
+		if lk == "content-length" {
+			continue
+		}
+		// Join multi-value headers properly
+		headers[k] = strings.Join(v, ", ")
+	}
+
+	// Set content-length to actual body size
+	headers["Content-Length"] = fmt.Sprintf("%d", len(body))
 
 	return &HttpResponseMessage{
 		StreamID: req.StreamID,

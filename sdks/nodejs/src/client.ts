@@ -170,6 +170,29 @@ function generateTunnelId(token: string): string {
 // Implementation
 // ============================================================================
 
+/**
+ * Hop-by-hop headers that must be stripped when proxying (RFC 7230 Section 6.1).
+ * These are connection-specific and must not be forwarded through the tunnel.
+ */
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+]);
+
+/**
+ * Check if an HTTP status code MUST NOT have a body (RFC 7230).
+ * Also returns true for HEAD responses which never have a body.
+ */
+function statusHasNoBody(status: number, method: string): boolean {
+  return status < 200 || status === 204 || status === 304 || method.toUpperCase() === "HEAD";
+}
+
 class LocalupListener extends EventEmitter implements Listener {
   private connection: TransportConnection;
   private controlStream: TransportStream;
@@ -181,6 +204,9 @@ class LocalupListener extends EventEmitter implements Listener {
   private closed = false;
   private closePromise: Promise<void>;
   private closeResolve!: () => void;
+  /** HTTP agent with connection pooling for forwarding requests */
+  private httpAgent: http.Agent;
+  private httpsAgent: https.Agent;
 
   constructor(
     connection: TransportConnection,
@@ -199,6 +225,10 @@ class LocalupListener extends EventEmitter implements Listener {
     this.localAddr = localAddr;
     this.localPort = localPort;
     this.localHttps = localHttps;
+
+    // Connection-pooling agents (matches Rust HttpProxy MAX_POOL_SIZE = 10)
+    this.httpAgent = new http.Agent({ keepAlive: true, maxSockets: 10 });
+    this.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 10, rejectUnauthorized: false });
 
     this.closePromise = new Promise((resolve) => {
       this.closeResolve = resolve;
@@ -275,6 +305,10 @@ class LocalupListener extends EventEmitter implements Listener {
     if (this.closed) return;
 
     this.closed = true;
+
+    // Destroy connection-pooling agents
+    this.httpAgent.destroy();
+    this.httpsAgent.destroy();
 
     // Send disconnect
     try {
@@ -375,7 +409,7 @@ class LocalupListener extends EventEmitter implements Listener {
     // Parse the URI to get path
     const url = new URL(uri, `http://${this.localAddr}:${this.localPort}`);
 
-    // Forward request to local server
+    // Forward request to local server using connection-pooling agent
     const protocol = this.localHttps ? https : http;
     const options: http.RequestOptions & https.RequestOptions = {
       hostname: this.localAddr,
@@ -383,38 +417,56 @@ class LocalupListener extends EventEmitter implements Listener {
       path: url.pathname + url.search,
       method,
       headers: Object.fromEntries(headers),
+      agent: this.localHttps ? this.httpsAgent : this.httpAgent,
     };
-
-    // For HTTPS, disable certificate verification for local servers
-    if (this.localHttps) {
-      (options as https.RequestOptions).rejectUnauthorized = false;
-    }
 
     return new Promise((resolve, reject) => {
       const req = protocol.request(options, async (res) => {
         try {
-          // Collect response body
-          const chunks: Buffer[] = [];
-          for await (const chunk of res) {
-            chunks.push(chunk as Buffer);
+          const statusCode = res.statusCode ?? 200;
+
+          // Collect response body (unless status forbids it per RFC 7230)
+          let responseBody: Buffer;
+          if (statusHasNoBody(statusCode, method)) {
+            responseBody = Buffer.alloc(0);
+            // Drain the stream to allow connection reuse
+            res.resume();
+          } else {
+            const chunks: Buffer[] = [];
+            for await (const chunk of res) {
+              chunks.push(chunk as Buffer);
+            }
+            responseBody = Buffer.concat(chunks);
           }
-          const responseBody = Buffer.concat(chunks);
+
+          // Build response headers:
+          // - Strip hop-by-hop headers (transfer-encoding, connection, etc.)
+          // - Strip content-length (we set our own based on actual body size)
+          // - Join multi-value headers with ", " (RFC 7230 Section 3.2.2)
+          const respHeaders: [string, string][] = [];
+          for (const [k, v] of Object.entries(res.headers)) {
+            if (v === undefined) continue;
+            const lk = k.toLowerCase();
+            if (HOP_BY_HOP_HEADERS.has(lk)) continue;
+            if (lk === "content-length") continue;
+            respHeaders.push([k, Array.isArray(v) ? v.join(", ") : String(v)]);
+          }
+          // Set content-length to actual body size
+          respHeaders.push(["content-length", String(responseBody.length)]);
 
           // Send response back
           await stream.sendMessage({
             type: "HttpResponse",
             streamId,
-            status: res.statusCode ?? 200,
-            headers: Object.entries(res.headers)
-              .filter(([, v]) => v !== undefined)
-              .map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v)] as [string, string]),
+            status: statusCode,
+            headers: respHeaders,
             body: responseBody.length > 0 ? new Uint8Array(responseBody) : null,
           });
 
           this.emit("request", {
             method,
             path: url.pathname,
-            status: res.statusCode,
+            status: statusCode,
           });
 
           resolve();

@@ -1344,7 +1344,7 @@ impl TunnelConnection {
     async fn handle_http_transparent_stream(
         stream: StreamWrapper,
         config: &TunnelConfig,
-        metrics: &MetricsStore,
+        _metrics: &MetricsStore,
         stream_id: u32,
         initial_data: Vec<u8>,
         _connection_semaphore: Arc<tokio::sync::Semaphore>,
@@ -1377,147 +1377,16 @@ impl TunnelConnection {
         };
 
         let local_addr = format!("{}:{}", config.local_host, local_port);
-        let base_stream_id = generate_short_id(stream_id);
 
-        // Check if this is a WebSocket upgrade request
-        let is_websocket = Self::is_websocket_upgrade(&initial_data);
-
-        if is_websocket {
-            // Fall back to raw streaming for WebSocket
-            info!("🔌 WebSocket upgrade detected, using raw streaming");
-            Self::handle_raw_http_stream(stream, &local_addr, stream_id, initial_data).await;
-            return;
-        }
-
-        // Create HTTP proxy with connection pooling
-        let proxy = HttpProxy::new(local_addr.clone(), metrics.clone());
-
-        // Process initial request through proxy
-        let result = proxy.forward_request(&base_stream_id, &initial_data).await;
-
-        match result {
-            Ok(proxy_result) => {
-                // Check if response is a WebSocket upgrade (101 Switching Protocols)
-                if proxy_result.status == 101 {
-                    // This shouldn't happen since we checked above, but handle gracefully
-                    warn!("Unexpected 101 response, falling back to raw streaming");
-                    // Can't fall back easily here since we already consumed the request
-                    // Just send the response and close
-                }
-
-                // Send response back through QUIC
-                let data_msg = TunnelMessage::HttpStreamData {
-                    stream_id,
-                    data: proxy_result.raw_response,
-                };
-                if let Err(e) = stream.send_message(&data_msg).await {
-                    error!("Failed to send response to tunnel: {}", e);
-                    return;
-                }
-            }
-            Err(e) => {
-                error!("Proxy error for initial request: {}", e);
-                // Record error in metrics
-                let error_metric_id = metrics
-                    .record_request(
-                        base_stream_id.clone(),
-                        "UNKNOWN".to_string(),
-                        "/".to_string(),
-                        vec![],
-                        None,
-                    )
-                    .await;
-                metrics
-                    .record_error(&error_metric_id, e.to_string(), 0)
-                    .await;
-
-                let _ = stream
-                    .send_message(&TunnelMessage::HttpStreamClose { stream_id })
-                    .await;
-                return;
-            }
-        }
-
-        // Request counter for keep-alive requests
-        let mut request_num: u32 = 1;
-
-        // Handle keep-alive: read more requests from QUIC stream
-        loop {
-            match stream.recv_message().await {
-                Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
-                    // Check if this is a new HTTP request
-                    if Self::looks_like_http_request(&data) {
-                        request_num += 1;
-                        let req_stream_id = format!("{}-{}", base_stream_id, request_num);
-
-                        // Check for WebSocket upgrade in subsequent requests
-                        if Self::is_websocket_upgrade(&data) {
-                            info!("🔌 WebSocket upgrade in keep-alive, switching to raw streaming");
-                            // For WebSocket upgrade in keep-alive, we need raw bidirectional streaming
-                            // Send this request through raw and continue
-                            Self::handle_raw_http_stream(stream, &local_addr, stream_id, data)
-                                .await;
-                            return;
-                        }
-
-                        // Forward through proxy
-                        match proxy.forward_request(&req_stream_id, &data).await {
-                            Ok(proxy_result) => {
-                                let data_msg = TunnelMessage::HttpStreamData {
-                                    stream_id,
-                                    data: proxy_result.raw_response,
-                                };
-                                if let Err(e) = stream.send_message(&data_msg).await {
-                                    error!("Failed to send response to tunnel: {}", e);
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                error!("Proxy error for keep-alive request: {}", e);
-                                // Continue trying to handle more requests
-                            }
-                        }
-                    } else {
-                        // Non-HTTP data (shouldn't happen in normal HTTP flow)
-                        debug!("Received non-HTTP data on keep-alive stream, ignoring");
-                    }
-                }
-                Ok(Some(TunnelMessage::HttpStreamClose { .. })) => {
-                    debug!("Tunnel closed HTTP stream {}", stream_id);
-                    break;
-                }
-                Ok(None) => {
-                    debug!("QUIC stream ended (stream {})", stream_id);
-                    break;
-                }
-                Err(e) => {
-                    error!("Error reading from tunnel (stream {}): {}", stream_id, e);
-                    break;
-                }
-                _ => {
-                    warn!(
-                        "Unexpected message type on HTTP transparent stream {}",
-                        stream_id
-                    );
-                }
-            }
-        }
-
-        // Send close message
-        let _ = stream
-            .send_message(&TunnelMessage::HttpStreamClose { stream_id })
-            .await;
-
-        info!("🔌 HTTP proxy stream {} ended", stream_id);
+        // Use raw streaming for ALL requests (transparent proxy: data in, data out)
+        // This correctly handles WebSocket, SSE, chunked transfers, large files,
+        // and regular HTTP without buffering the entire response body.
+        // handle_raw_http_stream owns the stream and handles the full bidirectional
+        // lifecycle, returning only when the connection ends.
+        Self::handle_raw_http_stream(stream, &local_addr, stream_id, initial_data).await;
     }
 
-    /// Check if HTTP request is a WebSocket upgrade
-    fn is_websocket_upgrade(data: &[u8]) -> bool {
-        let text = String::from_utf8_lossy(data).to_lowercase();
-        text.contains("upgrade: websocket") || text.contains("connection: upgrade")
-    }
-
-    /// Handle raw HTTP stream for WebSocket/SSE (bidirectional streaming)
+    /// Handle raw HTTP stream (bidirectional streaming)
     async fn handle_raw_http_stream(
         stream: localup_transport_quic::QuicStream,
         local_addr: &str,
@@ -1584,23 +1453,6 @@ impl TunnelConnection {
 
         let _ = tokio::join!(local_to_quic, quic_to_local);
         info!("🔌 Raw HTTP stream {} ended", stream_id);
-    }
-
-    /// Check if data looks like the start of an HTTP request
-    fn looks_like_http_request(data: &[u8]) -> bool {
-        if data.len() < 4 {
-            return false;
-        }
-        // Check for common HTTP methods at the start
-        data.starts_with(b"GET ")
-            || data.starts_with(b"POST ")
-            || data.starts_with(b"PUT ")
-            || data.starts_with(b"DELETE ")
-            || data.starts_with(b"PATCH ")
-            || data.starts_with(b"HEAD ")
-            || data.starts_with(b"OPTIONS ")
-            || data.starts_with(b"CONNECT ")
-            || data.starts_with(b"TRACE ")
     }
 
     /// Parse HTTP request line, headers, and body from raw bytes
