@@ -1386,6 +1386,63 @@ impl TunnelConnection {
         Self::handle_raw_http_stream(stream, &local_addr, stream_id, initial_data).await;
     }
 
+    /// Rewrite the Host header in raw HTTP request bytes to point to the local server.
+    ///
+    /// Frameworks like Next.js validate the Host header and return 400 Bad Request
+    /// if it doesn't match their expected hostname. Since transparent streaming
+    /// forwards the original bytes (with Host: vt.tunnel.kfs.es), we must rewrite
+    /// it to the local address (e.g. localhost:4020) before forwarding.
+    fn rewrite_host_header(data: &[u8], local_addr: &str) -> Vec<u8> {
+        // Find end of headers (\r\n\r\n)
+        let header_end_pos = match data.windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(p) => p,
+            None => return data.to_vec(), // Not a complete HTTP request, pass through
+        };
+
+        // header_section is everything up to (not including) the \r\n\r\n
+        let header_section = &data[..header_end_pos];
+        // body starts after the \r\n\r\n
+        let body_section = &data[header_end_pos + 4..];
+
+        let header_text = String::from_utf8_lossy(header_section);
+        let lines: Vec<&str> = header_text.split("\r\n").collect();
+
+        if lines.is_empty() {
+            return data.to_vec();
+        }
+
+        let mut result = Vec::with_capacity(data.len() + 64);
+        let mut host_rewritten = false;
+
+        for (i, line) in lines.iter().enumerate() {
+            if i == 0 {
+                // Request line: pass through as-is
+                result.extend_from_slice(line.as_bytes());
+                result.extend_from_slice(b"\r\n");
+            } else if line.to_lowercase().starts_with("host:") {
+                // Rewrite Host header to local address
+                result.extend_from_slice(b"Host: ");
+                result.extend_from_slice(local_addr.as_bytes());
+                result.extend_from_slice(b"\r\n");
+                host_rewritten = true;
+            } else {
+                result.extend_from_slice(line.as_bytes());
+                result.extend_from_slice(b"\r\n");
+            }
+        }
+
+        // Terminate headers
+        result.extend_from_slice(b"\r\n");
+
+        if !host_rewritten {
+            debug!("No Host header found in request, passing through unchanged");
+        }
+
+        // Append body
+        result.extend_from_slice(body_section);
+        result
+    }
+
     /// Handle raw HTTP stream (bidirectional streaming)
     async fn handle_raw_http_stream(
         stream: localup_transport_quic::QuicStream,
@@ -1408,8 +1465,13 @@ impl TunnelConnection {
         let (mut local_read, mut local_write) = local_socket.into_split();
         let (mut quic_send, mut quic_recv) = stream.split();
 
-        // Write initial data
-        if let Err(e) = local_write.write_all(&initial_data).await {
+        // Rewrite Host header in initial request to point to local server.
+        // Without this, frameworks like Next.js reject the request with 400
+        // because Host: vt.tunnel.kfs.es doesn't match their expected hostname.
+        let rewritten_data = Self::rewrite_host_header(&initial_data, local_addr);
+
+        // Write initial data (with rewritten Host header)
+        if let Err(e) = local_write.write_all(&rewritten_data).await {
             error!("Failed to write initial data: {}", e);
             return;
         }
@@ -3017,5 +3079,51 @@ mod tests {
             !status_has_no_body(500, "GET"),
             "500 Internal Error can have body"
         );
+    }
+
+    #[test]
+    fn test_rewrite_host_header_basic() {
+        let request = b"GET /api/data HTTP/1.1\r\nHost: vt.tunnel.kfs.es\r\nAccept: */*\r\n\r\n";
+        let result = TunnelConnection::rewrite_host_header(request, "localhost:4020");
+        let text = String::from_utf8(result).unwrap();
+        assert!(text.contains("Host: localhost:4020\r\n"));
+        assert!(!text.contains("vt.tunnel.kfs.es"));
+        assert!(text.contains("GET /api/data HTTP/1.1\r\n"));
+        assert!(text.contains("Accept: */*\r\n"));
+    }
+
+    #[test]
+    fn test_rewrite_host_header_with_body() {
+        let request =
+            b"POST /api/logs HTTP/1.1\r\nHost: vt.tunnel.kfs.es\r\nContent-Length: 13\r\n\r\n{\"key\":\"val\"}";
+        let result = TunnelConnection::rewrite_host_header(request, "127.0.0.1:3000");
+        let text = String::from_utf8(result).unwrap();
+        assert!(text.contains("Host: 127.0.0.1:3000\r\n"));
+        assert!(text.ends_with("{\"key\":\"val\"}"));
+    }
+
+    #[test]
+    fn test_rewrite_host_header_case_insensitive() {
+        let request = b"GET / HTTP/1.1\r\nhost: example.com\r\n\r\n";
+        let result = TunnelConnection::rewrite_host_header(request, "localhost:8080");
+        let text = String::from_utf8(result).unwrap();
+        assert!(text.contains("Host: localhost:8080\r\n"));
+        assert!(!text.contains("example.com"));
+    }
+
+    #[test]
+    fn test_rewrite_host_header_no_host() {
+        let request = b"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n";
+        let result = TunnelConnection::rewrite_host_header(request, "localhost:4020");
+        // Should pass through unchanged
+        assert_eq!(result, request.to_vec());
+    }
+
+    #[test]
+    fn test_rewrite_host_header_incomplete_request() {
+        let data = b"GET / HTTP/1.1\r\nHost: example";
+        let result = TunnelConnection::rewrite_host_header(data, "localhost:4020");
+        // No \r\n\r\n found, pass through unchanged
+        assert_eq!(result, data.to_vec());
     }
 }
