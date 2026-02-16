@@ -1288,10 +1288,20 @@ impl TunnelConnection {
         };
 
         // Build raw HTTP request to pass to HttpProxy
+        // Rewrite Host and Origin headers to point to local server, otherwise
+        // frameworks like Next.js / Vite reject the request with 400 because
+        // Host: vt.tunnel.kfs.es doesn't match their expected hostname.
         let local_addr = format!("{}:{}", config.local_host, local_port);
         let mut raw_request = format!("{} {} HTTP/1.1\r\n", request.method, request.uri);
         for (name, value) in &request.headers {
-            raw_request.push_str(&format!("{}: {}\r\n", name, value));
+            let name_lower = name.to_lowercase();
+            if name_lower == "host" {
+                raw_request.push_str(&format!("Host: {}\r\n", local_addr));
+            } else if name_lower == "origin" {
+                raw_request.push_str(&format!("Origin: http://{}\r\n", local_addr));
+            } else {
+                raw_request.push_str(&format!("{}: {}\r\n", name, value));
+            }
         }
         raw_request.push_str("\r\n");
         let mut request_bytes = raw_request.into_bytes();
@@ -1386,12 +1396,14 @@ impl TunnelConnection {
         Self::handle_raw_http_stream(stream, &local_addr, stream_id, initial_data).await;
     }
 
-    /// Rewrite the Host header in raw HTTP request bytes to point to the local server.
+    /// Rewrite the Host and Origin headers in raw HTTP request bytes to point to the local server.
     ///
     /// Frameworks like Next.js validate the Host header and return 400 Bad Request
-    /// if it doesn't match their expected hostname. Since transparent streaming
+    /// if it doesn't match their expected hostname. Dev servers like Vite also
+    /// validate the Origin header on WebSocket upgrade requests and reject with 400
+    /// if Origin doesn't match the expected server origin. Since transparent streaming
     /// forwards the original bytes (with Host: vt.tunnel.kfs.es), we must rewrite
-    /// it to the local address (e.g. localhost:4020) before forwarding.
+    /// both headers to the local address (e.g. localhost:4020) before forwarding.
     fn rewrite_host_header(data: &[u8], local_addr: &str) -> Vec<u8> {
         // Find end of headers (\r\n\r\n)
         let header_end_pos = match data.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -1425,6 +1437,14 @@ impl TunnelConnection {
                 result.extend_from_slice(local_addr.as_bytes());
                 result.extend_from_slice(b"\r\n");
                 host_rewritten = true;
+            } else if line.to_lowercase().starts_with("origin:") {
+                // Rewrite Origin header to match local address.
+                // Dev servers like Vite validate Origin on WebSocket upgrades
+                // and return 400 if Origin (e.g. https://vt.tunnel.kfs.es)
+                // doesn't match the expected server origin.
+                result.extend_from_slice(b"Origin: http://");
+                result.extend_from_slice(local_addr.as_bytes());
+                result.extend_from_slice(b"\r\n");
             } else {
                 result.extend_from_slice(line.as_bytes());
                 result.extend_from_slice(b"\r\n");

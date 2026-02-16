@@ -1447,6 +1447,16 @@ impl HttpsServer {
         // Regular HTTP/2 request-response path
         // =====================================================================
 
+        // Extract path+query BEFORE consuming the request with into_body().
+        // HTTP/2 URIs include the full form (https://vt.tunnel.kfs.es/path) but the
+        // tunnel client builds an HTTP/1.1 request for the local server which expects
+        // origin-form (/path). Sending the full URI causes local servers to return 400.
+        let request_path = request
+            .uri()
+            .path_and_query()
+            .map(|pq| pq.to_string())
+            .unwrap_or_else(|| "/".to_string());
+
         // Read request body
         let mut body_stream = request.into_body();
         let mut body_bytes = Vec::new();
@@ -1472,7 +1482,7 @@ impl HttpsServer {
         let http_request = TunnelMessage::HttpRequest {
             stream_id,
             method: method.clone(),
-            uri: uri.clone(),
+            uri: request_path,
             headers: headers.clone(),
             body: body.clone(),
         };
