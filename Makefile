@@ -306,17 +306,7 @@ tunnel-custom-domain: build
 
 # Quick test: Start a simple HTTP server for testing tunnels
 test-server:
-	@echo "Starting test HTTP server on port $(LOCAL_PORT)..."
-	@echo "This server returns 'Hello from localup test server!'"
-	@python3 -c "from http.server import HTTPServer, BaseHTTPRequestHandler; \
-		class H(BaseHTTPRequestHandler): \
-			def do_GET(self): \
-				self.send_response(200); \
-				self.send_header('Content-Type', 'text/plain'); \
-				self.end_headers(); \
-				self.wfile.write(b'Hello from localup test server!\\n'); \
-		print('Test server running on http://localhost:$(LOCAL_PORT)'); \
-		HTTPServer(('', $(LOCAL_PORT)), H).serve_forever()"
+	@python3 scripts/test-server.py --port $(LOCAL_PORT)
 
 # ==========================================
 # TLS/SNI Passthrough Testing Targets

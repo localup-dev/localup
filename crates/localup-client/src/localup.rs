@@ -1291,19 +1291,43 @@ impl TunnelConnection {
         // Rewrite Host and Origin headers to point to local server, otherwise
         // frameworks like Next.js / Vite reject the request with 400 because
         // Host: vt.tunnel.kfs.es doesn't match their expected hostname.
+        // Also strip scheme+authority from the URI: the relay may send the full
+        // HTTP/2 URI (https://vt.tunnel.kfs.es/path) but local servers expect
+        // origin-form (/path) in the request line.
         let local_addr = format!("{}:{}", config.local_host, local_port);
-        let mut raw_request = format!("{} {} HTTP/1.1\r\n", request.method, request.uri);
+        let request_path =
+            if request.uri.starts_with("http://") || request.uri.starts_with("https://") {
+                // Strip scheme+authority from absolute URI to get origin-form path.
+                // e.g. "https://vt.tunnel.kfs.es/page?q=1" -> "/page?q=1"
+                request
+                    .uri
+                    .find("://")
+                    .and_then(|scheme_end| request.uri[scheme_end + 3..].find('/'))
+                    .map(|path_start| {
+                        let scheme_end = request.uri.find("://").unwrap();
+                        &request.uri[scheme_end + 3 + path_start..]
+                    })
+                    .unwrap_or("/")
+            } else {
+                &request.uri
+            };
+        let mut raw_request = format!("{} {} HTTP/1.1\r\n", request.method, request_path);
         for (name, value) in &request.headers {
             let name_lower = name.to_lowercase();
             if name_lower == "host" {
                 raw_request.push_str(&format!("Host: {}\r\n", local_addr));
             } else if name_lower == "origin" {
+                // Rewrite Origin to match local server (prevents 400 from dev servers)
                 raw_request.push_str(&format!("Origin: http://{}\r\n", local_addr));
             } else {
                 raw_request.push_str(&format!("{}: {}\r\n", name, value));
             }
         }
         raw_request.push_str("\r\n");
+        debug!(
+            "Raw HTTP/1.1 request to local server:\n{}",
+            raw_request.trim_end()
+        );
         let mut request_bytes = raw_request.into_bytes();
         if let Some(body) = &request.body {
             request_bytes.extend_from_slice(body);

@@ -1224,13 +1224,33 @@ impl HttpsServer {
             );
 
             // Forward relevant headers (sec-websocket-*, origin, etc.)
+            let mut has_ws_key = false;
+            let mut has_ws_version = false;
             for (name, value) in &headers {
                 let name_lower = name.to_lowercase();
                 // Skip h2-specific and already-added headers
                 if name_lower == "host" || name_lower == "upgrade" || name_lower == "connection" {
                     continue;
                 }
+                if name_lower == "sec-websocket-key" {
+                    has_ws_key = true;
+                }
+                if name_lower == "sec-websocket-version" {
+                    has_ws_version = true;
+                }
                 raw_request.push_str(&format!("{}: {}\r\n", name, value));
+            }
+            // HTTP/2 Extended CONNECT (RFC 8441) doesn't include Sec-WebSocket-Key
+            // or Sec-WebSocket-Version, but the local server expects them for the
+            // HTTP/1.1 upgrade handshake. Generate them if missing.
+            if !has_ws_key {
+                use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
+                let random_bytes: [u8; 16] = rand::random();
+                let ws_key = BASE64.encode(random_bytes);
+                raw_request.push_str(&format!("Sec-WebSocket-Key: {}\r\n", ws_key));
+            }
+            if !has_ws_version {
+                raw_request.push_str("Sec-WebSocket-Version: 13\r\n");
             }
             raw_request.push_str("\r\n");
 
@@ -1444,7 +1464,12 @@ impl HttpsServer {
         }
 
         // =====================================================================
-        // Regular HTTP/2 request-response path
+        // Regular HTTP/2 request-response path (transparent streaming)
+        //
+        // We convert the H2 request to HTTP/1.1 and use the same transparent
+        // streaming path as HTTP/1.1 connections (HttpStreamConnect / HttpStreamData).
+        // This ensures SSE, chunked responses, and long-lived connections work
+        // correctly instead of buffering the entire response body.
         // =====================================================================
 
         // Extract path+query BEFORE consuming the request with into_body().
@@ -1457,7 +1482,7 @@ impl HttpsServer {
             .map(|pq| pq.to_string())
             .unwrap_or_else(|| "/".to_string());
 
-        // Read request body
+        // Read request body (for the initial HTTP/1.1 reconstruction)
         let mut body_stream = request.into_body();
         let mut body_bytes = Vec::new();
         while let Some(chunk) = body_stream.data().await {
@@ -1472,22 +1497,37 @@ impl HttpsServer {
                 }
             }
         }
-        let body = if body_bytes.is_empty() {
-            None
-        } else {
-            Some(body_bytes)
-        };
 
-        // Send HTTP request through tunnel
-        let http_request = TunnelMessage::HttpRequest {
+        // Build an HTTP/1.1 request from the H2 request
+        let mut raw_request = format!("{} {} HTTP/1.1\r\nHost: {}\r\n", method, request_path, host);
+        for (name, value) in &headers {
+            let name_lower = name.to_lowercase();
+            // Skip h2-specific pseudo-headers and hop-by-hop headers
+            if name_lower.starts_with(':')
+                || name_lower == "host"
+                || name_lower == "connection"
+                || name_lower == "transfer-encoding"
+            {
+                continue;
+            }
+            raw_request.push_str(&format!("{}: {}\r\n", name, value));
+        }
+        // Add Content-Length if there's a body
+        if !body_bytes.is_empty() {
+            raw_request.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
+        }
+        raw_request.push_str("\r\n");
+        let mut request_bytes = raw_request.into_bytes();
+        request_bytes.extend_from_slice(&body_bytes);
+
+        // Send as HttpStreamConnect (same path as HTTP/1.1)
+        let connect_msg = TunnelMessage::HttpStreamConnect {
             stream_id,
-            method: method.clone(),
-            uri: request_path,
-            headers: headers.clone(),
-            body: body.clone(),
+            host: localup_id.to_string(),
+            initial_data: request_bytes,
         };
 
-        if let Err(e) = quic_send.send_message(&http_request).await {
+        if let Err(e) = quic_send.send_message(&connect_msg).await {
             error!("Failed to send HTTP/2 request to tunnel: {}", e);
             let response = http::Response::builder().status(502).body(()).unwrap();
             let mut send = send_response.send_response(response, false)?;
@@ -1496,54 +1536,116 @@ impl HttpsServer {
         }
 
         debug!(
-            "HTTP/2 request sent to tunnel client (stream {})",
+            "HTTP/2 request sent to tunnel via transparent streaming (stream {})",
             stream_id
         );
 
-        // Wait for response from tunnel
-        let response =
+        // Wait for the first response data from the tunnel (contains HTTP/1.1 status + headers)
+        let first_response =
             tokio::time::timeout(std::time::Duration::from_secs(30), quic_recv.recv_message())
                 .await;
 
-        match response {
-            Ok(Ok(Some(TunnelMessage::HttpResponse {
-                stream_id: _,
-                status,
-                headers: resp_headers,
-                body: resp_body,
-            }))) => {
-                // Build HTTP/2 response
-                let mut response_builder = http::Response::builder().status(status);
+        match first_response {
+            Ok(Ok(Some(TunnelMessage::HttpStreamData { data, .. }))) => {
+                // Parse the HTTP/1.1 response to extract status and headers
+                let response_str = String::from_utf8_lossy(&data);
 
-                // Add response headers (skip pseudo-headers and connection-specific headers)
-                for (name, value) in &resp_headers {
-                    let name_lower = name.to_lowercase();
-                    if name_lower == "connection"
-                        || name_lower == "keep-alive"
-                        || name_lower == "transfer-encoding"
-                        || name_lower == "upgrade"
-                    {
-                        continue;
+                // Parse status code from first line: "HTTP/1.1 200 OK\r\n..."
+                let status_code = response_str
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .and_then(|s| s.parse::<u16>().ok())
+                    .unwrap_or(502);
+
+                let mut response_builder = http::Response::builder().status(status_code);
+                let mut resp_headers_captured: Vec<(String, String)> = Vec::new();
+
+                // Find the header/body boundary
+                let header_end_pos =
+                    if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+                        pos
+                    } else {
+                        // No header/body boundary found yet - treat all as headers
+                        data.len()
+                    };
+
+                // Parse response headers
+                let header_section = String::from_utf8_lossy(&data[..header_end_pos]);
+                for line in header_section.lines().skip(1) {
+                    // Skip status line
+                    if let Some(colon_pos) = line.find(':') {
+                        let name = line[..colon_pos].trim();
+                        let value = line[colon_pos + 1..].trim();
+                        let name_lower = name.to_lowercase();
+                        // Skip hop-by-hop headers forbidden in h2
+                        if name_lower == "connection"
+                            || name_lower == "keep-alive"
+                            || name_lower == "transfer-encoding"
+                            || name_lower == "upgrade"
+                        {
+                            continue;
+                        }
+                        response_builder = response_builder.header(name, value);
+                        resp_headers_captured.push((name.to_string(), value.to_string()));
                     }
-                    response_builder = response_builder.header(name, value);
                 }
 
-                let has_body = resp_body.is_some() && !resp_body.as_ref().unwrap().is_empty();
+                // Send h2 response headers (false = NOT end of stream, we'll stream the body)
                 let response = response_builder.body(()).unwrap();
-                let mut send = send_response.send_response(response, !has_body)?;
+                let mut h2_send = send_response.send_response(response, false)?;
 
-                if let Some(body_data) = resp_body.as_ref() {
-                    if !body_data.is_empty() {
-                        send.send_data(Bytes::copy_from_slice(body_data), true)?;
+                // If there's body data after the headers in this first chunk, send it
+                let body_start = header_end_pos + 4; // Skip \r\n\r\n
+                if body_start < data.len() {
+                    let initial_body = &data[body_start..];
+                    if !initial_body.is_empty() {
+                        if let Err(e) =
+                            h2_send.send_data(Bytes::copy_from_slice(initial_body), false)
+                        {
+                            debug!("h2 send error for initial body: {}", e);
+                            return Ok(());
+                        }
                     }
                 }
 
-                debug!("HTTP/2 response forwarded to client: {}", status);
+                debug!(
+                    "HTTP/2 response headers forwarded to client: {} (streaming body)",
+                    status_code
+                );
+
+                // Stream remaining data from tunnel to h2 client
+                loop {
+                    match quic_recv.recv_message().await {
+                        Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
+                            if let Err(e) = h2_send.send_data(Bytes::from(data), false) {
+                                debug!("h2 send error in streaming proxy: {}", e);
+                                break;
+                            }
+                        }
+                        Ok(Some(TunnelMessage::HttpStreamClose { .. })) => {
+                            debug!("Tunnel closed stream {} (end of response)", stream_id);
+                            let _ = h2_send.send_data(Bytes::new(), true);
+                            break;
+                        }
+                        Ok(None) => {
+                            debug!("QUIC stream ended for stream {}", stream_id);
+                            let _ = h2_send.send_data(Bytes::new(), true);
+                            break;
+                        }
+                        Err(e) => {
+                            debug!("QUIC recv error in streaming proxy: {}", e);
+                            let _ = h2_send.send_data(Bytes::new(), true);
+                            break;
+                        }
+                        _ => {
+                            warn!("Unexpected message on h2 streaming proxy");
+                        }
+                    }
+                }
 
                 // Capture to database
                 if let Some(ref db_conn) = db {
-                    use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
-
                     let response_end = chrono::Utc::now();
                     let latency_ms = (response_end - request_start).num_milliseconds() as i32;
 
@@ -1555,12 +1657,17 @@ impl HttpsServer {
                             path: Set(uri),
                             host: Set(Some(host.to_string())),
                             headers: Set(serde_json::to_string(&headers).unwrap_or_default()),
-                            body: Set(body.as_ref().map(|b| BASE64.encode(b))),
-                            status: Set(Some(status as i32)),
+                            body: Set(if body_bytes.is_empty() {
+                                None
+                            } else {
+                                use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
+                                Some(BASE64.encode(&body_bytes))
+                            }),
+                            status: Set(Some(status_code as i32)),
                             response_headers: Set(Some(
-                                serde_json::to_string(&resp_headers).unwrap_or_default(),
+                                serde_json::to_string(&resp_headers_captured).unwrap_or_default(),
                             )),
-                            response_body: Set(resp_body.as_ref().map(|b| BASE64.encode(b))),
+                            response_body: Set(None), // Streaming - body not captured
                             created_at: Set(request_start),
                             responded_at: Set(Some(response_end)),
                             latency_ms: Set(Some(latency_ms)),
@@ -1580,17 +1687,17 @@ impl HttpsServer {
                     }
                 }
             }
+            Ok(Ok(Some(TunnelMessage::HttpStreamClose { .. }))) | Ok(Ok(None)) => {
+                warn!("Tunnel stream closed without response");
+                let response = http::Response::builder().status(502).body(()).unwrap();
+                let mut send = send_response.send_response(response, false)?;
+                send.send_data(Bytes::from("Tunnel closed"), true)?;
+            }
             Ok(Ok(Some(other))) => {
                 warn!("Unexpected tunnel message: {:?}", other);
                 let response = http::Response::builder().status(502).body(()).unwrap();
                 let mut send = send_response.send_response(response, false)?;
                 send.send_data(Bytes::from("Unexpected tunnel response"), true)?;
-            }
-            Ok(Ok(None)) => {
-                warn!("Tunnel stream closed without response");
-                let response = http::Response::builder().status(502).body(()).unwrap();
-                let mut send = send_response.send_response(response, false)?;
-                send.send_data(Bytes::from("Tunnel closed"), true)?;
             }
             Ok(Err(e)) => {
                 error!("Tunnel receive error: {}", e);
