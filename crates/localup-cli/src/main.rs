@@ -341,8 +341,8 @@ enum Commands {
         /// - Prefix wildcard: "*-dviejo" - allows any subdomain ending with "-dviejo"
         /// - Suffix wildcard: "myapp-*" - allows any subdomain starting with "myapp-"
         /// - Full wildcard: "*" - allows any subdomain
-        /// Example: --allowed-subdomain "*-dviejo" --allowed-subdomain "api"
-        /// If not specified, all subdomains are allowed
+        ///   Example: --allowed-subdomain "*-dviejo" --allowed-subdomain "api"
+        ///   If not specified, all subdomains are allowed
         #[arg(long = "allowed-subdomain")]
         allowed_subdomains: Vec<String>,
 
@@ -642,6 +642,32 @@ enum RelayCommands {
         /// Directory to store ACME certificates and account info
         #[arg(long, default_value = "/opt/localup/certs/acme")]
         acme_cert_dir: String,
+
+        /// SMTP server hostname for magic link emails
+        #[arg(long, env = "SMTP_HOST")]
+        smtp_host: Option<String>,
+
+        /// SMTP server port (default: 587 for STARTTLS)
+        #[arg(long, env = "SMTP_PORT", default_value = "587")]
+        smtp_port: u16,
+
+        /// SMTP authentication username
+        #[arg(long, env = "SMTP_USERNAME")]
+        smtp_username: Option<String>,
+
+        /// SMTP authentication password
+        #[arg(long, env = "SMTP_PASSWORD")]
+        smtp_password: Option<String>,
+
+        /// Sender email address for magic link emails
+        #[arg(long, env = "SMTP_FROM")]
+        smtp_from: Option<String>,
+
+        /// Register OAuth client for Device Authorization Grant (RFC 8628).
+        /// Format: 'client_id:Display Name'. Can be specified multiple times.
+        /// Example: --oauth-client 'my-app:My Desktop App' --oauth-client 'cli-tool:CLI Tool'
+        #[arg(long = "oauth-client", env = "OAUTH_CLIENTS", value_delimiter = ',')]
+        oauth_clients: Vec<String>,
     },
 }
 
@@ -2297,6 +2323,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 None,                   // http_redirect_addr (not used for TCP)
                 443,                    // https_redirect_port (default)
                 None,                   // http_passthrough_addr (not used for TCP)
+                None,                   // smtp (not used for TCP)
+                Vec::new(),             // oauth_clients (not used for TCP)
             )
             .await
         }
@@ -2351,6 +2379,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 http_redirect_addr,     // HTTP redirect server
                 https_redirect_port,    // HTTPS port to redirect to
                 http_passthrough_addr,  // HTTP passthrough server (Host-based routing)
+                None,                   // smtp (not used for TLS)
+                Vec::new(),             // oauth_clients (not used for TLS)
             )
             .await
         }
@@ -2378,7 +2408,46 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
             acme_email,
             acme_staging,
             acme_cert_dir,
+            smtp_host,
+            smtp_port,
+            smtp_username,
+            smtp_password,
+            smtp_from,
+            oauth_clients: oauth_client_strs,
         } => {
+            // Parse OAuth client strings (format: "client_id:Display Name")
+            let oauth_clients: Vec<localup_api::OAuthClientConfig> = oauth_client_strs
+                .iter()
+                .filter_map(|s| match localup_api::OAuthClientConfig::parse(s) {
+                    Ok(c) => {
+                        info!(
+                            "Registered OAuth client: {} ({})",
+                            c.client_id, c.display_name
+                        );
+                        Some(c)
+                    }
+                    Err(e) => {
+                        warn!("{}", e);
+                        None
+                    }
+                })
+                .collect();
+
+            // Build SMTP config if all required fields are provided
+            let smtp = match (smtp_host, smtp_username, smtp_password, smtp_from) {
+                (Some(host), Some(username), Some(password), Some(from)) => {
+                    Some(localup_api::SmtpConfig {
+                        host,
+                        port: smtp_port,
+                        username,
+                        password,
+                        from,
+                        tls_mode: localup_api::SmtpTlsMode::Auto,
+                    })
+                }
+                _ => None,
+            };
+
             handle_relay_command(
                 http_addr,
                 localup_addr,
@@ -2408,6 +2477,8 @@ async fn handle_relay_subcommand(command: RelayCommands) -> Result<()> {
                 None, // http_redirect_addr (not used for HTTP relay)
                 443,  // https_redirect_port (default)
                 None, // http_passthrough_addr (not used for HTTP relay)
+                smtp,
+                oauth_clients,
             )
             .await
         }
@@ -2444,6 +2515,8 @@ async fn handle_relay_command(
     http_redirect_addr: Option<String>,
     https_redirect_port: u16,
     http_passthrough_addr: Option<String>,
+    smtp: Option<localup_api::SmtpConfig>,
+    oauth_clients: Vec<localup_api::OAuthClientConfig>,
 ) -> Result<()> {
     use localup_auth::JwtValidator;
     use localup_control::{
@@ -2478,6 +2551,14 @@ async fn handle_relay_command(
 
     if let Some(ref tls_addr) = tls_addr {
         info!("TLS/SNI endpoint: {}", tls_addr);
+    }
+
+    if let Some(ref smtp) = smtp {
+        info!(
+            "SMTP configured: {}:{} (from: {})",
+            smtp.host, smtp.port, smtp.from
+        );
+        info!("Magic link authentication: enabled");
     }
 
     // Initialize database connection
@@ -2520,6 +2601,8 @@ async fn handle_relay_command(
                 is_active: Set(true),
                 created_at: Set(chrono::Utc::now()),
                 updated_at: Set(chrono::Utc::now()),
+                oauth_provider: Set(None),
+                oauth_provider_id: Set(None),
             };
 
             new_user
@@ -3147,6 +3230,9 @@ async fn handle_relay_command(
                 jwt_secret: jwt_secret_value.clone(),
                 tls_cert_path: api_tls_cert_clone,
                 tls_key_path: api_tls_key_clone,
+                social_auth: localup_api::SocialAuthConfig::default(),
+                smtp,
+                oauth_clients: oauth_clients.clone(),
             };
 
             // Create ACME client if email is provided

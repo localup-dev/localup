@@ -37,6 +37,9 @@ fn create_test_server(db: DatabaseConnection) -> ApiServer {
         jwt_secret: "test-secret".to_string(),
         tls_cert_path: None,
         tls_key_path: None,
+        social_auth: localup_api::SocialAuthConfig::default(),
+        smtp: None,
+        oauth_clients: Vec::new(),
     };
 
     ApiServer::new(config, localup_manager, db, true)

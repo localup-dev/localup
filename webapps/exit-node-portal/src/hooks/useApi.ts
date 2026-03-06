@@ -8,13 +8,15 @@ import {
 /**
  * Hook to fetch list of tunnels
  * @param includeInactive - Include inactive/disconnected tunnels from history
+ * @param scope - 'all' (admin: show all tunnels) or 'mine' (show only own tunnels)
  */
-export const useTunnels = (includeInactive = false) => {
+export const useTunnels = (includeInactive = false, scope?: 'all' | 'mine') => {
   return useQuery(
     listTunnelsOptions({
       query: {
         include_inactive: includeInactive,
-      },
+        ...(scope ? { scope } : {}),
+      } as Record<string, unknown>,
     })
   );
 };

@@ -1570,14 +1570,23 @@ impl HttpsServer {
                         data.len()
                     };
 
-                // Parse response headers
+                // Parse response headers and detect chunked transfer encoding
                 let header_section = String::from_utf8_lossy(&data[..header_end_pos]);
+                let mut is_chunked = false;
                 for line in header_section.lines().skip(1) {
                     // Skip status line
                     if let Some(colon_pos) = line.find(':') {
                         let name = line[..colon_pos].trim();
                         let value = line[colon_pos + 1..].trim();
                         let name_lower = name.to_lowercase();
+
+                        // Detect chunked transfer encoding before skipping the header
+                        if name_lower == "transfer-encoding"
+                            && value.to_lowercase().contains("chunked")
+                        {
+                            is_chunked = true;
+                        }
+
                         // Skip hop-by-hop headers forbidden in h2
                         if name_lower == "connection"
                             || name_lower == "keep-alive"
@@ -1591,16 +1600,32 @@ impl HttpsServer {
                     }
                 }
 
+                if is_chunked {
+                    debug!("HTTP/1.1 response uses chunked transfer encoding, will decode for h2");
+                }
+
                 // Send h2 response headers (false = NOT end of stream, we'll stream the body)
                 let response = response_builder.body(()).unwrap();
                 let mut h2_send = send_response.send_response(response, false)?;
 
                 // If there's body data after the headers in this first chunk, send it
+                // For chunked responses, we need to decode the chunk framing first
                 let body_start = header_end_pos + 4; // Skip \r\n\r\n
+                let mut chunked_remainder: Vec<u8> = Vec::new();
                 if body_start < data.len() {
                     let initial_body = &data[body_start..];
                     if !initial_body.is_empty() {
-                        if let Err(e) =
+                        if is_chunked {
+                            // Decode chunked data, keeping any incomplete chunk for next iteration
+                            let (decoded, remainder) = decode_chunked_streaming(initial_body);
+                            chunked_remainder = remainder;
+                            if !decoded.is_empty() {
+                                if let Err(e) = h2_send.send_data(Bytes::from(decoded), false) {
+                                    debug!("h2 send error for initial body: {}", e);
+                                    return Ok(());
+                                }
+                            }
+                        } else if let Err(e) =
                             h2_send.send_data(Bytes::copy_from_slice(initial_body), false)
                         {
                             debug!("h2 send error for initial body: {}", e);
@@ -1610,15 +1635,37 @@ impl HttpsServer {
                 }
 
                 debug!(
-                    "HTTP/2 response headers forwarded to client: {} (streaming body)",
-                    status_code
+                    "HTTP/2 response headers forwarded to client: {} (streaming body{})",
+                    status_code,
+                    if is_chunked { ", chunked-decode" } else { "" }
                 );
 
                 // Stream remaining data from tunnel to h2 client
                 loop {
                     match quic_recv.recv_message().await {
                         Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
-                            if let Err(e) = h2_send.send_data(Bytes::from(data), false) {
+                            if is_chunked {
+                                // Prepend any leftover bytes from previous chunk boundary
+                                let mut input = chunked_remainder.clone();
+                                input.extend_from_slice(&data);
+                                chunked_remainder.clear();
+
+                                let (decoded, remainder) = decode_chunked_streaming(&input);
+                                let remainder_empty = remainder.is_empty();
+                                chunked_remainder = remainder;
+
+                                // A zero-size chunk signals end of chunked body
+                                if decoded.is_empty() && remainder_empty && !input.is_empty() {
+                                    debug!("Chunked transfer complete (terminal chunk)");
+                                }
+
+                                if !decoded.is_empty() {
+                                    if let Err(e) = h2_send.send_data(Bytes::from(decoded), false) {
+                                        debug!("h2 send error in streaming proxy: {}", e);
+                                        break;
+                                    }
+                                }
+                            } else if let Err(e) = h2_send.send_data(Bytes::from(data), false) {
                                 debug!("h2 send error in streaming proxy: {}", e);
                                 break;
                             }
@@ -1738,6 +1785,77 @@ impl HttpsServer {
             .await?;
 
         Ok(challenge.and_then(|c| c.key_auth_or_record_value))
+    }
+}
+
+/// Decode HTTP/1.1 chunked transfer encoding from a byte buffer.
+///
+/// Chunked encoding format: `<hex-size>\r\n<data>\r\n` repeated, terminated by `0\r\n\r\n`.
+/// This function processes as many complete chunks as possible and returns:
+/// - The decoded body data (all chunk payloads concatenated)
+/// - Any remaining bytes that form an incomplete chunk (to be prepended to the next call)
+///
+/// This is needed when proxying HTTP/1.1 → H2 because H2 does not use chunked encoding.
+/// If we forward chunked framing bytes over H2, the browser will fail to decode the body
+/// (e.g., `net::ERR_CONTENT_DECODING_FAILED` when Content-Encoding is gzip).
+fn decode_chunked_streaming(input: &[u8]) -> (Vec<u8>, Vec<u8>) {
+    let mut decoded = Vec::new();
+    let mut pos = 0;
+
+    loop {
+        if pos >= input.len() {
+            // All input consumed, no remainder
+            return (decoded, Vec::new());
+        }
+
+        // Find the end of the chunk size line (\r\n)
+        let remaining = &input[pos..];
+        let size_end = match remaining.windows(2).position(|w| w == b"\r\n") {
+            Some(p) => p,
+            None => {
+                // Incomplete chunk size line — return as remainder
+                return (decoded, remaining.to_vec());
+            }
+        };
+
+        // Parse the hex chunk size (ignore chunk extensions after ';')
+        let size_str = match std::str::from_utf8(&remaining[..size_end]) {
+            Ok(s) => s.split(';').next().unwrap_or("").trim(),
+            Err(_) => {
+                // Not valid UTF-8 — probably not chunked data, pass through as-is
+                decoded.extend_from_slice(remaining);
+                return (decoded, Vec::new());
+            }
+        };
+
+        let chunk_size = match usize::from_str_radix(size_str, 16) {
+            Ok(s) => s,
+            Err(_) => {
+                // Not a valid hex size — pass through remaining data as-is
+                decoded.extend_from_slice(remaining);
+                return (decoded, Vec::new());
+            }
+        };
+
+        // Terminal chunk (size 0)
+        if chunk_size == 0 {
+            // Consume "0\r\n" and optional trailers + final "\r\n"
+            return (decoded, Vec::new());
+        }
+
+        // Check if we have the full chunk data + trailing \r\n
+        let data_start = size_end + 2; // skip "<size>\r\n"
+        let data_end = data_start + chunk_size;
+        let chunk_end = data_end + 2; // skip trailing "\r\n"
+
+        if chunk_end > remaining.len() {
+            // Incomplete chunk — return everything from pos as remainder
+            return (decoded, remaining.to_vec());
+        }
+
+        // Extract chunk payload
+        decoded.extend_from_slice(&remaining[data_start..data_end]);
+        pos += size_end + 2 + chunk_size + 2;
     }
 }
 

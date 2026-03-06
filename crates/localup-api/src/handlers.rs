@@ -13,6 +13,243 @@ use crate::middleware::AuthUser;
 use crate::models::*;
 use crate::AppState;
 
+// ============================================================================
+// Shared Helper Functions
+// ============================================================================
+
+/// Convert a `localup_proto::Endpoint` to our API `TunnelEndpoint` model.
+fn proto_endpoint_to_api(e: &localup_proto::Endpoint) -> TunnelEndpoint {
+    TunnelEndpoint {
+        protocol: match &e.protocol {
+            localup_proto::Protocol::Http { subdomain, .. } => TunnelProtocol::Http {
+                subdomain: subdomain.clone().unwrap_or_else(|| "unknown".to_string()),
+            },
+            localup_proto::Protocol::Https { subdomain, .. } => TunnelProtocol::Https {
+                subdomain: subdomain.clone().unwrap_or_else(|| "unknown".to_string()),
+            },
+            localup_proto::Protocol::Tcp { port } => TunnelProtocol::Tcp { port: *port },
+            localup_proto::Protocol::Tls {
+                port: _,
+                sni_patterns,
+            } => TunnelProtocol::Tls {
+                domains: sni_patterns.clone(),
+            },
+        },
+        public_url: e.public_url.clone(),
+        port: e.port,
+    }
+}
+
+/// Convert a DB `DomainStatus` to our API `CustomDomainStatus` model.
+fn db_domain_status_to_api(
+    status: localup_relay_db::entities::custom_domain::DomainStatus,
+) -> CustomDomainStatus {
+    match status {
+        localup_relay_db::entities::custom_domain::DomainStatus::Pending => {
+            CustomDomainStatus::Pending
+        }
+        localup_relay_db::entities::custom_domain::DomainStatus::Active => {
+            CustomDomainStatus::Active
+        }
+        localup_relay_db::entities::custom_domain::DomainStatus::Expired => {
+            CustomDomainStatus::Expired
+        }
+        localup_relay_db::entities::custom_domain::DomainStatus::Failed => {
+            CustomDomainStatus::Failed
+        }
+    }
+}
+
+/// Convert a DB `custom_domain::Model` to our API `CustomDomain` model.
+fn db_domain_to_api(d: localup_relay_db::entities::custom_domain::Model) -> CustomDomain {
+    CustomDomain {
+        id: d.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        domain: d.domain,
+        status: db_domain_status_to_api(d.status),
+        provisioned_at: d.provisioned_at,
+        expires_at: d.expires_at,
+        auto_renew: d.auto_renew,
+        error_message: d.error_message,
+    }
+}
+
+/// Convert a DB `user::Model` to our API `User` model.
+fn db_user_to_api(user: &localup_relay_db::entities::user::Model) -> crate::models::User {
+    use localup_relay_db::entities::user::UserRole;
+    crate::models::User {
+        id: user.id.to_string(),
+        email: user.email.clone(),
+        full_name: user.full_name.clone(),
+        role: match user.role {
+            UserRole::Admin => crate::models::UserRole::Admin,
+            UserRole::User => crate::models::UserRole::User,
+        },
+        is_active: user.is_active,
+        created_at: user.created_at,
+        updated_at: user.updated_at,
+    }
+}
+
+/// Convert a DB `auth_token::Model` to our API `AuthToken` model.
+fn db_auth_token_to_api(t: localup_relay_db::entities::auth_token::Model) -> AuthToken {
+    AuthToken {
+        id: t.id.to_string(),
+        user_id: t.user_id.to_string(),
+        team_id: t.team_id.map(|id| id.to_string()),
+        name: t.name,
+        description: t.description,
+        last_used_at: t.last_used_at,
+        expires_at: t.expires_at,
+        is_active: t.is_active,
+        created_at: t.created_at,
+    }
+}
+
+/// Generate a session JWT token and Set-Cookie header for a user.
+#[allow(clippy::type_complexity)]
+fn generate_session_response(
+    state: &AppState,
+    user: &localup_relay_db::entities::user::Model,
+    req_headers: &HeaderMap,
+) -> Result<(String, chrono::DateTime<chrono::Utc>, HeaderMap), (StatusCode, Json<ErrorResponse>)> {
+    use chrono::Duration;
+    use localup_auth::{JwtClaims, JwtValidator};
+    use localup_relay_db::entities::user::UserRole;
+
+    let jwt_secret = state.jwt_secret.as_bytes();
+    let now = chrono::Utc::now();
+    let user_role_str = match user.role {
+        UserRole::Admin => "admin",
+        UserRole::User => "user",
+    };
+    let claims = JwtClaims::new(
+        user.id.to_string(),
+        "localup-relay".to_string(),
+        "localup-web-ui".to_string(),
+        Duration::days(7),
+    )
+    .with_user_id(user.id.to_string())
+    .with_user_role(user_role_str.to_string())
+    .with_token_type("session".to_string());
+
+    let token = JwtValidator::encode(jwt_secret, &claims).map_err(|e| {
+        tracing::error!("JWT encoding error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".to_string(),
+                code: Some("JWT_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    let expires_at = now + Duration::days(7);
+
+    let is_secure = is_request_secure(req_headers, state.is_https);
+    let cookie = create_session_cookie(&token, is_secure);
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
+
+    Ok((token, expires_at, headers))
+}
+
+/// Ensure a user has a default auth token, creating one if missing.
+/// Returns the JWT string of the default token if newly created, or empty string.
+async fn ensure_default_auth_token(state: &AppState, user_id: uuid::Uuid) -> String {
+    use localup_auth::{JwtClaims, JwtValidator};
+    use localup_relay_db::entities::{auth_token, prelude::AuthToken as AuthTokenEntity};
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+    use sha2::{Digest, Sha256};
+
+    let existing = AuthTokenEntity::find()
+        .filter(auth_token::Column::UserId.eq(user_id))
+        .filter(auth_token::Column::Name.eq("Default"))
+        .one(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+    if existing.is_some() {
+        return String::new();
+    }
+
+    let auth_token_id = uuid::Uuid::new_v4();
+    let jwt_secret = state.jwt_secret.as_bytes();
+    let now = chrono::Utc::now();
+
+    let auth_claims = JwtClaims::new(
+        auth_token_id.to_string(),
+        "localup-relay".to_string(),
+        "localup-tunnel".to_string(),
+        chrono::Duration::days(36500),
+    )
+    .with_user_id(user_id.to_string())
+    .with_token_type("auth".to_string());
+
+    let auth_token_jwt = match JwtValidator::encode(jwt_secret, &auth_claims) {
+        Ok(jwt) => jwt,
+        Err(_) => return String::new(),
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(auth_token_jwt.as_bytes());
+    let auth_token_hash = format!("{:x}", hasher.finalize());
+
+    let new_auth_token = auth_token::ActiveModel {
+        id: Set(auth_token_id),
+        user_id: Set(user_id),
+        team_id: Set(None),
+        name: Set("Default".to_string()),
+        description: Set(Some(
+            "Auto-generated default authentication token".to_string(),
+        )),
+        token_hash: Set(auth_token_hash),
+        last_used_at: Set(None),
+        expires_at: Set(None),
+        is_active: Set(true),
+        created_at: Set(now),
+    };
+
+    if let Err(e) = new_auth_token.insert(&state.db).await {
+        tracing::warn!(
+            "Failed to create default auth token for user {}: {}",
+            user_id,
+            e
+        );
+        return String::new();
+    }
+
+    tracing::info!("Created default auth token for user {}", user_id);
+    auth_token_jwt
+}
+
+/// Return an API error response.
+fn api_error(
+    status: StatusCode,
+    error: impl Into<String>,
+    code: impl Into<String>,
+) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        status,
+        Json(ErrorResponse {
+            error: error.into(),
+            code: Some(code.into()),
+        }),
+    )
+}
+
+/// Parse a user ID string into a UUID, or return an error response.
+fn parse_user_id(user_id: &str) -> Result<uuid::Uuid, (StatusCode, Json<ErrorResponse>)> {
+    uuid::Uuid::parse_str(user_id).map_err(|_| {
+        api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Invalid user ID format",
+            "INVALID_USER_ID",
+        )
+    })
+}
+
 /// Compute upstream status by analyzing recent requests for a tunnel
 /// Returns (upstream_status, recent_502_count, total_recent_count)
 async fn compute_upstream_status(
@@ -162,6 +399,7 @@ fn create_logout_cookie(is_https: bool) -> String {
 )]
 pub async fn list_tunnels(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<TunnelList>, (StatusCode, Json<ErrorResponse>)> {
     let include_inactive = query
@@ -169,53 +407,44 @@ pub async fn list_tunnels(
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(false);
 
-    debug!("Listing tunnels (include_inactive={})", include_inactive);
+    let is_admin = auth_user.role == "admin";
 
-    // Get active tunnel IDs
-    let active_localup_ids = state.localup_manager.list_tunnels().await;
+    // scope=all shows all tunnels (admin only), scope=mine shows only user's tunnels
+    // Default: admin sees all, non-admin sees mine
+    let scope = query
+        .get("scope")
+        .map(|s| s.as_str())
+        .unwrap_or(if is_admin { "all" } else { "mine" });
+    let show_all = is_admin && scope == "all";
+
+    debug!(
+        "Listing tunnels (include_inactive={}, user={}, admin={}, scope={})",
+        include_inactive, auth_user.user_id, is_admin, scope
+    );
+
+    // Get active tunnel IDs (filtered by user unless admin viewing all)
+    let active_localup_ids = if show_all {
+        state.localup_manager.list_tunnels().await
+    } else {
+        state
+            .localup_manager
+            .list_tunnels_for_user(&auth_user.user_id)
+            .await
+    };
     let mut tunnels = Vec::new();
 
     // Add active tunnels
     for localup_id in &active_localup_ids {
         if let Some(endpoints) = state.localup_manager.get_endpoints(localup_id).await {
-            // Compute upstream status from recent requests
             let (upstream_status, recent_upstream_errors, recent_request_count) =
                 compute_upstream_status(&state.db, localup_id).await;
 
+            let tunnel_user_id = state.localup_manager.get_user_id(localup_id).await;
+
             let tunnel = Tunnel {
                 id: localup_id.clone(),
-                endpoints: endpoints
-                    .iter()
-                    .map(|e| TunnelEndpoint {
-                        protocol: match &e.protocol {
-                            localup_proto::Protocol::Http { subdomain, .. } => {
-                                TunnelProtocol::Http {
-                                    subdomain: subdomain
-                                        .clone()
-                                        .unwrap_or_else(|| "unknown".to_string()),
-                                }
-                            }
-                            localup_proto::Protocol::Https { subdomain, .. } => {
-                                TunnelProtocol::Https {
-                                    subdomain: subdomain
-                                        .clone()
-                                        .unwrap_or_else(|| "unknown".to_string()),
-                                }
-                            }
-                            localup_proto::Protocol::Tcp { port } => {
-                                TunnelProtocol::Tcp { port: *port }
-                            }
-                            localup_proto::Protocol::Tls {
-                                port: _,
-                                sni_patterns,
-                            } => TunnelProtocol::Tls {
-                                domains: sni_patterns.clone(),
-                            },
-                        },
-                        public_url: e.public_url.clone(),
-                        port: e.port,
-                    })
-                    .collect(),
+                user_id: tunnel_user_id,
+                endpoints: endpoints.iter().map(proto_endpoint_to_api).collect(),
                 status: TunnelStatus::Connected,
                 upstream_status,
                 region: "us-east-1".to_string(), // TODO: Get from config
@@ -282,6 +511,7 @@ pub async fn list_tunnels(
         for inactive_id in all_tunnel_ids {
             tunnels.push(Tunnel {
                 id: inactive_id.clone(),
+                user_id: None,     // Unknown for historical tunnels
                 endpoints: vec![], // No endpoints for inactive tunnels
                 status: TunnelStatus::Disconnected,
                 upstream_status: UpstreamStatus::Unknown, // Disconnected tunnels have unknown upstream
@@ -315,42 +545,32 @@ pub async fn list_tunnels(
 )]
 pub async fn get_tunnel(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<Tunnel>, (StatusCode, Json<ErrorResponse>)> {
-    debug!("Getting tunnel: {}", id);
+    debug!("Getting tunnel: {} (user: {})", id, auth_user.user_id);
 
     // First, check if tunnel is active in memory
     if let Some(endpoints) = state.localup_manager.get_endpoints(&id).await {
-        // Compute upstream status from recent requests
+        // Check ownership (non-admin can only see their own tunnels)
+        let tunnel_user_id = state.localup_manager.get_user_id(&id).await;
+        if auth_user.role != "admin" && tunnel_user_id.as_deref() != Some(&auth_user.user_id) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Tunnel '{}' not found", id),
+                    code: Some("TUNNEL_NOT_FOUND".to_string()),
+                }),
+            ));
+        }
+
         let (upstream_status, recent_upstream_errors, recent_request_count) =
             compute_upstream_status(&state.db, &id).await;
 
         let tunnel = Tunnel {
             id: id.clone(),
-            endpoints: endpoints
-                .iter()
-                .map(|e| TunnelEndpoint {
-                    protocol: match &e.protocol {
-                        localup_proto::Protocol::Http { subdomain, .. } => TunnelProtocol::Http {
-                            subdomain: subdomain.clone().unwrap_or_else(|| "unknown".to_string()),
-                        },
-                        localup_proto::Protocol::Https { subdomain, .. } => TunnelProtocol::Https {
-                            subdomain: subdomain.clone().unwrap_or_else(|| "unknown".to_string()),
-                        },
-                        localup_proto::Protocol::Tcp { port } => {
-                            TunnelProtocol::Tcp { port: *port }
-                        }
-                        localup_proto::Protocol::Tls {
-                            port: _,
-                            sni_patterns,
-                        } => TunnelProtocol::Tls {
-                            domains: sni_patterns.clone(),
-                        },
-                    },
-                    public_url: e.public_url.clone(),
-                    port: e.port,
-                })
-                .collect(),
+            user_id: tunnel_user_id,
+            endpoints: endpoints.iter().map(proto_endpoint_to_api).collect(),
             status: TunnelStatus::Connected,
             upstream_status,
             region: "us-east-1".to_string(),
@@ -439,6 +659,7 @@ pub async fn get_tunnel(
 
         let tunnel = Tunnel {
             id: id.clone(),
+            user_id: None, // Unknown for historical tunnels
             endpoints,
             status: TunnelStatus::Disconnected,
             upstream_status: UpstreamStatus::Unknown, // Disconnected tunnels have unknown upstream
@@ -478,9 +699,24 @@ pub async fn get_tunnel(
 )]
 pub async fn delete_tunnel(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    info!("Deleting tunnel: {}", id);
+    info!("Deleting tunnel: {} (user: {})", id, auth_user.user_id);
+
+    // Check ownership (non-admin can only delete their own tunnels)
+    if auth_user.role != "admin" {
+        let tunnel_user_id = state.localup_manager.get_user_id(&id).await;
+        if tunnel_user_id.as_deref() != Some(&auth_user.user_id) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: format!("Tunnel '{}' not found", id),
+                    code: Some("TUNNEL_NOT_FOUND".to_string()),
+                }),
+            ));
+        }
+    }
 
     // Unregister the tunnel
     state.localup_manager.unregister(&id).await;
@@ -562,9 +798,15 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> Json<HealthResp
 )]
 pub async fn list_requests(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
     Query(query): Query<crate::models::CapturedRequestQuery>,
 ) -> Result<Json<CapturedRequestList>, (StatusCode, Json<ErrorResponse>)> {
-    debug!("Listing captured requests with filters: {:?}", query);
+    debug!(
+        "Listing captured requests with filters: {:?} (user: {}, admin: {})",
+        query,
+        auth_user.user_id,
+        auth_user.role == "admin"
+    );
 
     use localup_relay_db::entities::captured_request::Column;
     use localup_relay_db::entities::prelude::*;
@@ -575,6 +817,28 @@ pub async fn list_requests(
 
     // Apply filters
     let mut condition = Condition::all();
+
+    // Scope filtering: non-admin always sees own tunnels only;
+    // admin sees all by default, or own tunnels if scope=mine
+    let is_admin = auth_user.role == "admin";
+    let show_all = is_admin && query.scope.as_deref() != Some("mine");
+
+    if !show_all {
+        let user_tunnel_ids = state
+            .localup_manager
+            .list_tunnels_for_user(&auth_user.user_id)
+            .await;
+        if user_tunnel_ids.is_empty() {
+            // User has no tunnels — return empty
+            return Ok(Json(CapturedRequestList {
+                requests: vec![],
+                total: 0,
+                offset: query.offset.unwrap_or(0),
+                limit: query.limit.unwrap_or(100).min(1000),
+            }));
+        }
+        condition = condition.add(Column::LocalupId.is_in(user_tunnel_ids));
+    }
 
     if let Some(ref localup_id) = query.localup_id {
         condition = condition.add(Column::LocalupId.eq(localup_id));
@@ -751,9 +1015,13 @@ pub async fn replay_request(
 )]
 pub async fn list_tcp_connections(
     State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
     Query(query): Query<crate::models::CapturedTcpConnectionQuery>,
 ) -> Result<Json<crate::models::CapturedTcpConnectionList>, (StatusCode, Json<ErrorResponse>)> {
-    debug!("Listing TCP connections with filters: {:?}", query);
+    debug!(
+        "Listing TCP connections with filters: {:?} (user: {})",
+        query, auth_user.user_id
+    );
 
     use localup_relay_db::entities::captured_tcp_connection::Column;
     use localup_relay_db::entities::prelude::*;
@@ -762,6 +1030,27 @@ pub async fn list_tcp_connections(
     // Build query with filters
     let mut query_builder = CapturedTcpConnection::find();
     let mut condition = Condition::all();
+
+    // Scope filtering: non-admin always sees own tunnels only;
+    // admin sees all by default, or own tunnels if scope=mine
+    let is_admin = auth_user.role == "admin";
+    let show_all = is_admin && query.scope.as_deref() != Some("mine");
+
+    if !show_all {
+        let user_tunnel_ids = state
+            .localup_manager
+            .list_tunnels_for_user(&auth_user.user_id)
+            .await;
+        if user_tunnel_ids.is_empty() {
+            return Ok(Json(crate::models::CapturedTcpConnectionList {
+                connections: vec![],
+                total: 0,
+                offset: query.offset.unwrap_or(0),
+                limit: query.limit.unwrap_or(100).min(1000),
+            }));
+        }
+        condition = condition.add(Column::LocalupId.is_in(user_tunnel_ids));
+    }
 
     if let Some(ref localup_id) = query.localup_id {
         condition = condition.add(Column::LocalupId.eq(localup_id));
@@ -1017,31 +1306,7 @@ pub async fn list_custom_domains(
         })?;
 
     let total = domains.len();
-    let domains = domains
-        .into_iter()
-        .map(|d| crate::models::CustomDomain {
-            id: d.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-            domain: d.domain,
-            status: match d.status {
-                localup_relay_db::entities::custom_domain::DomainStatus::Pending => {
-                    CustomDomainStatus::Pending
-                }
-                localup_relay_db::entities::custom_domain::DomainStatus::Active => {
-                    CustomDomainStatus::Active
-                }
-                localup_relay_db::entities::custom_domain::DomainStatus::Expired => {
-                    CustomDomainStatus::Expired
-                }
-                localup_relay_db::entities::custom_domain::DomainStatus::Failed => {
-                    CustomDomainStatus::Failed
-                }
-            },
-            provisioned_at: d.provisioned_at,
-            expires_at: d.expires_at,
-            auto_renew: d.auto_renew,
-            error_message: d.error_message,
-        })
-        .collect();
+    let domains = domains.into_iter().map(db_domain_to_api).collect();
 
     Ok(Json(CustomDomainList { domains, total }))
 }
@@ -1090,30 +1355,7 @@ pub async fn get_custom_domain(
             )
         })?;
 
-    Ok(Json(crate::models::CustomDomain {
-        id: domain_model
-            .id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        domain: domain_model.domain,
-        status: match domain_model.status {
-            localup_relay_db::entities::custom_domain::DomainStatus::Pending => {
-                CustomDomainStatus::Pending
-            }
-            localup_relay_db::entities::custom_domain::DomainStatus::Active => {
-                CustomDomainStatus::Active
-            }
-            localup_relay_db::entities::custom_domain::DomainStatus::Expired => {
-                CustomDomainStatus::Expired
-            }
-            localup_relay_db::entities::custom_domain::DomainStatus::Failed => {
-                CustomDomainStatus::Failed
-            }
-        },
-        provisioned_at: domain_model.provisioned_at,
-        expires_at: domain_model.expires_at,
-        auto_renew: domain_model.auto_renew,
-        error_message: domain_model.error_message,
-    }))
+    Ok(Json(db_domain_to_api(domain_model)))
 }
 
 /// Delete a custom domain
@@ -1684,30 +1926,7 @@ pub async fn get_domain_by_id(
             )
         })?;
 
-    Ok(Json(crate::models::CustomDomain {
-        id: domain_model
-            .id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-        domain: domain_model.domain,
-        status: match domain_model.status {
-            localup_relay_db::entities::custom_domain::DomainStatus::Pending => {
-                CustomDomainStatus::Pending
-            }
-            localup_relay_db::entities::custom_domain::DomainStatus::Active => {
-                CustomDomainStatus::Active
-            }
-            localup_relay_db::entities::custom_domain::DomainStatus::Expired => {
-                CustomDomainStatus::Expired
-            }
-            localup_relay_db::entities::custom_domain::DomainStatus::Failed => {
-                CustomDomainStatus::Failed
-            }
-        },
-        provisioned_at: domain_model.provisioned_at,
-        expires_at: domain_model.expires_at,
-        auto_renew: domain_model.auto_renew,
-        error_message: domain_model.error_message,
-    }))
+    Ok(Json(db_domain_to_api(domain_model)))
 }
 
 /// Get certificate details for a domain
@@ -2470,9 +2689,26 @@ use uuid::Uuid;
     tag = "auth"
 )]
 pub async fn auth_config(State(state): State<Arc<AppState>>) -> Json<crate::models::AuthConfig> {
+    let mut social_providers = Vec::new();
+    if state.social_auth.google.is_some() {
+        social_providers.push(crate::models::SocialAuthProvider {
+            id: "google".to_string(),
+            name: "Google".to_string(),
+        });
+    }
+    if state.social_auth.github.is_some() {
+        social_providers.push(crate::models::SocialAuthProvider {
+            id: "github".to_string(),
+            name: "GitHub".to_string(),
+        });
+    }
+
     Json(crate::models::AuthConfig {
         signup_enabled: state.allow_signup,
         relay: state.relay_config.clone(),
+        social_providers,
+        magic_link_enabled: state.smtp.is_some(),
+        device_auth_enabled: !state.oauth_clients.is_empty(),
     })
 }
 
@@ -2579,6 +2815,8 @@ pub async fn register(
         is_active: Set(true),
         created_at: Set(now),
         updated_at: Set(now),
+        oauth_provider: Set(None),
+        oauth_provider_id: Set(None),
     };
 
     let user = new_user.insert(&state.db).await.map_err(|e| {
@@ -2593,118 +2831,14 @@ pub async fn register(
     })?;
 
     // Auto-create default auth token for tunnel authentication
-    use localup_relay_db::entities::auth_token;
-    use sha2::{Digest, Sha256};
+    let auth_token_jwt = ensure_default_auth_token(&state, user_id).await;
 
-    let auth_token_id = Uuid::new_v4();
-    let jwt_secret = state.jwt_secret.as_bytes();
-
-    // Generate JWT auth token (never expires for default token)
-    let auth_claims = JwtClaims::new(
-        auth_token_id.to_string(),
-        "localup-relay".to_string(),
-        "localup-tunnel".to_string(),
-        Duration::days(36500), // ~100 years for "never expires"
-    )
-    .with_user_id(user_id.to_string())
-    .with_token_type("auth".to_string());
-
-    let auth_token_jwt = JwtValidator::encode(jwt_secret, &auth_claims).map_err(|e| {
-        tracing::error!("JWT encoding error for auth token: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Internal server error".to_string(),
-                code: Some("JWT_ERROR".to_string()),
-            }),
-        )
-    })?;
-
-    // Hash the auth token using SHA-256
-    let mut hasher = Sha256::new();
-    hasher.update(auth_token_jwt.as_bytes());
-    let auth_token_hash = format!("{:x}", hasher.finalize());
-
-    // Store auth token in database
-    let new_auth_token = auth_token::ActiveModel {
-        id: Set(auth_token_id),
-        user_id: Set(user_id),
-        team_id: Set(None),
-        name: Set("Default".to_string()),
-        description: Set(Some(
-            "Auto-generated default authentication token".to_string(),
-        )),
-        token_hash: Set(auth_token_hash),
-        last_used_at: Set(None),
-        expires_at: Set(None), // Never expires
-        is_active: Set(true),
-        created_at: Set(now),
-    };
-
-    new_auth_token
-        .insert(&state.db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Database error creating default auth token: {}", e);
-            // Log error but don't fail registration - user can create token later
-            tracing::warn!(
-                "Failed to create default auth token for user {}, they can create one later",
-                user_id
-            );
-        })
-        .ok(); // Ignore error to not block registration
-
-    tracing::info!("Created default auth token for user {}", user_id);
-
-    // Generate session token (7 days validity)
-    let jwt_secret = state.jwt_secret.as_bytes();
-    let user_role_str = match user.role {
-        user::UserRole::Admin => "admin",
-        user::UserRole::User => "user",
-    };
-    let claims = JwtClaims::new(
-        user_id.to_string(),
-        "localup-relay".to_string(),
-        "localup-web-ui".to_string(),
-        Duration::days(7),
-    )
-    .with_user_id(user_id.to_string())
-    .with_user_role(user_role_str.to_string())
-    .with_token_type("session".to_string());
-    let token = JwtValidator::encode(jwt_secret, &claims).map_err(|e| {
-        tracing::error!("JWT encoding error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Internal server error".to_string(),
-                code: Some("JWT_ERROR".to_string()),
-            }),
-        )
-    })?;
-
-    let expires_at = now + Duration::days(7);
-
-    // Create HTTP-only cookie with session token (with Secure flag for HTTPS)
-    let is_secure = is_request_secure(&req_headers, state.is_https);
-    let cookie = create_session_cookie(&token, is_secure);
-
-    let mut headers = HeaderMap::new();
-    headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
+    // Generate session token and cookie
+    let (token, expires_at, headers) = generate_session_response(&state, &user, &req_headers)?;
 
     let response = Json(RegisterResponse {
-        user: crate::models::User {
-            id: user.id.to_string(),
-            email: user.email,
-            full_name: user.full_name,
-            role: match user.role {
-                user::UserRole::Admin => crate::models::UserRole::Admin,
-                user::UserRole::User => crate::models::UserRole::User,
-            },
-            is_active: user.is_active,
-            created_at: user.created_at,
-            updated_at: user.updated_at,
-        },
-        token, // Will be removed from model next
+        user: db_user_to_api(&user),
+        token,
         expires_at,
         auth_token: auth_token_jwt,
     });
@@ -2788,119 +2922,14 @@ pub async fn login(
     }
 
     // Auto-create default auth token if user doesn't have one (for existing users)
-    use localup_relay_db::entities::auth_token;
-    use sha2::{Digest, Sha256};
+    ensure_default_auth_token(&state, user.id).await;
 
-    let existing_default_token = AuthTokenEntity::find()
-        .filter(auth_token::Column::UserId.eq(user.id))
-        .filter(auth_token::Column::Name.eq("Default"))
-        .one(&state.db)
-        .await
-        .ok()
-        .flatten();
-
-    if existing_default_token.is_none() {
-        let auth_token_id = Uuid::new_v4();
-        let jwt_secret = state.jwt_secret.as_bytes();
-        let now = chrono::Utc::now();
-
-        // Generate JWT auth token (never expires for default token)
-        let auth_claims = JwtClaims::new(
-            auth_token_id.to_string(),
-            "localup-relay".to_string(),
-            "localup-tunnel".to_string(),
-            Duration::days(36500), // ~100 years
-        )
-        .with_user_id(user.id.to_string())
-        .with_token_type("auth".to_string());
-
-        if let Ok(auth_token_jwt) = JwtValidator::encode(jwt_secret, &auth_claims) {
-            // Hash the auth token using SHA-256
-            let mut hasher = Sha256::new();
-            hasher.update(auth_token_jwt.as_bytes());
-            let auth_token_hash = format!("{:x}", hasher.finalize());
-
-            // Store auth token in database
-            let new_auth_token = auth_token::ActiveModel {
-                id: Set(auth_token_id),
-                user_id: Set(user.id),
-                team_id: Set(None),
-                name: Set("Default".to_string()),
-                description: Set(Some(
-                    "Auto-generated default authentication token".to_string(),
-                )),
-                token_hash: Set(auth_token_hash),
-                last_used_at: Set(None),
-                expires_at: Set(None), // Never expires
-                is_active: Set(true),
-                created_at: Set(now),
-            };
-
-            if let Err(e) = new_auth_token.insert(&state.db).await {
-                tracing::warn!(
-                    "Failed to create default auth token for user {} on login: {}",
-                    user.id,
-                    e
-                );
-            } else {
-                tracing::info!(
-                    "Created default auth token for existing user {} on login",
-                    user.id
-                );
-            }
-        }
-    }
-
-    // Generate session token (7 days validity)
-    let jwt_secret = state.jwt_secret.as_bytes();
-    let now = chrono::Utc::now();
-    let user_role_str = match user.role {
-        user::UserRole::Admin => "admin",
-        user::UserRole::User => "user",
-    };
-    let claims = JwtClaims::new(
-        user.id.to_string(),
-        "localup-relay".to_string(),
-        "localup-web-ui".to_string(),
-        Duration::days(7),
-    )
-    .with_user_id(user.id.to_string())
-    .with_user_role(user_role_str.to_string())
-    .with_token_type("session".to_string());
-    let token = JwtValidator::encode(jwt_secret, &claims).map_err(|e| {
-        tracing::error!("JWT encoding error: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Internal server error".to_string(),
-                code: Some("JWT_ERROR".to_string()),
-            }),
-        )
-    })?;
-
-    let expires_at = now + Duration::days(7);
-
-    // Create HTTP-only cookie with session token (with Secure flag for HTTPS)
-    let is_secure = is_request_secure(&req_headers, state.is_https);
-    let cookie = create_session_cookie(&token, is_secure);
-
-    let mut headers = HeaderMap::new();
-    headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
+    // Generate session token and cookie
+    let (token, expires_at, headers) = generate_session_response(&state, &user, &req_headers)?;
 
     let response = Json(LoginResponse {
-        user: crate::models::User {
-            id: user.id.to_string(),
-            email: user.email,
-            full_name: user.full_name,
-            role: match user.role {
-                user::UserRole::Admin => crate::models::UserRole::Admin,
-                user::UserRole::User => crate::models::UserRole::User,
-            },
-            is_active: user.is_active,
-            created_at: user.created_at,
-            updated_at: user.updated_at,
-        },
-        token, // Will be removed from model next
+        user: db_user_to_api(&user),
+        token,
         expires_at,
     });
 
@@ -3003,15 +3032,7 @@ pub async fn list_user_teams(
     use localup_relay_db::entities::{prelude::*, team_member};
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Invalid user ID format".to_string(),
-                code: Some("INVALID_USER_ID".to_string()),
-            }),
-        )
-    })?;
+    let user_id = parse_user_id(&auth_user.user_id)?;
 
     // Find all team memberships for this user
     let team_memberships = TeamMember::find()
@@ -3095,15 +3116,7 @@ pub async fn create_auth_token(
     }
 
     // Get user_id from authenticated user
-    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Invalid user ID format".to_string(),
-                code: Some("INVALID_USER_ID".to_string()),
-            }),
-        )
-    })?;
+    let user_id = parse_user_id(&auth_user.user_id)?;
 
     let token_id = Uuid::new_v4();
     let now = chrono::Utc::now();
@@ -3203,15 +3216,7 @@ pub async fn list_auth_tokens(
     Extension(auth_user): Extension<AuthUser>,
 ) -> Result<Json<AuthTokenList>, (StatusCode, Json<ErrorResponse>)> {
     // Parse user_id from authenticated user
-    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Invalid user ID format".to_string(),
-                code: Some("INVALID_USER_ID".to_string()),
-            }),
-        )
-    })?;
+    let user_id = parse_user_id(&auth_user.user_id)?;
 
     // Query all auth tokens for this user
     let token_records = AuthTokenEntity::find()
@@ -3229,20 +3234,9 @@ pub async fn list_auth_tokens(
             )
         })?;
 
-    // Convert to response format
     let tokens: Vec<AuthToken> = token_records
         .into_iter()
-        .map(|t| AuthToken {
-            id: t.id.to_string(),
-            user_id: t.user_id.to_string(),
-            team_id: t.team_id.map(|id| id.to_string()),
-            name: t.name,
-            description: t.description,
-            last_used_at: t.last_used_at,
-            expires_at: t.expires_at,
-            is_active: t.is_active,
-            created_at: t.created_at,
-        })
+        .map(db_auth_token_to_api)
         .collect();
 
     let total = tokens.len();
@@ -3282,15 +3276,7 @@ pub async fn get_auth_token(
     })?;
 
     // Parse authenticated user_id
-    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Invalid user ID format".to_string(),
-                code: Some("INVALID_USER_ID".to_string()),
-            }),
-        )
-    })?;
+    let user_id = parse_user_id(&auth_user.user_id)?;
 
     let token = AuthTokenEntity::find_by_id(token_id)
         .one(&state.db)
@@ -3326,17 +3312,7 @@ pub async fn get_auth_token(
         ));
     }
 
-    Ok(Json(AuthToken {
-        id: token.id.to_string(),
-        user_id: token.user_id.to_string(),
-        team_id: token.team_id.map(|id| id.to_string()),
-        name: token.name,
-        description: token.description,
-        last_used_at: token.last_used_at,
-        expires_at: token.expires_at,
-        is_active: token.is_active,
-        created_at: token.created_at,
-    }))
+    Ok(Json(db_auth_token_to_api(token)))
 }
 
 /// Update auth token (name, description, or active status)
@@ -3373,15 +3349,7 @@ pub async fn update_auth_token(
     })?;
 
     // Parse authenticated user_id
-    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Invalid user ID format".to_string(),
-                code: Some("INVALID_USER_ID".to_string()),
-            }),
-        )
-    })?;
+    let user_id = parse_user_id(&auth_user.user_id)?;
 
     let token = AuthTokenEntity::find_by_id(token_id)
         .one(&state.db)
@@ -3441,17 +3409,7 @@ pub async fn update_auth_token(
         )
     })?;
 
-    Ok(Json(AuthToken {
-        id: updated_token.id.to_string(),
-        user_id: updated_token.user_id.to_string(),
-        team_id: updated_token.team_id.map(|id| id.to_string()),
-        name: updated_token.name,
-        description: updated_token.description,
-        last_used_at: updated_token.last_used_at,
-        expires_at: updated_token.expires_at,
-        is_active: updated_token.is_active,
-        created_at: updated_token.created_at,
-    }))
+    Ok(Json(db_auth_token_to_api(updated_token)))
 }
 
 /// Delete (revoke) an auth token
@@ -3486,15 +3444,7 @@ pub async fn delete_auth_token(
     })?;
 
     // Parse authenticated user_id
-    let user_id = Uuid::parse_str(&auth_user.user_id).map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Invalid user ID format".to_string(),
-                code: Some("INVALID_USER_ID".to_string()),
-            }),
-        )
-    })?;
+    let user_id = parse_user_id(&auth_user.user_id)?;
 
     let token = AuthTokenEntity::find_by_id(token_id)
         .one(&state.db)
@@ -3574,4 +3524,1589 @@ pub async fn protocol_discovery(State(state): State<Arc<AppState>>) -> impl Into
             Json(default_discovery).into_response()
         }
     }
+}
+
+// ============================================================================
+// Social Login (OAuth) Endpoints
+// ============================================================================
+
+/// OAuth user info returned by providers
+#[derive(Debug, serde::Deserialize)]
+struct OAuthUserInfo {
+    email: String,
+    name: Option<String>,
+    provider_id: String,
+}
+
+/// Google token response
+#[derive(Debug, serde::Deserialize)]
+struct GoogleTokenResponse {
+    access_token: String,
+    #[allow(dead_code)]
+    token_type: String,
+}
+
+/// Google user info response
+#[derive(Debug, serde::Deserialize)]
+struct GoogleUserInfo {
+    #[serde(rename = "sub")]
+    id: String,
+    email: String,
+    name: Option<String>,
+    #[allow(dead_code)]
+    email_verified: Option<bool>,
+}
+
+/// GitHub token response
+#[derive(Debug, serde::Deserialize)]
+struct GitHubTokenResponse {
+    access_token: String,
+    #[allow(dead_code)]
+    token_type: String,
+}
+
+/// GitHub user info response
+#[derive(Debug, serde::Deserialize)]
+struct GitHubUserInfo {
+    id: i64,
+    #[allow(dead_code)]
+    login: String,
+    name: Option<String>,
+    email: Option<String>,
+}
+
+/// GitHub email response (for users with private emails)
+#[derive(Debug, serde::Deserialize)]
+struct GitHubEmail {
+    email: String,
+    primary: bool,
+    verified: bool,
+}
+
+/// Get OAuth authorization URL for a provider
+///
+/// Returns the URL the frontend should redirect the user to for OAuth login.
+/// The frontend must provide a `redirect_uri` query parameter that the OAuth
+/// provider will redirect back to after authentication.
+#[utoipa::path(
+    get,
+    path = "/api/auth/oauth/{provider}/url",
+    params(
+        ("provider" = String, Path, description = "OAuth provider (google or github)"),
+        ("redirect_uri" = String, Query, description = "Frontend callback URL the provider should redirect to"),
+    ),
+    responses(
+        (status = 200, description = "OAuth authorization URL", body = OAuthUrlResponse),
+        (status = 400, description = "Unknown provider or provider not configured", body = ErrorResponse)
+    ),
+    tag = "auth"
+)]
+pub async fn oauth_get_url(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<crate::models::OAuthUrlResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let redirect_uri = params.get("redirect_uri").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Missing redirect_uri query parameter".to_string(),
+                code: Some("MISSING_REDIRECT_URI".to_string()),
+            }),
+        )
+    })?;
+
+    // Generate a random state for CSRF protection
+    let state_token = uuid::Uuid::new_v4().to_string();
+
+    let url = match provider.as_str() {
+        "google" => {
+            let config = state.social_auth.google.as_ref().ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "Google OAuth is not configured".to_string(),
+                        code: Some("PROVIDER_NOT_CONFIGURED".to_string()),
+                    }),
+                )
+            })?;
+
+            format!(
+                "https://accounts.google.com/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email%20profile&state={}&access_type=offline",
+                urlencoding::encode(&config.client_id),
+                urlencoding::encode(redirect_uri),
+                urlencoding::encode(&state_token),
+            )
+        }
+        "github" => {
+            let config = state.social_auth.github.as_ref().ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "GitHub OAuth is not configured".to_string(),
+                        code: Some("PROVIDER_NOT_CONFIGURED".to_string()),
+                    }),
+                )
+            })?;
+
+            format!(
+                "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&scope=user:email&state={}",
+                urlencoding::encode(&config.client_id),
+                urlencoding::encode(redirect_uri),
+                urlencoding::encode(&state_token),
+            )
+        }
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Unknown OAuth provider: {}", provider),
+                    code: Some("UNKNOWN_PROVIDER".to_string()),
+                }),
+            ));
+        }
+    };
+
+    Ok(Json(crate::models::OAuthUrlResponse {
+        url,
+        state: state_token,
+    }))
+}
+
+/// Handle OAuth callback - exchange code for tokens and create/login user
+///
+/// The frontend posts the authorization code received from the OAuth provider.
+/// The backend exchanges it for an access token, fetches user info, and
+/// creates or logs in the user.
+#[utoipa::path(
+    post,
+    path = "/api/auth/oauth/{provider}/callback",
+    params(
+        ("provider" = String, Path, description = "OAuth provider (google or github)"),
+    ),
+    request_body = OAuthCallbackRequest,
+    responses(
+        (status = 200, description = "Login successful", body = LoginResponse),
+        (status = 201, description = "User registered and logged in", body = RegisterResponse),
+        (status = 400, description = "Invalid request or provider not configured", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "auth"
+)]
+pub async fn oauth_callback(
+    State(state): State<Arc<AppState>>,
+    req_headers: HeaderMap,
+    Path(provider): Path<String>,
+    Json(req): Json<crate::models::OAuthCallbackRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    // Exchange the authorization code for user info based on provider
+    let user_info = match provider.as_str() {
+        "google" => exchange_google_code(&state, &req.code, &req.redirect_uri).await?,
+        "github" => exchange_github_code(&state, &req.code, &req.redirect_uri).await?,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Unknown OAuth provider: {}", provider),
+                    code: Some("UNKNOWN_PROVIDER".to_string()),
+                }),
+            ));
+        }
+    };
+
+    // Look up user by OAuth provider + provider ID
+    use localup_relay_db::entities::user;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let existing_user = UserEntity::find()
+        .filter(user::Column::OauthProvider.eq(&provider))
+        .filter(user::Column::OauthProviderId.eq(&user_info.provider_id))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error looking up OAuth user: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    // Also check if a user with this email already exists (link accounts)
+    let existing_email_user = if existing_user.is_none() {
+        UserEntity::find()
+            .filter(user::Column::Email.eq(&user_info.email))
+            .one(&state.db)
+            .await
+            .map_err(|e| {
+                error!("Database error checking email: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal server error".to_string(),
+                        code: Some("DB_ERROR".to_string()),
+                    }),
+                )
+            })?
+    } else {
+        None
+    };
+
+    let (user_model, is_new_user) = if let Some(user) = existing_user {
+        // Existing OAuth user - just log them in
+        (user, false)
+    } else if let Some(user) = existing_email_user {
+        // User exists with same email but different auth method
+        // Link the OAuth provider to existing account
+        use sea_orm::ActiveModelTrait;
+        let mut active_user: user::ActiveModel = user.into();
+        active_user.oauth_provider = sea_orm::Set(Some(provider.clone()));
+        active_user.oauth_provider_id = sea_orm::Set(Some(user_info.provider_id.clone()));
+        active_user.updated_at = sea_orm::Set(chrono::Utc::now());
+
+        let updated = active_user.update(&state.db).await.map_err(|e| {
+            error!("Database error linking OAuth: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+        (updated, false)
+    } else {
+        // New user - check if signup is allowed
+        if !state.allow_signup {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Public registration is disabled. Please contact your administrator."
+                        .to_string(),
+                    code: Some("SIGNUP_DISABLED".to_string()),
+                }),
+            ));
+        }
+
+        // Create new user
+        let user_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+
+        let new_user = user::ActiveModel {
+            id: sea_orm::Set(user_id),
+            email: sea_orm::Set(user_info.email.clone()),
+            password_hash: sea_orm::Set(String::new()), // No password for OAuth users
+            full_name: sea_orm::Set(user_info.name.clone()),
+            role: sea_orm::Set(user::UserRole::User),
+            is_active: sea_orm::Set(true),
+            created_at: sea_orm::Set(now),
+            updated_at: sea_orm::Set(now),
+            oauth_provider: sea_orm::Set(Some(provider.clone())),
+            oauth_provider_id: sea_orm::Set(Some(user_info.provider_id.clone())),
+        };
+
+        let user = new_user.insert(&state.db).await.map_err(|e| {
+            error!("Database error creating OAuth user: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+        info!(
+            "New user registered via {}: {} ({})",
+            provider, user.email, user.id
+        );
+
+        (user, true)
+    };
+
+    // Check if account is active
+    if !user_model.is_active {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Account is disabled".to_string(),
+                code: Some("ACCOUNT_DISABLED".to_string()),
+            }),
+        ));
+    }
+
+    // Auto-create default auth token if user doesn't have one
+    let auth_token_jwt = ensure_default_auth_token(&state, user_model.id).await;
+
+    // Generate session token and cookie
+    let (token, expires_at, headers) =
+        generate_session_response(&state, &user_model, &req_headers)?;
+
+    if is_new_user {
+        let response = Json(crate::models::RegisterResponse {
+            user: db_user_to_api(&user_model),
+            token,
+            expires_at,
+            auth_token: auth_token_jwt,
+        });
+
+        Ok((StatusCode::CREATED, headers, response).into_response())
+    } else {
+        let response = Json(crate::models::LoginResponse {
+            user: db_user_to_api(&user_model),
+            token,
+            expires_at,
+        });
+
+        Ok((headers, response).into_response())
+    }
+}
+
+/// Exchange a Google authorization code for user info
+async fn exchange_google_code(
+    state: &AppState,
+    code: &str,
+    redirect_uri: &str,
+) -> Result<OAuthUserInfo, (StatusCode, Json<ErrorResponse>)> {
+    let config = state.social_auth.google.as_ref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Google OAuth is not configured".to_string(),
+                code: Some("PROVIDER_NOT_CONFIGURED".to_string()),
+            }),
+        )
+    })?;
+
+    let http_client = reqwest::Client::new();
+
+    // Exchange code for access token
+    let token_resp = http_client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&[
+            ("code", code),
+            ("client_id", &config.client_id),
+            ("client_secret", &config.client_secret),
+            ("redirect_uri", redirect_uri),
+            ("grant_type", "authorization_code"),
+        ])
+        .send()
+        .await
+        .map_err(|e| {
+            error!("Google token exchange error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to exchange authorization code with Google".to_string(),
+                    code: Some("OAUTH_EXCHANGE_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    if !token_resp.status().is_success() {
+        let status = token_resp.status();
+        let body = token_resp.text().await.unwrap_or_default();
+        error!("Google token exchange failed: {} - {}", status, body);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Failed to authenticate with Google. Please try again.".to_string(),
+                code: Some("OAUTH_EXCHANGE_FAILED".to_string()),
+            }),
+        ));
+    }
+
+    let token_data: GoogleTokenResponse = token_resp.json().await.map_err(|e| {
+        error!("Google token response parse error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid response from Google".to_string(),
+                code: Some("OAUTH_PARSE_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    // Fetch user info
+    let user_resp = http_client
+        .get("https://www.googleapis.com/oauth2/v3/userinfo")
+        .bearer_auth(&token_data.access_token)
+        .send()
+        .await
+        .map_err(|e| {
+            error!("Google userinfo error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to fetch user info from Google".to_string(),
+                    code: Some("OAUTH_USERINFO_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    let google_user: GoogleUserInfo = user_resp.json().await.map_err(|e| {
+        error!("Google userinfo parse error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid user info response from Google".to_string(),
+                code: Some("OAUTH_PARSE_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    Ok(OAuthUserInfo {
+        email: google_user.email,
+        name: google_user.name,
+        provider_id: google_user.id,
+    })
+}
+
+/// Exchange a GitHub authorization code for user info
+async fn exchange_github_code(
+    state: &AppState,
+    code: &str,
+    redirect_uri: &str,
+) -> Result<OAuthUserInfo, (StatusCode, Json<ErrorResponse>)> {
+    let config = state.social_auth.github.as_ref().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "GitHub OAuth is not configured".to_string(),
+                code: Some("PROVIDER_NOT_CONFIGURED".to_string()),
+            }),
+        )
+    })?;
+
+    let http_client = reqwest::Client::new();
+
+    // Exchange code for access token
+    let token_resp = http_client
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .form(&[
+            ("code", code),
+            ("client_id", &config.client_id as &str),
+            ("client_secret", &config.client_secret as &str),
+            ("redirect_uri", redirect_uri),
+        ])
+        .send()
+        .await
+        .map_err(|e| {
+            error!("GitHub token exchange error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to exchange authorization code with GitHub".to_string(),
+                    code: Some("OAUTH_EXCHANGE_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    if !token_resp.status().is_success() {
+        let status = token_resp.status();
+        let body = token_resp.text().await.unwrap_or_default();
+        error!("GitHub token exchange failed: {} - {}", status, body);
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Failed to authenticate with GitHub. Please try again.".to_string(),
+                code: Some("OAUTH_EXCHANGE_FAILED".to_string()),
+            }),
+        ));
+    }
+
+    let token_data: GitHubTokenResponse = token_resp.json().await.map_err(|e| {
+        error!("GitHub token response parse error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid response from GitHub".to_string(),
+                code: Some("OAUTH_PARSE_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    // Fetch user info
+    let user_resp = http_client
+        .get("https://api.github.com/user")
+        .header("User-Agent", "localup-relay")
+        .bearer_auth(&token_data.access_token)
+        .send()
+        .await
+        .map_err(|e| {
+            error!("GitHub user info error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Failed to fetch user info from GitHub".to_string(),
+                    code: Some("OAUTH_USERINFO_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    let github_user: GitHubUserInfo = user_resp.json().await.map_err(|e| {
+        error!("GitHub user info parse error: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Invalid user info response from GitHub".to_string(),
+                code: Some("OAUTH_PARSE_ERROR".to_string()),
+            }),
+        )
+    })?;
+
+    // GitHub may not return email if user has it private - fetch emails separately
+    let email = if let Some(email) = github_user.email {
+        email
+    } else {
+        let emails_resp = http_client
+            .get("https://api.github.com/user/emails")
+            .header("User-Agent", "localup-relay")
+            .bearer_auth(&token_data.access_token)
+            .send()
+            .await
+            .map_err(|e| {
+                error!("GitHub emails error: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Failed to fetch email from GitHub".to_string(),
+                        code: Some("OAUTH_USERINFO_ERROR".to_string()),
+                    }),
+                )
+            })?;
+
+        let emails: Vec<GitHubEmail> = emails_resp.json().await.map_err(|e| {
+            error!("GitHub emails parse error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Invalid email response from GitHub".to_string(),
+                    code: Some("OAUTH_PARSE_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+        emails
+            .into_iter()
+            .find(|e| e.primary && e.verified)
+            .map(|e| e.email)
+            .ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "No verified primary email found on GitHub account".to_string(),
+                        code: Some("NO_EMAIL".to_string()),
+                    }),
+                )
+            })?
+    };
+
+    Ok(OAuthUserInfo {
+        email,
+        name: github_user.name,
+        provider_id: github_user.id.to_string(),
+    })
+}
+
+// ============================================================================
+// Magic Link (Passwordless Email) Endpoints
+// ============================================================================
+
+/// Send a magic link to the given email address
+///
+/// If SMTP is configured, generates a one-time token (15 min expiry),
+/// stores it in the database, and sends an email with a verification link.
+/// The link points directly to `GET /api/auth/magic-link/verify?token=...`
+/// which sets a session cookie and redirects to the frontend.
+///
+/// Always returns success to prevent email enumeration attacks.
+#[utoipa::path(
+    post,
+    path = "/api/auth/magic-link/send",
+    request_body = MagicLinkRequest,
+    responses(
+        (status = 200, description = "Magic link sent (or not, to prevent enumeration)", body = MagicLinkResponse),
+        (status = 503, description = "Magic link not configured", body = ErrorResponse)
+    ),
+    tag = "auth"
+)]
+pub async fn magic_link_send(
+    State(state): State<Arc<AppState>>,
+    req_headers: HeaderMap,
+    Json(req): Json<crate::models::MagicLinkRequest>,
+) -> Result<Json<crate::models::MagicLinkResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::magic_link_token;
+    use sea_orm::ActiveModelTrait;
+
+    let smtp_config = state.smtp.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Magic link login is not configured".to_string(),
+                code: Some("MAGIC_LINK_NOT_CONFIGURED".to_string()),
+            }),
+        )
+    })?;
+
+    // Always return the same message regardless of whether the email exists
+    // to prevent email enumeration
+    let success_msg = crate::models::MagicLinkResponse {
+        message: "If that email is registered (or registration is open), a magic link has been sent. Check your inbox.".to_string(),
+    };
+
+    // Validate email format (basic)
+    if !req.email.contains('@') {
+        // Still return success to prevent enumeration
+        return Ok(Json(success_msg));
+    }
+
+    // Check if user exists, or if signup is enabled (we'll create on verify)
+    let user_exists = UserEntity::find()
+        .filter(user::Column::Email.eq(&req.email))
+        .one(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+
+    if !user_exists && !state.allow_signup {
+        // Don't reveal that the user doesn't exist
+        return Ok(Json(success_msg));
+    }
+
+    // Generate a secure random token
+    let token_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now();
+    let expires_at = now + Duration::minutes(15);
+
+    // Store token in database
+    let token_model = magic_link_token::ActiveModel {
+        id: Set(token_id.clone()),
+        email: Set(req.email.clone()),
+        expires_at: Set(expires_at),
+        used_at: Set(None),
+        created_at: Set(now),
+    };
+
+    if let Err(e) = token_model.insert(&state.db).await {
+        error!("Failed to store magic link token: {}", e);
+        // Still return success to not leak info
+        return Ok(Json(success_msg));
+    }
+
+    // Build the verification URL
+    // Determine the base URL from the request headers
+    let base_url = determine_base_url(&req_headers, state.is_https);
+    let verify_url = format!(
+        "{}/api/auth/magic-link/verify?token={}",
+        base_url,
+        urlencoding::encode(&token_id)
+    );
+
+    // Send the email
+    if let Err(e) = send_magic_link_email(smtp_config, &req.email, &verify_url).await {
+        error!("Failed to send magic link email to {}: {}", req.email, e);
+        // Still return success to not leak info
+    } else {
+        info!("Magic link sent to {}", req.email);
+    }
+
+    Ok(Json(success_msg))
+}
+
+/// Verify a magic link token (GET endpoint)
+///
+/// This is the URL the user clicks in their email. It validates the token,
+/// creates/logs in the user, sets a session cookie, and redirects to the frontend.
+#[utoipa::path(
+    get,
+    path = "/api/auth/magic-link/verify",
+    params(
+        ("token" = String, Query, description = "Magic link token"),
+    ),
+    responses(
+        (status = 302, description = "Redirect to frontend dashboard with session cookie"),
+        (status = 400, description = "Invalid or expired token", body = ErrorResponse)
+    ),
+    tag = "auth"
+)]
+pub async fn magic_link_verify(
+    State(state): State<Arc<AppState>>,
+    req_headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::magic_link_token;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter};
+
+    let token_id = params.get("token").ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Missing token parameter".to_string(),
+                code: Some("MISSING_TOKEN".to_string()),
+            }),
+        )
+    })?;
+
+    // Look up the token
+    let token_record = magic_link_token::Entity::find_by_id(token_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error looking up magic link token: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid or expired magic link".to_string(),
+                    code: Some("INVALID_TOKEN".to_string()),
+                }),
+            )
+        })?;
+
+    // Check if already used
+    if token_record.used_at.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "This magic link has already been used".to_string(),
+                code: Some("TOKEN_USED".to_string()),
+            }),
+        ));
+    }
+
+    // Check expiration
+    let now = chrono::Utc::now();
+    if now > token_record.expires_at {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "This magic link has expired. Please request a new one.".to_string(),
+                code: Some("TOKEN_EXPIRED".to_string()),
+            }),
+        ));
+    }
+
+    // Mark token as used
+    let mut active_token: magic_link_token::ActiveModel = token_record.clone().into();
+    active_token.used_at = Set(Some(now));
+    if let Err(e) = active_token.update(&state.db).await {
+        error!("Failed to mark magic link token as used: {}", e);
+    }
+
+    // Find or create user
+    let existing_user = UserEntity::find()
+        .filter(user::Column::Email.eq(&token_record.email))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Database error finding user: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+    let (user_model, is_new_user) = if let Some(user) = existing_user {
+        (user, false)
+    } else {
+        // Create new user (signup must be enabled - checked in send handler)
+        if !state.allow_signup {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Public registration is disabled".to_string(),
+                    code: Some("SIGNUP_DISABLED".to_string()),
+                }),
+            ));
+        }
+
+        let user_id = Uuid::new_v4();
+        let new_user = user::ActiveModel {
+            id: Set(user_id),
+            email: Set(token_record.email.clone()),
+            password_hash: Set(String::new()), // No password for magic link users
+            full_name: Set(None),
+            role: Set(user::UserRole::User),
+            is_active: Set(true),
+            created_at: Set(now),
+            updated_at: Set(now),
+            oauth_provider: Set(None),
+            oauth_provider_id: Set(None),
+        };
+
+        let user = new_user.insert(&state.db).await.map_err(|e| {
+            error!("Database error creating magic link user: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("DB_ERROR".to_string()),
+                }),
+            )
+        })?;
+
+        info!(
+            "New user registered via magic link: {} ({})",
+            user.email, user.id
+        );
+
+        (user, true)
+    };
+
+    // Check if account is active
+    if !user_model.is_active {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "Account is disabled".to_string(),
+                code: Some("ACCOUNT_DISABLED".to_string()),
+            }),
+        ));
+    }
+
+    // Auto-create default auth token if user doesn't have one
+    if is_new_user {
+        ensure_default_auth_token(&state, user_model.id).await;
+    }
+
+    // Generate session token and cookie
+    let (_token, _expires_at, mut headers) =
+        generate_session_response(&state, &user_model, &req_headers)?;
+
+    // Redirect to the frontend dashboard
+    headers.insert(header::LOCATION, "/dashboard".parse().unwrap());
+
+    Ok((StatusCode::FOUND, headers))
+}
+
+/// Determine the base URL from request headers (for constructing magic link URLs)
+fn determine_base_url(headers: &HeaderMap, server_is_https: bool) -> String {
+    // Try X-Forwarded-Host + X-Forwarded-Proto first (reverse proxy)
+    if let (Some(host), Some(proto)) = (
+        headers
+            .get("x-forwarded-host")
+            .and_then(|v| v.to_str().ok()),
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok()),
+    ) {
+        return format!("{}://{}", proto, host);
+    }
+
+    // Try Host header
+    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
+        let proto = if server_is_https { "https" } else { "http" };
+        return format!("{}://{}", proto, host);
+    }
+
+    // Fallback
+    if server_is_https {
+        "https://localhost".to_string()
+    } else {
+        "http://localhost".to_string()
+    }
+}
+
+/// Send a magic link email via SMTP
+async fn send_magic_link_email(
+    smtp_config: &crate::SmtpConfig,
+    to_email: &str,
+    verify_url: &str,
+) -> Result<(), String> {
+    use lettre::message::header::ContentType;
+    use lettre::transport::smtp::authentication::Credentials;
+    use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
+
+    let email = Message::builder()
+        .from(
+            smtp_config
+                .from
+                .parse()
+                .map_err(|e| format!("Invalid from address: {}", e))?,
+        )
+        .to(to_email
+            .parse()
+            .map_err(|e| format!("Invalid to address: {}", e))?)
+        .subject("Sign in to your account")
+        .header(ContentType::TEXT_HTML)
+        .body(format!(
+            r#"<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+  <h2 style="color: #1a1a1a;">Sign in to your account</h2>
+  <p style="color: #4a4a4a; line-height: 1.6;">
+    Click the button below to sign in. This link expires in 15 minutes.
+  </p>
+  <p style="margin: 30px 0;">
+    <a href="{url}" style="background-color: #0070f3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 500;">
+      Sign in
+    </a>
+  </p>
+  <p style="color: #888; font-size: 14px; line-height: 1.5;">
+    If the button doesn't work, copy and paste this link into your browser:<br>
+    <a href="{url}" style="color: #0070f3; word-break: break-all;">{url}</a>
+  </p>
+  <hr style="border: none; border-top: 1px solid #eaeaea; margin: 30px 0;">
+  <p style="color: #aaa; font-size: 12px;">
+    If you didn't request this email, you can safely ignore it.
+  </p>
+</body>
+</html>"#,
+            url = verify_url,
+        ))
+        .map_err(|e| format!("Failed to build email: {}", e))?;
+
+    // Determine TLS mode: explicit setting or auto-detect from port
+    let effective_mode = match &smtp_config.tls_mode {
+        crate::SmtpTlsMode::Auto => match smtp_config.port {
+            465 => &crate::SmtpTlsMode::Tls,
+            587 => &crate::SmtpTlsMode::StartTls,
+            _ => &crate::SmtpTlsMode::Plain,
+        },
+        mode => mode,
+    };
+
+    let mailer = match effective_mode {
+        crate::SmtpTlsMode::StartTls => {
+            let creds =
+                Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp_config.host)
+                .map_err(|e| format!("Failed to create SMTP STARTTLS transport: {}", e))?
+                .port(smtp_config.port)
+                .credentials(creds)
+                .build()
+        }
+        crate::SmtpTlsMode::Tls => {
+            let creds =
+                Credentials::new(smtp_config.username.clone(), smtp_config.password.clone());
+            AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp_config.host)
+                .map_err(|e| format!("Failed to create SMTP TLS transport: {}", e))?
+                .port(smtp_config.port)
+                .credentials(creds)
+                .build()
+        }
+        crate::SmtpTlsMode::Plain | crate::SmtpTlsMode::Auto => {
+            // Plain mode: no auth (local dev servers like Mailpit don't support it)
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&smtp_config.host)
+                .port(smtp_config.port)
+                .build()
+        }
+    };
+
+    mailer
+        .send(email)
+        .await
+        .map_err(|e| format!("Failed to send email: {}", e))?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Device Authorization Grant (RFC 8628) Handlers
+// ============================================================================
+
+/// Generate a cryptographically random device code (opaque, 40 chars hex)
+fn generate_device_code() -> String {
+    use rand::Rng;
+    let bytes: [u8; 20] = rand::rng().random();
+    hex::encode(bytes)
+}
+
+/// Generate a user-friendly code (e.g., "ABCD-1234")
+/// Uses uppercase letters (no O/I to avoid confusion) and digits (no 0/1)
+fn generate_user_code() -> String {
+    use rand::Rng;
+    // Unambiguous charset: no 0, O, 1, I, L
+    const CHARSET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::rng();
+    let part1: String = (0..4)
+        .map(|_| CHARSET[rng.random_range(0..CHARSET.len())] as char)
+        .collect();
+    let part2: String = (0..4)
+        .map(|_| CHARSET[rng.random_range(0..CHARSET.len())] as char)
+        .collect();
+    format!("{}-{}", part1, part2)
+}
+
+/// Initiate device authorization (RFC 8628 Section 3.1)
+///
+/// Third-party applications call this endpoint to start the device flow.
+/// Returns a device_code, user_code, and verification_uri.
+#[utoipa::path(
+    post,
+    path = "/api/device/authorize",
+    request_body = DeviceAuthorizationRequest,
+    responses(
+        (status = 200, description = "Device authorization initiated", body = DeviceAuthorizationResponse),
+        (status = 400, description = "Invalid request", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "device-auth"
+)]
+pub async fn device_authorize(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeviceAuthorizationRequest>,
+) -> Result<Json<DeviceAuthorizationResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::device_authorization;
+    use sea_orm::{ActiveModelTrait, Set};
+
+    if req.client_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "client_id is required".to_string(),
+                code: Some("invalid_request".to_string()),
+            }),
+        ));
+    }
+
+    // Validate client_id against registered OAuth clients
+    if state.oauth_clients.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Device authorization is not configured. No OAuth clients registered."
+                    .to_string(),
+                code: Some("invalid_client".to_string()),
+            }),
+        ));
+    }
+
+    let registered_client = state
+        .oauth_clients
+        .iter()
+        .find(|c| c.client_id == req.client_id);
+
+    if registered_client.is_none() {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: format!("Unknown client_id '{}'", req.client_id),
+                code: Some("invalid_client".to_string()),
+            }),
+        ));
+    }
+
+    let now = chrono::Utc::now();
+    let expires_in_secs: i64 = 600; // 10 minutes
+    let expires_at = now + chrono::Duration::seconds(expires_in_secs);
+    let interval = 5;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let device_code = generate_device_code();
+    let user_code = generate_user_code();
+
+    // Store in DB
+    let active_model = device_authorization::ActiveModel {
+        id: Set(id),
+        device_code: Set(device_code.clone()),
+        user_code: Set(user_code.clone()),
+        client_id: Set(req.client_id.clone()),
+        scope: Set(req.scope.clone()),
+        status: Set("pending".to_string()),
+        user_id: Set(None),
+        polling_interval: Set(interval),
+        last_polled_at: Set(None),
+        expires_at: Set(expires_at),
+        created_at: Set(now),
+    };
+
+    active_model.insert(&state.db).await.map_err(|e| {
+        error!("Failed to create device authorization: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to create device authorization".to_string(),
+                code: Some("server_error".to_string()),
+            }),
+        )
+    })?;
+
+    // Build verification URI
+    // Use the relay config domain if available, otherwise fall back to a relative path
+    let base_url = if let Some(ref relay_config) = state.relay_config {
+        let scheme = if state.is_https { "https" } else { "http" };
+        format!("{}://{}", scheme, relay_config.domain)
+    } else {
+        String::new() // relative URL
+    };
+    let verification_uri = format!("{}/device", base_url);
+    let verification_uri_complete = format!("{}/device?code={}", base_url, user_code);
+
+    info!(
+        "Device authorization created: client_id={}, user_code={}, expires_in={}s",
+        req.client_id, user_code, expires_in_secs
+    );
+
+    Ok(Json(DeviceAuthorizationResponse {
+        device_code,
+        user_code,
+        verification_uri,
+        verification_uri_complete: Some(verification_uri_complete),
+        expires_in: expires_in_secs,
+        interval,
+    }))
+}
+
+/// Poll for device access token (RFC 8628 Section 3.4)
+///
+/// Applications poll this endpoint with the device_code until the user approves.
+/// Returns authorization_pending, slow_down, access_denied, expired_token, or the token.
+#[utoipa::path(
+    post,
+    path = "/api/device/token",
+    request_body = DeviceTokenRequest,
+    responses(
+        (status = 200, description = "Access token granted", body = DeviceTokenResponse),
+        (status = 400, description = "Authorization pending or error", body = DeviceTokenErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "device-auth"
+)]
+pub async fn device_token(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DeviceTokenRequest>,
+) -> Result<Json<DeviceTokenResponse>, (StatusCode, Json<serde_json::Value>)> {
+    use localup_relay_db::entities::device_authorization;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    // Validate grant_type per RFC 8628
+    if req.grant_type != "urn:ietf:params:oauth:grant-type:device_code" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "unsupported_grant_type",
+                "error_description": "grant_type must be urn:ietf:params:oauth:grant-type:device_code"
+            })),
+        ));
+    }
+
+    // Look up the device authorization
+    let auth = device_authorization::Entity::find()
+        .filter(device_authorization::Column::DeviceCode.eq(&req.device_code))
+        .filter(device_authorization::Column::ClientId.eq(&req.client_id))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Failed to query device authorization: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "server_error",
+                    "error_description": "Internal server error"
+                })),
+            )
+        })?;
+
+    let auth = match auth {
+        Some(a) => a,
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "Invalid device_code or client_id"
+                })),
+            ));
+        }
+    };
+
+    let now = chrono::Utc::now();
+
+    // Check if expired
+    if now > auth.expires_at {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "expired_token",
+                "error_description": "The device_code has expired. Please start a new authorization request."
+            })),
+        ));
+    }
+
+    // Check slow_down: if client is polling faster than the interval
+    if let Some(last_polled) = auth.last_polled_at {
+        let elapsed = (now - last_polled).num_seconds();
+        if elapsed < auth.polling_interval as i64 {
+            // Update last_polled_at and increase interval by 5 seconds per RFC
+            let mut active: device_authorization::ActiveModel = auth.clone().into();
+            active.last_polled_at = Set(Some(now));
+            active.polling_interval = Set(auth.polling_interval + 5);
+            let _ = active.update(&state.db).await;
+
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "slow_down",
+                    "error_description": format!("Please wait at least {} seconds between requests", auth.polling_interval + 5)
+                })),
+            ));
+        }
+    }
+
+    // Update last_polled_at
+    {
+        let mut active: device_authorization::ActiveModel = auth.clone().into();
+        active.last_polled_at = Set(Some(now));
+        let _ = active.update(&state.db).await;
+    }
+
+    match auth.status.as_str() {
+        "pending" => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "authorization_pending",
+                "error_description": "The user has not yet authorized this device. Continue polling."
+            })),
+        )),
+        "denied" => Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "access_denied",
+                "error_description": "The user denied the authorization request."
+            })),
+        )),
+        "approved" => {
+            let user_id = auth
+                .user_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+
+            // Generate an auth token (JWT) for the approved user
+            let token_duration = chrono::Duration::hours(24);
+            let claims = localup_auth::JwtClaims::new(
+                req.client_id.clone(),
+                "localup-relay".to_string(),
+                "localup-client".to_string(),
+                token_duration,
+            )
+            .with_user_id(user_id.clone());
+
+            let token = localup_auth::JwtValidator::encode(state.jwt_secret.as_bytes(), &claims)
+                .map_err(|e| {
+                    error!("Failed to encode JWT for device auth: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": "server_error",
+                            "error_description": "Failed to generate access token"
+                        })),
+                    )
+                })?;
+
+            // Mark as consumed (delete or update status)
+            let mut active: device_authorization::ActiveModel = auth.into();
+            active.status = Set("consumed".to_string());
+            let _ = active.update(&state.db).await;
+
+            info!(
+                "Device authorization approved: client_id={}, user_id={}",
+                req.client_id, user_id
+            );
+
+            Ok(Json(DeviceTokenResponse {
+                access_token: token,
+                token_type: "Bearer".to_string(),
+                expires_in: token_duration.num_seconds(),
+                scope: None,
+            }))
+        }
+        other => {
+            error!("Unknown device authorization status: {}", other);
+            Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "server_error",
+                    "error_description": "Unknown authorization status"
+                })),
+            ))
+        }
+    }
+}
+
+/// Look up a device authorization by user_code (for the verification page)
+///
+/// The verification page calls this to show the user what app is requesting access.
+#[utoipa::path(
+    get,
+    path = "/api/device/info",
+    params(
+        ("user_code" = String, Query, description = "The user code displayed on the device")
+    ),
+    responses(
+        (status = 200, description = "Device authorization info", body = DeviceAuthorizationInfo),
+    ),
+    tag = "device-auth"
+)]
+pub async fn device_info(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Json<DeviceAuthorizationInfo> {
+    use localup_relay_db::entities::device_authorization;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let user_code = params.get("user_code").cloned().unwrap_or_default();
+    // Normalize: uppercase, remove spaces/dashes for lookup
+    let normalized = user_code.to_uppercase().replace(['-', ' '], "");
+
+    if normalized.len() != 8 {
+        return Json(DeviceAuthorizationInfo {
+            valid: false,
+            client_id: None,
+            client_name: None,
+            scope: None,
+            message: "Invalid code format".to_string(),
+        });
+    }
+
+    // Re-insert dash for DB lookup (stored as "XXXX-YYYY")
+    let db_code = format!("{}-{}", &normalized[..4], &normalized[4..]);
+
+    let now = chrono::Utc::now();
+
+    let auth = device_authorization::Entity::find()
+        .filter(device_authorization::Column::UserCode.eq(&db_code))
+        .filter(device_authorization::Column::Status.eq("pending"))
+        .one(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+    match auth {
+        Some(a) if a.expires_at > now => {
+            // Look up the human-readable display name for this client_id
+            let client_name = state
+                .oauth_clients
+                .iter()
+                .find(|c| c.client_id == a.client_id)
+                .map(|c| c.display_name.clone());
+            Json(DeviceAuthorizationInfo {
+                valid: true,
+                client_id: Some(a.client_id),
+                client_name,
+                scope: a.scope,
+                message: "Authorization request found. Approve to grant access.".to_string(),
+            })
+        }
+        _ => Json(DeviceAuthorizationInfo {
+            valid: false,
+            client_id: None,
+            client_name: None,
+            scope: None,
+            message: "Invalid or expired code".to_string(),
+        }),
+    }
+}
+
+/// Verify (approve) a device authorization
+///
+/// Called by the logged-in user from the verification page to approve the device.
+/// Requires session authentication.
+#[utoipa::path(
+    post,
+    path = "/api/device/verify",
+    request_body = DeviceVerifyRequest,
+    responses(
+        (status = 200, description = "Device authorization approved", body = DeviceVerifyResponse),
+        (status = 400, description = "Invalid or expired code", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "device-auth"
+)]
+pub async fn device_verify(
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
+    Json(req): Json<DeviceVerifyRequest>,
+) -> Result<Json<DeviceVerifyResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::device_authorization;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    // Normalize user_code
+    let normalized = req.user_code.to_uppercase().replace(['-', ' '], "");
+
+    if normalized.len() != 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid code format. Expected format: XXXX-YYYY".to_string(),
+                code: Some("invalid_request".to_string()),
+            }),
+        ));
+    }
+
+    let db_code = format!("{}-{}", &normalized[..4], &normalized[4..]);
+    let now = chrono::Utc::now();
+
+    let auth = device_authorization::Entity::find()
+        .filter(device_authorization::Column::UserCode.eq(&db_code))
+        .filter(device_authorization::Column::Status.eq("pending"))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Failed to query device authorization: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("server_error".to_string()),
+                }),
+            )
+        })?;
+
+    let auth = match auth {
+        Some(a) if a.expires_at > now => a,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid or expired code".to_string(),
+                    code: Some("invalid_grant".to_string()),
+                }),
+            ));
+        }
+    };
+
+    let client_id = auth.client_id.clone();
+    let scope = auth.scope.clone();
+
+    // Approve the authorization
+    let mut active: device_authorization::ActiveModel = auth.into();
+    active.status = Set("approved".to_string());
+    active.user_id = Set(Some(auth_user.user_id.clone()));
+    active.update(&state.db).await.map_err(|e| {
+        error!("Failed to approve device authorization: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to approve authorization".to_string(),
+                code: Some("server_error".to_string()),
+            }),
+        )
+    })?;
+
+    info!(
+        "Device authorization approved: user_code={}, client_id={}, user_id={}",
+        db_code, client_id, auth_user.user_id
+    );
+
+    Ok(Json(DeviceVerifyResponse {
+        approved: true,
+        client_id,
+        scope,
+        message: "Device authorized successfully".to_string(),
+    }))
+}
+
+/// Deny a device authorization
+///
+/// Called by the logged-in user from the verification page to deny the device.
+/// Requires session authentication.
+#[utoipa::path(
+    post,
+    path = "/api/device/deny",
+    request_body = DeviceVerifyRequest,
+    responses(
+        (status = 200, description = "Device authorization denied", body = DeviceVerifyResponse),
+        (status = 400, description = "Invalid or expired code", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    ),
+    tag = "device-auth"
+)]
+pub async fn device_deny(
+    State(state): State<Arc<AppState>>,
+    Extension(auth_user): Extension<AuthUser>,
+    Json(req): Json<DeviceVerifyRequest>,
+) -> Result<Json<DeviceVerifyResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use localup_relay_db::entities::device_authorization;
+    use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+
+    let normalized = req.user_code.to_uppercase().replace(['-', ' '], "");
+
+    if normalized.len() != 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "Invalid code format".to_string(),
+                code: Some("invalid_request".to_string()),
+            }),
+        ));
+    }
+
+    let db_code = format!("{}-{}", &normalized[..4], &normalized[4..]);
+    let now = chrono::Utc::now();
+
+    let auth = device_authorization::Entity::find()
+        .filter(device_authorization::Column::UserCode.eq(&db_code))
+        .filter(device_authorization::Column::Status.eq("pending"))
+        .one(&state.db)
+        .await
+        .map_err(|e| {
+            error!("Failed to query device authorization: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".to_string(),
+                    code: Some("server_error".to_string()),
+                }),
+            )
+        })?;
+
+    let auth = match auth {
+        Some(a) if a.expires_at > now => a,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Invalid or expired code".to_string(),
+                    code: Some("invalid_grant".to_string()),
+                }),
+            ));
+        }
+    };
+
+    let client_id = auth.client_id.clone();
+    let scope = auth.scope.clone();
+
+    let mut active: device_authorization::ActiveModel = auth.into();
+    active.status = Set("denied".to_string());
+    active.user_id = Set(Some(auth_user.user_id.clone()));
+    active.update(&state.db).await.map_err(|e| {
+        error!("Failed to deny device authorization: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Failed to deny authorization".to_string(),
+                code: Some("server_error".to_string()),
+            }),
+        )
+    })?;
+
+    info!(
+        "Device authorization denied: user_code={}, client_id={}, user_id={}",
+        db_code, client_id, auth_user.user_id
+    );
+
+    Ok(Json(DeviceVerifyResponse {
+        approved: false,
+        client_id,
+        scope,
+        message: "Device authorization denied".to_string(),
+    }))
 }

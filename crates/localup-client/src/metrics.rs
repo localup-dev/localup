@@ -144,6 +144,9 @@ pub enum MetricsEvent {
         duration_ms: u64,
         error: Option<String>,
     },
+    /// Duration updated for a long-lived connection (WS, SSE) after stream closes
+    #[serde(rename = "duration_update")]
+    DurationUpdate { id: String, duration_ms: u64 },
     /// Stats updated
     #[serde(rename = "stats")]
     Stats { stats: MetricsStats },
@@ -397,6 +400,27 @@ impl MetricsStore {
             });
 
             // Broadcast stats update (debounced)
+            self.broadcast_stats_debounced().await;
+        }
+    }
+
+    /// Update the duration of an already-recorded response.
+    /// Used for long-lived connections (WebSocket, SSE) where the initial response
+    /// is recorded immediately (with the status code), but the final duration is
+    /// only known when the stream closes.
+    pub async fn update_duration(&self, id: &str, duration_ms: u64) {
+        let mut metrics = self.metrics.write().await;
+
+        if let Some(metric) = metrics.iter_mut().find(|m| m.id == id) {
+            metric.duration_ms = Some(duration_ms);
+            drop(metrics);
+
+            // Broadcast a lightweight update so the dashboard refreshes the duration
+            let _ = self.update_tx.send(MetricsEvent::DurationUpdate {
+                id: id.to_string(),
+                duration_ms,
+            });
+
             self.broadcast_stats_debounced().await;
         }
     }

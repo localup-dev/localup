@@ -103,6 +103,16 @@ HTTP_BACKEND_PORT ?= 9080
 CERT_FILE ?= localhost-cert.pem
 KEY_FILE ?= localhost-key.pem
 
+# SMTP configuration (for magic link auth - defaults to local Mailpit)
+SMTP_HOST ?= localhost
+SMTP_PORT ?= 1025
+SMTP_USERNAME ?= test
+SMTP_PASSWORD ?= test
+SMTP_FROM ?= noreply@localho.st
+
+# OAuth client configuration (for device authorization flow)
+OAUTH_CLIENTS ?= test-app:Test Application
+
 # Build debug version
 build:
 	cargo build  -p localup-cli --bin=localup
@@ -152,11 +162,15 @@ relay-https: build gen-cert-if-needed
 	@echo "  HTTPS:      $(HTTPS_ADDR)"
 	@echo "  API:        $(API_ADDR)"
 	@echo "  JWT Secret: $(JWT_SECRET)"
+	@echo "  SMTP:       $(SMTP_HOST):$(SMTP_PORT) (from: $(SMTP_FROM))"
+	@echo "  OAuth:      $(OAUTH_CLIENTS)"
+	@echo "  Mailpit:    http://localhost:8025"
 	@echo ""
 	@echo "Access URLs:"
 	@echo "  HTTP:    http://<subdomain>.$(DOMAIN):28080"
 	@echo "  HTTPS:   https://<subdomain>.$(DOMAIN):28443"
 	@echo "  API:     http://localhost:3080/swagger-ui"
+	@echo "  Portal:  http://localhost:3080"
 	@echo ""
 	@echo "Generate a token with: make gen-token"
 	@echo "================================================"
@@ -173,7 +187,14 @@ relay-https: build gen-cert-if-needed
 		--admin-email "$(ADMIN_EMAIL)" \
 		--admin-password "$(ADMIN_PASSWORD)" \
 		--database-url "$(DATABASE_URL)" \
-		--log-level $(LOG_LEVEL)
+		--log-level $(LOG_LEVEL) \
+		--allow-signup \
+		--smtp-host $(SMTP_HOST) \
+		--smtp-port $(SMTP_PORT) \
+		--smtp-username $(SMTP_USERNAME) \
+		--smtp-password $(SMTP_PASSWORD) \
+		--smtp-from $(SMTP_FROM) \
+		--oauth-client "$(OAUTH_CLIENTS)"
 
 # Start HTTP-only relay with localho.st domain
 relay-http: build

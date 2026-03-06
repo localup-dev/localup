@@ -56,11 +56,21 @@ mime_guess = "2.0"
 sha2 = "0.10"
 x509-parser = "0.16"
 
-# HTTP client for pre-validation
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+# HTTP client for pre-validation and OAuth token exchange
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
 
 # DNS resolver for pre-validation
 hickory-resolver = "0.24"
+
+# URL encoding for OAuth parameters
+urlencoding = "2.1"
+
+# SMTP for magic link emails
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder", "hostname"] }
+
+# Random generation for device codes
+rand = "0.9"
+hex = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -27,7 +27,7 @@ pub struct Model {
     #[sea_orm(unique)]
     pub email: String,
 
-    /// Argon2id password hash
+    /// Argon2id password hash (nullable for OAuth users)
     pub password_hash: String,
 
     /// User's full name (optional)
@@ -44,6 +44,12 @@ pub struct Model {
 
     /// When the user last updated their profile
     pub updated_at: ChronoDateTimeUtc,
+
+    /// OAuth provider name (e.g., "google", "github") - null for password auth
+    pub oauth_provider: Option<String>,
+
+    /// OAuth provider's user ID - null for password auth
+    pub oauth_provider_id: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

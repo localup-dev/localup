@@ -24,6 +24,8 @@ pub struct TunnelConnection {
     pub http_auth: HttpAuthConfig,
     /// The auth token used to create this tunnel (for /_localup/token endpoint)
     pub auth_token: Option<String>,
+    /// User ID who owns this tunnel (from JWT auth token)
+    pub user_id: Option<String>,
 }
 
 /// Manages all active tunnel connections
@@ -45,11 +47,12 @@ impl TunnelConnectionManager {
         endpoints: Vec<Endpoint>,
         connection: Arc<QuicConnection>,
     ) {
-        self.register_with_auth_and_token(
+        self.register_full(
             localup_id,
             endpoints,
             connection,
             HttpAuthConfig::None,
+            None,
             None,
         )
         .await;
@@ -63,7 +66,7 @@ impl TunnelConnectionManager {
         connection: Arc<QuicConnection>,
         http_auth: HttpAuthConfig,
     ) {
-        self.register_with_auth_and_token(localup_id, endpoints, connection, http_auth, None)
+        self.register_full(localup_id, endpoints, connection, http_auth, None, None)
             .await;
     }
 
@@ -76,6 +79,22 @@ impl TunnelConnectionManager {
         http_auth: HttpAuthConfig,
         auth_token: Option<String>,
     ) {
+        self.register_full(
+            localup_id, endpoints, connection, http_auth, auth_token, None,
+        )
+        .await;
+    }
+
+    /// Register a new tunnel connection with all fields
+    pub async fn register_full(
+        &self,
+        localup_id: String,
+        endpoints: Vec<Endpoint>,
+        connection: Arc<QuicConnection>,
+        http_auth: HttpAuthConfig,
+        auth_token: Option<String>,
+        user_id: Option<String>,
+    ) {
         let localup_conn = TunnelConnection {
             localup_id: localup_id.clone(),
             endpoints,
@@ -83,6 +102,7 @@ impl TunnelConnectionManager {
             tcp_data_callback: None,
             http_auth,
             auth_token,
+            user_id,
         };
 
         self.connections
@@ -124,6 +144,26 @@ impl TunnelConnectionManager {
     /// List all active tunnel IDs
     pub async fn list_tunnels(&self) -> Vec<String> {
         self.connections.read().await.keys().cloned().collect()
+    }
+
+    /// List active tunnel IDs owned by a specific user
+    pub async fn list_tunnels_for_user(&self, user_id: &str) -> Vec<String> {
+        self.connections
+            .read()
+            .await
+            .iter()
+            .filter(|(_, conn)| conn.user_id.as_deref() == Some(user_id))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Get the user_id that owns a tunnel
+    pub async fn get_user_id(&self, localup_id: &str) -> Option<String> {
+        self.connections
+            .read()
+            .await
+            .get(localup_id)
+            .and_then(|conn| conn.user_id.clone())
     }
 
     /// Get all endpoints for a tunnel

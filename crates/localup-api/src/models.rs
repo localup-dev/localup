@@ -71,6 +71,9 @@ pub enum UpstreamStatus {
 pub struct Tunnel {
     /// Unique tunnel identifier
     pub id: String,
+    /// User ID who owns this tunnel
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
     /// Tunnel endpoints
     pub endpoints: Vec<TunnelEndpoint>,
     /// Tunnel status
@@ -194,6 +197,9 @@ pub struct CapturedRequestQuery {
     /// Pagination limit (default: 100, max: 1000)
     #[serde(default)]
     pub limit: Option<usize>,
+    /// Scope: "all" (admin only, default for admin) or "mine" (user's own tunnels)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// Tunnel metrics
@@ -280,6 +286,9 @@ pub struct CapturedTcpConnectionQuery {
     /// Pagination limit (default: 100, max: 1000)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
+    /// Scope: "all" (admin only, default for admin) or "mine" (user's own tunnels)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// List of TCP connections with pagination
@@ -708,6 +717,58 @@ pub struct AuthConfig {
     /// Relay configuration (if available)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayConfig>,
+    /// Enabled social login providers
+    #[serde(default)]
+    pub social_providers: Vec<SocialAuthProvider>,
+    /// Whether magic link (passwordless email) login is enabled
+    #[serde(default)]
+    pub magic_link_enabled: bool,
+    /// Whether OAuth 2.0 Device Authorization Grant (RFC 8628) is enabled
+    #[serde(default)]
+    pub device_auth_enabled: bool,
+}
+
+/// Social authentication provider info (exposed to frontend)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SocialAuthProvider {
+    /// Provider identifier (e.g., "google", "github")
+    pub id: String,
+    /// Human-readable provider name
+    pub name: String,
+}
+
+/// OAuth authorization URL response
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OAuthUrlResponse {
+    /// The authorization URL to redirect the user to
+    pub url: String,
+    /// State parameter for CSRF protection
+    pub state: String,
+}
+
+/// Magic link login request (send magic link email)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MagicLinkRequest {
+    /// Email address to send the magic link to
+    pub email: String,
+}
+
+/// Magic link send response
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct MagicLinkResponse {
+    /// Confirmation message
+    pub message: String,
+}
+
+/// OAuth callback request (frontend posts the auth code)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct OAuthCallbackRequest {
+    /// Authorization code from the OAuth provider
+    pub code: String,
+    /// State parameter for CSRF verification
+    pub state: String,
+    /// The redirect URI that was used (must match what was sent to the provider)
+    pub redirect_uri: String,
 }
 
 /// Relay configuration for client setup
@@ -741,6 +802,129 @@ pub struct UpdateAuthTokenRequest {
     /// Whether the token is active (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_active: Option<bool>,
+}
+
+// ============================================================================
+// Device Authorization Grant (RFC 8628) Models
+// ============================================================================
+
+/// Device authorization request (RFC 8628 Section 3.1)
+///
+/// Sent by third-party applications to initiate the device flow.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeviceAuthorizationRequest {
+    /// OAuth client_id identifying the application
+    pub client_id: String,
+    /// Space-separated list of requested scopes (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// Device authorization response (RFC 8628 Section 3.2)
+///
+/// Returned to the application with codes and verification URI.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeviceAuthorizationResponse {
+    /// Opaque device verification code (used for polling)
+    pub device_code: String,
+    /// Short user-facing code (e.g., "ABCD-1234")
+    pub user_code: String,
+    /// Verification URI where the user should go to enter the code
+    pub verification_uri: String,
+    /// Optional complete URI with user_code pre-filled
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_uri_complete: Option<String>,
+    /// Lifetime in seconds of the device_code and user_code
+    pub expires_in: i64,
+    /// Minimum polling interval in seconds (default: 5)
+    #[serde(default = "default_interval")]
+    pub interval: i32,
+}
+
+fn default_interval() -> i32 {
+    5
+}
+
+/// Device access token request (RFC 8628 Section 3.4)
+///
+/// Sent by the application to poll for the token.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeviceTokenRequest {
+    /// Must be "urn:ietf:params:oauth:grant-type:device_code"
+    pub grant_type: String,
+    /// The device_code from the authorization response
+    pub device_code: String,
+    /// The client_id that initiated the flow
+    pub client_id: String,
+}
+
+/// Device access token response (RFC 8628 Section 3.5)
+///
+/// Returned when the user has approved the authorization.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeviceTokenResponse {
+    /// The access token (JWT)
+    pub access_token: String,
+    /// Token type (always "Bearer")
+    pub token_type: String,
+    /// Lifetime in seconds
+    pub expires_in: i64,
+    /// Scopes granted
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+/// Device token error response (RFC 8628 Section 3.5)
+///
+/// Standard OAuth 2.0 error response with device-flow-specific error codes.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeviceTokenErrorResponse {
+    /// Error code: "authorization_pending", "slow_down", "access_denied", "expired_token"
+    pub error: String,
+    /// Human-readable error description
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_description: Option<String>,
+}
+
+/// User code verification request (user approves the device)
+///
+/// Sent from the verification page after the user enters the user_code.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeviceVerifyRequest {
+    /// The user_code displayed on the device
+    pub user_code: String,
+}
+
+/// User code verification response
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeviceVerifyResponse {
+    /// Whether the verification was successful
+    pub approved: bool,
+    /// The client_id of the application that requested authorization
+    pub client_id: String,
+    /// The scopes requested by the application
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Confirmation message
+    pub message: String,
+}
+
+/// Device authorization info (for the verification page, before approval)
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct DeviceAuthorizationInfo {
+    /// Whether a valid pending authorization was found for this user_code
+    pub valid: bool,
+    /// The client_id of the requesting application
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Human-readable display name of the requesting application
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_name: Option<String>,
+    /// The scopes requested
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Message (e.g., "Authorization request found" or "Invalid or expired code")
+    pub message: String,
 }
 
 // Re-export protocol discovery types with ToSchema

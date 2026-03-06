@@ -9,6 +9,9 @@ mod m20251216_000002_make_cert_paths_nullable;
 mod m20251216_000003_add_domain_id;
 mod m20260102_000001_add_cert_pem_columns;
 mod m20260108_000001_add_is_wildcard;
+mod m20260222_000001_add_oauth_fields;
+mod m20260222_000002_create_magic_link_tokens;
+mod m20260222_000003_create_device_authorizations;
 
 pub struct Migrator;
 
@@ -23,6 +26,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20251216_000003_add_domain_id::Migration),
             Box::new(m20260102_000001_add_cert_pem_columns::Migration),
             Box::new(m20260108_000001_add_is_wildcard::Migration),
+            Box::new(m20260222_000001_add_oauth_fields::Migration),
+            Box::new(m20260222_000002_create_magic_link_tokens::Migration),
+            Box::new(m20260222_000003_create_device_authorizations::Migration),
         ]
     }
 }

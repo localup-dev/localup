@@ -29,6 +29,87 @@ use axum_server::tls_rustls::RustlsConfig;
 #[folder = "../../webapps/exit-node-portal/dist"]
 struct PortalAssets;
 
+/// OAuth provider configuration
+#[derive(Debug, Clone)]
+pub struct OAuthProviderConfig {
+    /// OAuth client ID
+    pub client_id: String,
+    /// OAuth client secret
+    pub client_secret: String,
+}
+
+/// Social login configuration
+#[derive(Debug, Clone, Default)]
+pub struct SocialAuthConfig {
+    /// Google OAuth configuration (None = disabled)
+    pub google: Option<OAuthProviderConfig>,
+    /// GitHub OAuth configuration (None = disabled)
+    pub github: Option<OAuthProviderConfig>,
+}
+
+/// SMTP TLS mode for email transport
+#[derive(Debug, Clone, Default)]
+pub enum SmtpTlsMode {
+    /// Auto-detect based on port: 465=tls, 587=starttls, other=plain
+    #[default]
+    Auto,
+    /// No encryption (for local dev servers like Mailpit)
+    Plain,
+    /// STARTTLS upgrade (port 587, most production servers)
+    StartTls,
+    /// Implicit TLS (port 465)
+    Tls,
+}
+
+/// SMTP configuration for magic link emails
+#[derive(Debug, Clone)]
+pub struct SmtpConfig {
+    /// SMTP server hostname
+    pub host: String,
+    /// SMTP server port (default: 587 for STARTTLS)
+    pub port: u16,
+    /// SMTP username for authentication
+    pub username: String,
+    /// SMTP password for authentication
+    pub password: String,
+    /// Sender email address (From header)
+    pub from: String,
+    /// TLS mode (auto-detected from port if not specified)
+    pub tls_mode: SmtpTlsMode,
+}
+
+/// Registered OAuth client for Device Authorization Grant (RFC 8628)
+///
+/// Configured via `--oauth-client` CLI flag. Format: `client_id:display_name`
+/// Example: `--oauth-client "my-desktop-app:My Desktop App"`
+#[derive(Debug, Clone)]
+pub struct OAuthClientConfig {
+    /// Unique client identifier (used in API calls)
+    pub client_id: String,
+    /// Human-readable display name (shown on verification page)
+    pub display_name: String,
+}
+
+/// Parse an `--oauth-client` CLI argument string.
+///
+/// Format: `client_id:display_name`
+/// Example: `"my-desktop-app:My Desktop App"`
+impl OAuthClientConfig {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+            return Err(format!(
+                "Invalid --oauth-client format '{}'. Expected 'client_id:display_name'",
+                s
+            ));
+        }
+        Ok(Self {
+            client_id: parts[0].to_string(),
+            display_name: parts[1].to_string(),
+        })
+    }
+}
+
 /// Application state shared across handlers
 pub struct AppState {
     pub localup_manager: Arc<TunnelConnectionManager>,
@@ -46,6 +127,12 @@ pub struct AppState {
     pub acme_client: Option<Arc<RwLock<AcmeClient>>>,
     /// HTTP-01 challenge responses (token -> key_authorization)
     pub acme_challenges: Arc<RwLock<std::collections::HashMap<String, String>>>,
+    /// Social login configuration (Google, GitHub)
+    pub social_auth: SocialAuthConfig,
+    /// SMTP configuration for magic link emails (None = magic link disabled)
+    pub smtp: Option<SmtpConfig>,
+    /// Registered OAuth clients for Device Authorization Grant
+    pub oauth_clients: Vec<OAuthClientConfig>,
 }
 
 /// OpenAPI documentation
@@ -96,6 +183,15 @@ pub struct AppState {
         handlers::update_auth_token,
         handlers::delete_auth_token,
         handlers::protocol_discovery,
+        handlers::oauth_get_url,
+        handlers::oauth_callback,
+        handlers::magic_link_send,
+        handlers::magic_link_verify,
+        handlers::device_authorize,
+        handlers::device_token,
+        handlers::device_info,
+        handlers::device_verify,
+        handlers::device_deny,
     ),
     components(
         schemas(
@@ -144,6 +240,19 @@ pub struct AppState {
             models::AuthTokenList,
             models::UpdateAuthTokenRequest,
             models::AuthConfig,
+            models::SocialAuthProvider,
+            models::OAuthUrlResponse,
+            models::OAuthCallbackRequest,
+            models::MagicLinkRequest,
+            models::MagicLinkResponse,
+            models::DeviceAuthorizationRequest,
+            models::DeviceAuthorizationResponse,
+            models::DeviceTokenRequest,
+            models::DeviceTokenResponse,
+            models::DeviceTokenErrorResponse,
+            models::DeviceVerifyRequest,
+            models::DeviceVerifyResponse,
+            models::DeviceAuthorizationInfo,
             models::RelayConfig,
             models::ProtocolDiscoveryResponse,
             models::TransportEndpoint,
@@ -157,7 +266,8 @@ pub struct AppState {
         (name = "auth", description = "Authentication and user management endpoints"),
         (name = "auth-tokens", description = "Auth token (API key) management endpoints"),
         (name = "system", description = "System health and info endpoints"),
-        (name = "discovery", description = "Protocol discovery endpoints")
+        (name = "discovery", description = "Protocol discovery endpoints"),
+        (name = "device-auth", description = "OAuth 2.0 Device Authorization Grant (RFC 8628) endpoints")
     )
 )]
 struct ApiDoc;
@@ -178,6 +288,12 @@ pub struct ApiServerConfig {
     pub tls_cert_path: Option<String>,
     /// TLS private key path for HTTPS (required if https_addr is set)
     pub tls_key_path: Option<String>,
+    /// Social login configuration (Google, GitHub)
+    pub social_auth: SocialAuthConfig,
+    /// SMTP configuration for magic link emails (None = magic link disabled)
+    pub smtp: Option<SmtpConfig>,
+    /// Registered OAuth clients for Device Authorization Grant (RFC 8628)
+    pub oauth_clients: Vec<OAuthClientConfig>,
 }
 
 /// API Server
@@ -187,6 +303,38 @@ pub struct ApiServer {
 }
 
 impl ApiServer {
+    /// Internal constructor — all public constructors delegate here.
+    fn build(
+        config: ApiServerConfig,
+        localup_manager: Arc<TunnelConnectionManager>,
+        db: DatabaseConnection,
+        allow_signup: bool,
+        protocol_discovery: Option<localup_proto::ProtocolDiscoveryResponse>,
+        relay_config: Option<models::RelayConfig>,
+        acme_client: Option<AcmeClient>,
+    ) -> Self {
+        let is_https = config.https_addr.is_some();
+        let social_auth = config.social_auth.clone();
+        let smtp = config.smtp.clone();
+        let oauth_clients = config.oauth_clients.clone();
+        let state = Arc::new(AppState {
+            localup_manager,
+            db,
+            allow_signup,
+            jwt_secret: config.jwt_secret.clone(),
+            protocol_discovery,
+            is_https,
+            relay_config,
+            acme_client: acme_client.map(|c| Arc::new(RwLock::new(c))),
+            acme_challenges: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            social_auth,
+            smtp,
+            oauth_clients,
+        });
+
+        Self { config, state }
+    }
+
     /// Create a new API server
     pub fn new(
         config: ApiServerConfig,
@@ -194,20 +342,7 @@ impl ApiServer {
         db: DatabaseConnection,
         allow_signup: bool,
     ) -> Self {
-        let is_https = config.https_addr.is_some();
-        let state = Arc::new(AppState {
-            localup_manager,
-            db,
-            allow_signup,
-            jwt_secret: config.jwt_secret.clone(),
-            protocol_discovery: None,
-            is_https,
-            relay_config: None,
-            acme_client: None,
-            acme_challenges: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        });
-
-        Self { config, state }
+        Self::build(config, localup_manager, db, allow_signup, None, None, None)
     }
 
     /// Create a new API server with protocol discovery
@@ -218,20 +353,15 @@ impl ApiServer {
         allow_signup: bool,
         protocol_discovery: localup_proto::ProtocolDiscoveryResponse,
     ) -> Self {
-        let is_https = config.https_addr.is_some();
-        let state = Arc::new(AppState {
+        Self::build(
+            config,
             localup_manager,
             db,
             allow_signup,
-            jwt_secret: config.jwt_secret.clone(),
-            protocol_discovery: Some(protocol_discovery),
-            is_https,
-            relay_config: None,
-            acme_client: None,
-            acme_challenges: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        });
-
-        Self { config, state }
+            Some(protocol_discovery),
+            None,
+            None,
+        )
     }
 
     /// Create a new API server with relay configuration
@@ -243,20 +373,15 @@ impl ApiServer {
         protocol_discovery: Option<localup_proto::ProtocolDiscoveryResponse>,
         relay_config: models::RelayConfig,
     ) -> Self {
-        let is_https = config.https_addr.is_some();
-        let state = Arc::new(AppState {
+        Self::build(
+            config,
             localup_manager,
             db,
             allow_signup,
-            jwt_secret: config.jwt_secret.clone(),
             protocol_discovery,
-            is_https,
-            relay_config: Some(relay_config),
-            acme_client: None,
-            acme_challenges: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        });
-
-        Self { config, state }
+            Some(relay_config),
+            None,
+        )
     }
 
     /// Create a new API server with ACME client for Let's Encrypt
@@ -269,20 +394,15 @@ impl ApiServer {
         relay_config: Option<models::RelayConfig>,
         acme_client: AcmeClient,
     ) -> Self {
-        let is_https = config.https_addr.is_some();
-        let state = Arc::new(AppState {
+        Self::build(
+            config,
             localup_manager,
             db,
             allow_signup,
-            jwt_secret: config.jwt_secret.clone(),
             protocol_discovery,
-            is_https,
             relay_config,
-            acme_client: Some(Arc::new(RwLock::new(acme_client))),
-            acme_challenges: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        });
-
-        Self { config, state }
+            Some(acme_client),
+        )
     }
 
     /// Build the router with all routes
@@ -300,6 +420,25 @@ impl ApiServer {
             .route("/api/auth/register", post(handlers::register))
             .route("/api/auth/login", post(handlers::login))
             .route("/api/auth/logout", post(handlers::logout))
+            // Social login OAuth endpoints
+            .route(
+                "/api/auth/oauth/{provider}/url",
+                get(handlers::oauth_get_url),
+            )
+            .route(
+                "/api/auth/oauth/{provider}/callback",
+                post(handlers::oauth_callback),
+            )
+            // Magic link (passwordless email) endpoints
+            .route("/api/auth/magic-link/send", post(handlers::magic_link_send))
+            .route(
+                "/api/auth/magic-link/verify",
+                get(handlers::magic_link_verify),
+            )
+            // Device Authorization Grant (RFC 8628) - public endpoints
+            .route("/api/device/authorize", post(handlers::device_authorize))
+            .route("/api/device/token", post(handlers::device_token))
+            .route("/api/device/info", get(handlers::device_info))
             // Protocol discovery (well-known endpoint)
             .route(
                 "/.well-known/localup-protocols",
@@ -388,6 +527,9 @@ impl ApiServer {
                     .patch(handlers::update_auth_token)
                     .delete(handlers::delete_auth_token),
             )
+            // Device Authorization Grant (RFC 8628) - protected endpoints (require session)
+            .route("/api/device/verify", post(handlers::device_verify))
+            .route("/api/device/deny", post(handlers::device_deny))
             .with_state(self.state.clone())
             .layer(axum_middleware::from_fn_with_state(
                 jwt_state.clone(),
@@ -535,6 +677,9 @@ pub async fn run_api_server(
         jwt_secret,
         tls_cert_path: None,
         tls_key_path: None,
+        social_auth: SocialAuthConfig::default(),
+        smtp: None,
+        oauth_clients: Vec::new(),
     };
 
     let server = ApiServer::new(config, localup_manager, db, allow_signup);

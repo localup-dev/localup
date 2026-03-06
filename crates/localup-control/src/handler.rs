@@ -499,17 +499,18 @@ impl TunnelHandler {
             .downcast::<localup_transport_quic::QuicConnection>()
         {
             self.connection_manager
-                .register_with_auth_and_token(
+                .register_full(
                     localup_id.clone(),
                     endpoints.clone(),
                     quic_conn,
                     config.http_auth.clone(),
                     Some(auth_token.clone()),
+                    Some(user_id.clone()),
                 )
                 .await;
             debug!(
-                "Registered QUIC connection in connection manager for tunnel {}",
-                localup_id
+                "Registered QUIC connection in connection manager for tunnel {} (user: {})",
+                localup_id, user_id
             );
         } else {
             debug!(
@@ -666,8 +667,7 @@ impl TunnelHandler {
             localup_id, remote_address, agent_id
         );
 
-        // Clone agent_token for use in async closure
-        let agent_token = agent_token.clone();
+        // agent_token is already owned, no clone needed
 
         // Check if agent registry is configured
         let Some(ref registry) = self.agent_registry else {
@@ -1640,17 +1640,13 @@ impl TunnelHandler {
         token: &str,
     ) -> Result<(String, Option<localup_auth::JwtClaims>), String> {
         // Step 1: Validate JWT signature and expiration
-        let claims = if let Some(ref validator) = self.jwt_validator {
-            Some(
-                validator
-                    .validate(token)
-                    .map_err(|e| format!("Invalid JWT token: {}", e))?,
-            )
-        } else {
+        let Some(ref validator) = self.jwt_validator else {
             // No JWT validator configured - skip database validation too
             return Ok(("anonymous".to_string(), None));
         };
-        let claims = claims.unwrap(); // Safe: we returned early if None
+        let claims = validator
+            .validate(token)
+            .map_err(|e| format!("Invalid JWT token: {}", e))?;
 
         // Step 2: Verify token type is "auth" (not "session")
         match &claims.token_type {

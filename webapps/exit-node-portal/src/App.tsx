@@ -1,10 +1,10 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthConfigProvider } from './contexts/AuthConfigContext';
-import { TeamProvider } from './contexts/TeamContext';
 import { Toaster } from './components/ui/sonner';
 import Layout from './components/Layout';
 import Login from './pages/Login';
+import OAuthCallback from './pages/OAuthCallback';
 import Dashboard from './pages/Dashboard';
 import AuthTokens from './pages/AuthTokens';
 import Tunnels from './pages/Tunnels';
@@ -12,6 +12,7 @@ import TunnelDetail from './pages/TunnelDetail';
 import Domains from './pages/Domains';
 import AddDomain from './pages/AddDomain';
 import DomainDetail from './pages/DomainDetail';
+import DeviceVerify from './pages/DeviceVerify';
 import { client } from './api/client/client.gen';
 
 // Configure OpenAPI client with credentials and base URL
@@ -46,10 +47,10 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthConfigProvider>
-        <TeamProvider>
           <BrowserRouter>
             <Routes>
               <Route path="/login" element={<Login />} />
+              <Route path="/oauth/callback" element={<OAuthCallback />} />
               <Route path="/dashboard" element={<Layout><Dashboard /></Layout>} />
               <Route path="/tokens" element={<Layout><AuthTokens /></Layout>} />
               <Route path="/tunnels" element={<Layout><Tunnels /></Layout>} />
@@ -57,11 +58,11 @@ function App() {
               <Route path="/domains" element={<Layout><Domains /></Layout>} />
               <Route path="/domains/add" element={<Layout><AddDomain /></Layout>} />
               <Route path="/domains/:id" element={<Layout><DomainDetail /></Layout>} />
+              <Route path="/device" element={<Layout><DeviceVerify /></Layout>} />
               <Route path="/" element={<Navigate to="/dashboard" />} />
             </Routes>
             <Toaster richColors position="bottom-right" />
           </BrowserRouter>
-        </TeamProvider>
       </AuthConfigProvider>
     </QueryClientProvider>
   );

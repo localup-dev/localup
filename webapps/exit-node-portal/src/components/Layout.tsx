@@ -1,9 +1,9 @@
-import { type ReactNode, useEffect } from 'react';
+import { type ReactNode, useEffect, createContext, useContext } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
-import { Home, Cable, Key, Globe, LogOut, ChevronDown } from 'lucide-react';
+import { Home, Cable, Key, Globe, LogOut, ChevronDown, Shield } from 'lucide-react';
 import { getCurrentUserOptions, logoutMutation } from '../api/client/@tanstack/react-query.gen';
-import { useTeam } from '../contexts/TeamContext';
+import { TeamProvider, useTeam } from '../contexts/TeamContext';
 import { Avatar, AvatarFallback } from './ui/avatar';
 import { Separator } from './ui/separator';
 import { Button } from './ui/button';
@@ -13,6 +13,14 @@ interface LayoutProps {
   children: ReactNode;
 }
 
+/** Current user context — exposes role to child pages */
+interface CurrentUserContextType {
+  isAdmin: boolean;
+  userId: string | null;
+}
+const CurrentUserContext = createContext<CurrentUserContextType>({ isAdmin: false, userId: null });
+export const useCurrentUser = () => useContext(CurrentUserContext);
+
 const navItems = [
   { to: '/dashboard', icon: Home, label: 'Getting Started' },
   { to: '/tunnels', icon: Cable, label: 'Tunnels' },
@@ -20,7 +28,7 @@ const navItems = [
   { to: '/tokens', icon: Key, label: 'Auth Tokens' },
 ];
 
-export default function Layout({ children }: LayoutProps) {
+function LayoutInner({ children }: LayoutProps) {
   const navigate = useNavigate();
   const { teams, selectedTeam, selectTeam } = useTeam();
 
@@ -29,8 +37,9 @@ export default function Layout({ children }: LayoutProps) {
     retry: false,
   });
 
-  // API returns { user: { email, ... } } structure
-  const user = userData?.user as { email?: string; id?: string } | undefined;
+  // API returns { user: { email, role, ... } } structure
+  const user = userData?.user as { email?: string; id?: string; role?: string } | undefined;
+  const isAdmin = user?.role === 'admin';
 
   const logout = useMutation({
     ...logoutMutation(),
@@ -83,7 +92,15 @@ export default function Layout({ children }: LayoutProps) {
                 {getInitials(user?.email)}
               </AvatarFallback>
             </Avatar>
-            <p className="text-sm text-muted-foreground truncate">{user?.email}</p>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm text-muted-foreground truncate">{user?.email}</p>
+              {isAdmin && (
+                <span className="inline-flex items-center gap-1 text-xs text-amber-500 font-medium mt-0.5">
+                  <Shield className="h-3 w-3" />
+                  Admin
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
@@ -155,7 +172,19 @@ export default function Layout({ children }: LayoutProps) {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 overflow-auto">{children}</div>
+      <div className="flex-1 overflow-auto">
+        <CurrentUserContext.Provider value={{ isAdmin: isAdmin ?? false, userId: user?.id ?? null }}>
+          {children}
+        </CurrentUserContext.Provider>
+      </div>
     </div>
+  );
+}
+
+export default function Layout({ children }: LayoutProps) {
+  return (
+    <TeamProvider>
+      <LayoutInner>{children}</LayoutInner>
+    </TeamProvider>
   );
 }

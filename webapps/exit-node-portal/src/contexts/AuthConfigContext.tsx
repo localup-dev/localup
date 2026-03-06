@@ -3,8 +3,25 @@ import { useQuery } from '@tanstack/react-query';
 import { authConfigOptions } from '../api/client/@tanstack/react-query.gen';
 import type { AuthConfigResponse } from '../api/client/types.gen';
 
+/** Social auth provider info returned by the backend */
+export interface SocialAuthProvider {
+  /** Provider identifier (e.g., "google", "github") */
+  id: string;
+  /** Human-readable provider name */
+  name: string;
+}
+
+/**
+ * Extended AuthConfig type that includes social_providers and magic_link_enabled.
+ * This extends the auto-generated type until the API client is regenerated.
+ */
+export type AuthConfigWithSocial = AuthConfigResponse & {
+  social_providers?: SocialAuthProvider[];
+  magic_link_enabled?: boolean;
+};
+
 interface AuthConfigContextType {
-  authConfig: AuthConfigResponse | null;
+  authConfig: AuthConfigWithSocial | null;
   loading: boolean;
 }
 
@@ -18,7 +35,7 @@ export function AuthConfigProvider({ children }: { children: ReactNode }) {
   });
 
   return (
-    <AuthConfigContext.Provider value={{ authConfig: authConfig ?? null, loading: isLoading }}>
+    <AuthConfigContext.Provider value={{ authConfig: (authConfig as AuthConfigWithSocial) ?? null, loading: isLoading }}>
       {children}
     </AuthConfigContext.Provider>
   );

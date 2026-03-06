@@ -1,10 +1,12 @@
 import { useState } from 'react';
-import { Cable } from 'lucide-react';
+import { Cable, Shield } from 'lucide-react';
 import { useTunnels } from '../hooks/useApi';
+import { useCurrentUser } from '../components/Layout';
 import TunnelCard from '../components/TunnelCard';
 import { Switch } from '../components/ui/switch';
 import { Label } from '../components/ui/label';
 import { Skeleton } from '../components/ui/skeleton';
+import type { Tunnel } from '../api/client/types.gen';
 
 function TunnelCardSkeleton() {
   return (
@@ -34,8 +36,14 @@ function TunnelCardSkeleton() {
 
 export default function Tunnels() {
   const [includeInactive, setIncludeInactive] = useState(false);
+  const [viewAll, setViewAll] = useState(true);
+  const { isAdmin } = useCurrentUser();
 
-  const { data: tunnelsData, isLoading, error } = useTunnels(includeInactive);
+  // Admin: default to viewing all tunnels; toggle switches to 'mine'
+  // Non-admin: scope is always undefined (backend defaults to 'mine')
+  const scope = isAdmin ? (viewAll ? 'all' : 'mine') : undefined;
+
+  const { data: tunnelsData, isLoading, error } = useTunnels(includeInactive, scope);
   const tunnels = tunnelsData?.tunnels || [];
 
   return (
@@ -46,21 +54,37 @@ export default function Tunnels() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-3xl font-bold text-foreground">
-                {includeInactive ? 'All Tunnels' : 'Active Tunnels'}
+                {isAdmin && viewAll ? 'All Users\' ' : ''}
+                {includeInactive ? 'Tunnels' : 'Active Tunnels'}
               </h1>
               <p className="text-muted-foreground mt-2">
-                Monitor and manage your {includeInactive ? 'tunnels' : 'running tunnels'} ({tunnels.length} {includeInactive ? 'total' : 'active'})
+                {isAdmin && viewAll ? 'Viewing all tunnels across users' : 'Monitor and manage your ' + (includeInactive ? 'tunnels' : 'running tunnels')} ({tunnels.length} {includeInactive ? 'total' : 'active'})
               </p>
             </div>
-            <div className="flex items-center gap-3">
-              <Switch
-                id="show-inactive"
-                checked={includeInactive}
-                onCheckedChange={setIncludeInactive}
-              />
-              <Label htmlFor="show-inactive" className="text-sm cursor-pointer">
-                Show inactive tunnels
-              </Label>
+            <div className="flex items-center gap-6">
+              {isAdmin && (
+                <div className="flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-amber-500" />
+                  <Switch
+                    id="view-all"
+                    checked={viewAll}
+                    onCheckedChange={setViewAll}
+                  />
+                  <Label htmlFor="view-all" className="text-sm cursor-pointer text-amber-600 dark:text-amber-400">
+                    View all tunnels
+                  </Label>
+                </div>
+              )}
+              <div className="flex items-center gap-3">
+                <Switch
+                  id="show-inactive"
+                  checked={includeInactive}
+                  onCheckedChange={setIncludeInactive}
+                />
+                <Label htmlFor="show-inactive" className="text-sm cursor-pointer">
+                  Show inactive tunnels
+                </Label>
+              </div>
             </div>
           </div>
         </div>
@@ -96,8 +120,7 @@ export default function Tunnels() {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-            {tunnels.map((tunnel: any) => (
+            {tunnels.map((tunnel: Tunnel) => (
               <TunnelCard key={tunnel.id} tunnel={tunnel} />
             ))}
           </div>

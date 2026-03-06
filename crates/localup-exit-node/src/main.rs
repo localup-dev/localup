@@ -4,9 +4,11 @@
 //! and routes them through established tunnels to local services.
 
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::signal;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -150,6 +152,48 @@ struct ServerArgs {
     /// Directory to store ACME certificates
     #[arg(long, default_value = "/opt/localup/certs/acme")]
     acme_cert_dir: String,
+
+    /// Google OAuth Client ID (enables Google social login)
+    #[arg(long, env = "GOOGLE_CLIENT_ID")]
+    google_client_id: Option<String>,
+
+    /// Google OAuth Client Secret
+    #[arg(long, env = "GOOGLE_CLIENT_SECRET")]
+    google_client_secret: Option<String>,
+
+    /// GitHub OAuth Client ID (enables GitHub social login)
+    #[arg(long, env = "GITHUB_CLIENT_ID")]
+    github_client_id: Option<String>,
+
+    /// GitHub OAuth Client Secret
+    #[arg(long, env = "GITHUB_CLIENT_SECRET")]
+    github_client_secret: Option<String>,
+
+    /// SMTP host for magic link emails (enables passwordless login)
+    #[arg(long, env = "SMTP_HOST")]
+    smtp_host: Option<String>,
+
+    /// SMTP port (default: 587 for STARTTLS)
+    #[arg(long, env = "SMTP_PORT", default_value = "587")]
+    smtp_port: u16,
+
+    /// SMTP username for authentication
+    #[arg(long, env = "SMTP_USERNAME")]
+    smtp_username: Option<String>,
+
+    /// SMTP password for authentication
+    #[arg(long, env = "SMTP_PASSWORD")]
+    smtp_password: Option<String>,
+
+    /// Sender email address for magic link emails (From header)
+    #[arg(long, env = "SMTP_FROM")]
+    smtp_from: Option<String>,
+
+    /// Register OAuth client for Device Authorization Grant (RFC 8628).
+    /// Format: 'client_id:Display Name'. Can be specified multiple times.
+    /// Example: --oauth-client 'my-app:My Desktop App'
+    #[arg(long = "oauth-client", env = "OAUTH_CLIENTS", value_delimiter = ',')]
+    oauth_clients: Vec<String>,
 }
 
 fn generate_token(
@@ -509,6 +553,90 @@ async fn main() -> Result<()> {
         let acme_staging = args.acme_staging;
         let acme_cert_dir = args.acme_cert_dir.clone();
 
+        // Build social auth configuration
+        let social_auth = {
+            use localup_api::{OAuthProviderConfig, SocialAuthConfig};
+            let google = match (&args.google_client_id, &args.google_client_secret) {
+                (Some(id), Some(secret)) => {
+                    info!("Google OAuth enabled");
+                    Some(OAuthProviderConfig {
+                        client_id: id.clone(),
+                        client_secret: secret.clone(),
+                    })
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    warn!("Google OAuth requires both --google-client-id and --google-client-secret; disabling");
+                    None
+                }
+                _ => None,
+            };
+            let github = match (&args.github_client_id, &args.github_client_secret) {
+                (Some(id), Some(secret)) => {
+                    info!("GitHub OAuth enabled");
+                    Some(OAuthProviderConfig {
+                        client_id: id.clone(),
+                        client_secret: secret.clone(),
+                    })
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    warn!("GitHub OAuth requires both --github-client-id and --github-client-secret; disabling");
+                    None
+                }
+                _ => None,
+            };
+            SocialAuthConfig { google, github }
+        };
+
+        // Build SMTP configuration for magic link
+        let smtp = {
+            use localup_api::SmtpConfig;
+            match (
+                &args.smtp_host,
+                &args.smtp_username,
+                &args.smtp_password,
+                &args.smtp_from,
+            ) {
+                (Some(host), Some(username), Some(password), Some(from)) => {
+                    info!("Magic link (SMTP) enabled via {}", host);
+                    Some(SmtpConfig {
+                        host: host.clone(),
+                        port: args.smtp_port,
+                        username: username.clone(),
+                        password: password.clone(),
+                        from: from.clone(),
+                        tls_mode: localup_api::SmtpTlsMode::Auto,
+                    })
+                }
+                (Some(_), _, _, _)
+                | (_, Some(_), _, _)
+                | (_, _, Some(_), _)
+                | (_, _, _, Some(_)) => {
+                    warn!("SMTP requires --smtp-host, --smtp-username, --smtp-password, and --smtp-from; disabling magic link");
+                    None
+                }
+                _ => None,
+            }
+        };
+
+        // Parse OAuth client strings (format: "client_id:Display Name")
+        let oauth_clients: Vec<localup_api::OAuthClientConfig> = args
+            .oauth_clients
+            .iter()
+            .filter_map(|s| match localup_api::OAuthClientConfig::parse(s) {
+                Ok(c) => {
+                    info!(
+                        "Registered OAuth client: {} ({})",
+                        c.client_id, c.display_name
+                    );
+                    Some(c)
+                }
+                Err(e) => {
+                    warn!("{}", e);
+                    None
+                }
+            })
+            .collect();
+
         info!("Starting API server on {}", api_addr);
         info!("OpenAPI spec: http://{}/api/openapi.json", api_addr);
         info!("Swagger UI: http://{}/swagger-ui", api_addr);
@@ -529,6 +657,9 @@ async fn main() -> Result<()> {
                 jwt_secret: api_jwt_secret,
                 tls_cert_path: None,
                 tls_key_path: None,
+                social_auth,
+                smtp,
+                oauth_clients,
             };
 
             // Create server with or without ACME client
@@ -693,10 +824,7 @@ fn init_logging(log_level: &str) -> Result<()> {
     Ok(())
 }
 
-use chrono::{DateTime, Utc};
 /// TCP Proxy Manager and Port Allocator with reconnection support
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
 
 /// Allocation state for a port
 #[derive(Debug, Clone)]

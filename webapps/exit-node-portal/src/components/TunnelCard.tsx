@@ -2,41 +2,29 @@ import { useNavigate } from 'react-router-dom';
 import { BarChart3, Link2 } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
-
-interface TunnelEndpoint {
-  protocol: {
-    type: string;
-  };
-  public_url: string;
-  local_port?: number;
-}
-
-interface Tunnel {
-  id: string;
-  status: string;
-  connected_at: string;
-  endpoints: TunnelEndpoint[];
-}
+import type { Tunnel, TunnelEndpoint, TunnelStatus } from '../api/client/types.gen';
 
 interface TunnelCardProps {
   tunnel: Tunnel;
 }
 
-const getStatusVariant = (status: string): 'default' | 'secondary' | 'destructive' | 'outline' | 'success' => {
-  switch (status.toLowerCase()) {
+const getStatusVariant = (status: TunnelStatus): 'default' | 'secondary' | 'destructive' | 'outline' | 'success' => {
+  switch (status) {
     case 'connected':
       return 'success';
     case 'disconnected':
       return 'destructive';
     case 'connecting':
       return 'secondary';
+    case 'error':
+      return 'destructive';
     default:
       return 'outline';
   }
 };
 
 const getProtocolBadgeColor = (protocol: string) => {
-  switch (protocol.toLowerCase()) {
+  switch (protocol) {
     case 'tcp':
       return 'bg-chart-1/20 text-chart-1 border-chart-1/50';
     case 'http':
@@ -121,9 +109,9 @@ export default function TunnelCard({ tunnel }: TunnelCardProps) {
                   {endpoint.public_url}
                 </span>
               </div>
-              {endpoint.local_port && (
+              {endpoint.port && (
                 <div className="ml-5 text-muted-foreground">
-                  :{endpoint.local_port}
+                  :{endpoint.port}
                 </div>
               )}
             </div>
