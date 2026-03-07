@@ -1464,45 +1464,29 @@ impl HttpsServer {
         }
 
         // =====================================================================
-        // Regular HTTP/2 request-response path (transparent streaming)
+        // Regular HTTP/2 request-response path (true passthrough streaming)
         //
-        // We convert the H2 request to HTTP/1.1 and use the same transparent
-        // streaming path as HTTP/1.1 connections (HttpStreamConnect / HttpStreamData).
-        // This ensures SSE, chunked responses, and long-lived connections work
-        // correctly instead of buffering the entire response body.
+        // The exit node acts as a transparent bridge: H2 frames are converted
+        // to HTTP/1.1 bytes on the fly and streamed through the QUIC tunnel.
+        // Request and response bodies are NEVER buffered — they flow through
+        // bidirectionally as they arrive.
+        //
+        // Flow:
+        //   Browser --[H2]--> Exit Node --[QUIC/HTTP1.1]--> Client --> Local Server
+        //   Browser <--[H2]-- Exit Node <--[QUIC/HTTP1.1]-- Client <-- Local Server
         // =====================================================================
 
         // Extract path+query BEFORE consuming the request with into_body().
-        // HTTP/2 URIs include the full form (https://vt.tunnel.kfs.es/path) but the
-        // tunnel client builds an HTTP/1.1 request for the local server which expects
-        // origin-form (/path). Sending the full URI causes local servers to return 400.
         let request_path = request
             .uri()
             .path_and_query()
             .map(|pq| pq.to_string())
             .unwrap_or_else(|| "/".to_string());
 
-        // Read request body (for the initial HTTP/1.1 reconstruction)
-        let mut body_stream = request.into_body();
-        let mut body_bytes = Vec::new();
-        while let Some(chunk) = body_stream.data().await {
-            match chunk {
-                Ok(data) => {
-                    body_bytes.extend_from_slice(&data);
-                    let _ = body_stream.flow_control().release_capacity(data.len());
-                }
-                Err(e) => {
-                    warn!("Error reading HTTP/2 request body: {}", e);
-                    break;
-                }
-            }
-        }
-
-        // Build an HTTP/1.1 request from the H2 request
+        // Build HTTP/1.1 headers (no body yet — body streams through separately)
         let mut raw_request = format!("{} {} HTTP/1.1\r\nHost: {}\r\n", method, request_path, host);
         for (name, value) in &headers {
             let name_lower = name.to_lowercase();
-            // Skip h2-specific pseudo-headers and hop-by-hop headers
             if name_lower.starts_with(':')
                 || name_lower == "host"
                 || name_lower == "connection"
@@ -1512,15 +1496,15 @@ impl HttpsServer {
             }
             raw_request.push_str(&format!("{}: {}\r\n", name, value));
         }
-        // Add Content-Length if there's a body
-        if !body_bytes.is_empty() {
-            raw_request.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
-        }
         raw_request.push_str("\r\n");
-        let mut request_bytes = raw_request.into_bytes();
-        request_bytes.extend_from_slice(&body_bytes);
 
-        // Send as HttpStreamConnect (same path as HTTP/1.1)
+        // Get the h2 body stream — body data will be forwarded as it arrives
+        // via the spawned h2_to_quic task below (never buffered).
+        let mut h2_body = request.into_body();
+
+        let request_bytes = raw_request.into_bytes();
+
+        // Send HttpStreamConnect with headers (+ any immediately available body)
         let connect_msg = TunnelMessage::HttpStreamConnect {
             stream_id,
             host: localup_id.to_string(),
@@ -1536,22 +1520,59 @@ impl HttpsServer {
         }
 
         debug!(
-            "HTTP/2 request sent to tunnel via transparent streaming (stream {})",
-            stream_id
+            "HTTP/2 passthrough stream {} initiated for {} {}",
+            stream_id, method, request_path
         );
 
-        // Wait for the first response data from the tunnel (contains HTTP/1.1 status + headers)
+        // Bidirectional streaming:
+        //   1. H2 request body → QUIC tunnel (browser uploading data)
+        //   2. QUIC tunnel → H2 response (server sending response)
+        //
+        // Both directions run concurrently. The response can start streaming
+        // back to the browser while the request body is still being uploaded.
+
+        // Spawn task: stream remaining H2 request body → QUIC tunnel
+        let h2_to_quic = tokio::spawn(async move {
+            loop {
+                match h2_body.data().await {
+                    Some(Ok(data)) => {
+                        let len = data.len();
+                        let _ = h2_body.flow_control().release_capacity(len);
+                        let msg = TunnelMessage::HttpStreamData {
+                            stream_id,
+                            data: data.to_vec(),
+                        };
+                        if quic_send.send_message(&msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        debug!("H2 body read error: {}", e);
+                        break;
+                    }
+                    None => {
+                        // END_STREAM received — request body complete
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Main task: stream QUIC tunnel response → H2 response
+        // Wait for the first response chunk (contains HTTP/1.1 status + headers)
         let first_response =
             tokio::time::timeout(std::time::Duration::from_secs(30), quic_recv.recv_message())
                 .await;
+
+        let mut status_code: u16 = 502;
+        let mut resp_headers_captured: Vec<(String, String)> = Vec::new();
 
         match first_response {
             Ok(Ok(Some(TunnelMessage::HttpStreamData { data, .. }))) => {
                 // Parse the HTTP/1.1 response to extract status and headers
                 let response_str = String::from_utf8_lossy(&data);
 
-                // Parse status code from first line: "HTTP/1.1 200 OK\r\n..."
-                let status_code = response_str
+                status_code = response_str
                     .lines()
                     .next()
                     .and_then(|line| line.split_whitespace().nth(1))
@@ -1559,14 +1580,11 @@ impl HttpsServer {
                     .unwrap_or(502);
 
                 let mut response_builder = http::Response::builder().status(status_code);
-                let mut resp_headers_captured: Vec<(String, String)> = Vec::new();
 
-                // Find the header/body boundary
                 let header_end_pos =
                     if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
                         pos
                     } else {
-                        // No header/body boundary found yet - treat all as headers
                         data.len()
                     };
 
@@ -1574,13 +1592,11 @@ impl HttpsServer {
                 let header_section = String::from_utf8_lossy(&data[..header_end_pos]);
                 let mut is_chunked = false;
                 for line in header_section.lines().skip(1) {
-                    // Skip status line
                     if let Some(colon_pos) = line.find(':') {
                         let name = line[..colon_pos].trim();
                         let value = line[colon_pos + 1..].trim();
                         let name_lower = name.to_lowercase();
 
-                        // Detect chunked transfer encoding before skipping the header
                         if name_lower == "transfer-encoding"
                             && value.to_lowercase().contains("chunked")
                         {
@@ -1600,28 +1616,23 @@ impl HttpsServer {
                     }
                 }
 
-                if is_chunked {
-                    debug!("HTTP/1.1 response uses chunked transfer encoding, will decode for h2");
-                }
-
-                // Send h2 response headers (false = NOT end of stream, we'll stream the body)
+                // Send h2 response headers
                 let response = response_builder.body(()).unwrap();
                 let mut h2_send = send_response.send_response(response, false)?;
 
-                // If there's body data after the headers in this first chunk, send it
-                // For chunked responses, we need to decode the chunk framing first
-                let body_start = header_end_pos + 4; // Skip \r\n\r\n
+                // Forward any body data from first chunk
+                let body_start = header_end_pos + 4;
                 let mut chunked_remainder: Vec<u8> = Vec::new();
                 if body_start < data.len() {
                     let initial_body = &data[body_start..];
                     if !initial_body.is_empty() {
                         if is_chunked {
-                            // Decode chunked data, keeping any incomplete chunk for next iteration
                             let (decoded, remainder) = decode_chunked_streaming(initial_body);
                             chunked_remainder = remainder;
                             if !decoded.is_empty() {
                                 if let Err(e) = h2_send.send_data(Bytes::from(decoded), false) {
                                     debug!("h2 send error for initial body: {}", e);
+                                    h2_to_quic.abort();
                                     return Ok(());
                                 }
                             }
@@ -1629,35 +1640,22 @@ impl HttpsServer {
                             h2_send.send_data(Bytes::copy_from_slice(initial_body), false)
                         {
                             debug!("h2 send error for initial body: {}", e);
+                            h2_to_quic.abort();
                             return Ok(());
                         }
                     }
                 }
 
-                debug!(
-                    "HTTP/2 response headers forwarded to client: {} (streaming body{})",
-                    status_code,
-                    if is_chunked { ", chunked-decode" } else { "" }
-                );
-
-                // Stream remaining data from tunnel to h2 client
+                // Stream remaining response data from tunnel to h2 client
                 loop {
                     match quic_recv.recv_message().await {
                         Ok(Some(TunnelMessage::HttpStreamData { data, .. })) => {
                             if is_chunked {
-                                // Prepend any leftover bytes from previous chunk boundary
-                                let mut input = chunked_remainder.clone();
+                                let mut input = std::mem::take(&mut chunked_remainder);
                                 input.extend_from_slice(&data);
-                                chunked_remainder.clear();
 
                                 let (decoded, remainder) = decode_chunked_streaming(&input);
-                                let remainder_empty = remainder.is_empty();
                                 chunked_remainder = remainder;
-
-                                // A zero-size chunk signals end of chunked body
-                                if decoded.is_empty() && remainder_empty && !input.is_empty() {
-                                    debug!("Chunked transfer complete (terminal chunk)");
-                                }
 
                                 if !decoded.is_empty() {
                                     if let Err(e) = h2_send.send_data(Bytes::from(decoded), false) {
@@ -1690,49 +1688,6 @@ impl HttpsServer {
                         }
                     }
                 }
-
-                // Capture to database
-                if let Some(ref db_conn) = db {
-                    let response_end = chrono::Utc::now();
-                    let latency_ms = (response_end - request_start).num_milliseconds() as i32;
-
-                    let captured_request =
-                        localup_relay_db::entities::captured_request::ActiveModel {
-                            id: Set(request_id.clone()),
-                            localup_id: Set(localup_id.to_string()),
-                            method: Set(method),
-                            path: Set(uri),
-                            host: Set(Some(host.to_string())),
-                            headers: Set(serde_json::to_string(&headers).unwrap_or_default()),
-                            body: Set(if body_bytes.is_empty() {
-                                None
-                            } else {
-                                use base64::prelude::{Engine as _, BASE64_STANDARD as BASE64};
-                                Some(BASE64.encode(&body_bytes))
-                            }),
-                            status: Set(Some(status_code as i32)),
-                            response_headers: Set(Some(
-                                serde_json::to_string(&resp_headers_captured).unwrap_or_default(),
-                            )),
-                            response_body: Set(None), // Streaming - body not captured
-                            created_at: Set(request_start),
-                            responded_at: Set(Some(response_end)),
-                            latency_ms: Set(Some(latency_ms)),
-                        };
-
-                    use sea_orm::EntityTrait;
-                    if let Err(e) = localup_relay_db::entities::prelude::CapturedRequest::insert(
-                        captured_request,
-                    )
-                    .exec(db_conn)
-                    .await
-                    {
-                        warn!(
-                            "Failed to save captured HTTP/2 request {}: {}",
-                            request_id, e
-                        );
-                    }
-                }
             }
             Ok(Ok(Some(TunnelMessage::HttpStreamClose { .. }))) | Ok(Ok(None)) => {
                 warn!("Tunnel stream closed without response");
@@ -1757,6 +1712,46 @@ impl HttpsServer {
                 let response = http::Response::builder().status(504).body(()).unwrap();
                 let mut send = send_response.send_response(response, false)?;
                 send.send_data(Bytes::from("Gateway Timeout"), true)?;
+            }
+        }
+
+        // Wait for request body forwarding to finish (or abort if response is done)
+        h2_to_quic.abort();
+        let _ = h2_to_quic.await;
+
+        // Capture to database
+        if let Some(ref db_conn) = db {
+            let response_end = chrono::Utc::now();
+            let latency_ms = (response_end - request_start).num_milliseconds() as i32;
+
+            let captured_request = localup_relay_db::entities::captured_request::ActiveModel {
+                id: Set(request_id.clone()),
+                localup_id: Set(localup_id.to_string()),
+                method: Set(method),
+                path: Set(uri),
+                host: Set(Some(host.to_string())),
+                headers: Set(serde_json::to_string(&headers).unwrap_or_default()),
+                body: Set(None), // Streaming - body not captured
+                status: Set(Some(status_code as i32)),
+                response_headers: Set(Some(
+                    serde_json::to_string(&resp_headers_captured).unwrap_or_default(),
+                )),
+                response_body: Set(None), // Streaming - body not captured
+                created_at: Set(request_start),
+                responded_at: Set(Some(response_end)),
+                latency_ms: Set(Some(latency_ms)),
+            };
+
+            use sea_orm::EntityTrait;
+            if let Err(e) =
+                localup_relay_db::entities::prelude::CapturedRequest::insert(captured_request)
+                    .exec(db_conn)
+                    .await
+            {
+                warn!(
+                    "Failed to save captured HTTP/2 request {}: {}",
+                    request_id, e
+                );
             }
         }
 
