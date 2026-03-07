@@ -1163,6 +1163,16 @@ impl TunnelConnection {
 
         let mut result = Vec::with_capacity(data.len() + 64);
         let mut host_rewritten = false;
+        let mut is_upgrade = false;
+
+        // First pass: detect if this is an Upgrade request (WebSocket, etc.)
+        for line in &lines[1..] {
+            let lower = line.to_lowercase();
+            if lower.starts_with("upgrade:") {
+                is_upgrade = true;
+                break;
+            }
+        }
 
         for (i, line) in lines.iter().enumerate() {
             if i == 0 {
@@ -1183,10 +1193,22 @@ impl TunnelConnection {
                 result.extend_from_slice(b"Origin: http://");
                 result.extend_from_slice(local_addr.as_bytes());
                 result.extend_from_slice(b"\r\n");
+            } else if !is_upgrade && line.to_lowercase().starts_with("connection:") {
+                // For non-upgrade requests, skip existing Connection header —
+                // we force Connection: close below
+                continue;
             } else {
                 result.extend_from_slice(line.as_bytes());
                 result.extend_from_slice(b"\r\n");
             }
+        }
+
+        if !is_upgrade {
+            // Force Connection: close so the local server closes the TCP connection
+            // after sending its response. Without this, HTTP/1.1 keep-alive servers
+            // hold the connection open indefinitely, preventing the tunnel stream
+            // from detecting that the response is complete.
+            result.extend_from_slice(b"Connection: close\r\n");
         }
 
         // Terminate headers
