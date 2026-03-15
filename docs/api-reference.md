@@ -326,6 +326,39 @@ curl -X POST http://relay:8080/api/domains/challenge/complete \
   -d '{"domain": "app.example.com", "challenge_id": "challenge-uuid"}'
 ```
 
+### List Pending Challenges
+
+#### `GET /api/domains/{domain}/challenges`
+
+List pending ACME challenges for a domain.
+
+```bash
+curl http://relay:8080/api/domains/app.example.com/challenges \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Cancel Challenge
+
+#### `POST /api/domains/{domain}/challenge/cancel`
+
+Cancel an ongoing ACME challenge.
+
+```bash
+curl -X POST http://relay:8080/api/domains/app.example.com/challenge/cancel \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Restart Challenge
+
+#### `POST /api/domains/{domain}/challenge/restart`
+
+Restart a failed ACME challenge.
+
+```bash
+curl -X POST http://relay:8080/api/domains/app.example.com/challenge/restart \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 ### Request Certificate
 
 #### `POST /api/domains/{domain}/certificate`
@@ -336,6 +369,12 @@ After challenge validation, request the certificate from Let's Encrypt.
 curl -X POST http://relay:8080/api/domains/app.example.com/certificate \
   -H "Authorization: Bearer $TOKEN"
 ```
+
+### ACME HTTP-01 Challenge
+
+#### `GET /.well-known/acme-challenge/{token}`
+
+Serves ACME HTTP-01 challenge tokens. Called by Let's Encrypt servers during domain validation. No authentication required.
 
 ---
 
@@ -430,6 +469,32 @@ curl -X POST http://relay:8080/api/auth/oauth/github/callback \
 
 ---
 
+## Magic Link (Passwordless Login)
+
+### Send Magic Link
+
+#### `POST /api/auth/magic-link/send`
+
+Send a passwordless login email. Requires SMTP to be configured on the relay.
+
+```bash
+curl -X POST http://relay:8080/api/auth/magic-link/send \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com"}'
+```
+
+### Verify Magic Link
+
+#### `GET /api/auth/magic-link/verify`
+
+Verify the magic link token from the email and receive a session token.
+
+```bash
+curl "http://relay:8080/api/auth/magic-link/verify?token=magic-link-token-here"
+```
+
+---
+
 ## Device Authorization (RFC 8628)
 
 For CLI and desktop app login without browser redirect.
@@ -470,6 +535,16 @@ curl -X POST http://relay:8080/api/device/token \
 
 Returns `authorization_pending` until the user approves, then returns the access token.
 
+### Device Info
+
+#### `GET /api/device/info`
+
+Get information about a pending device authorization (used by the verification page).
+
+```bash
+curl "http://relay:8080/api/device/info?user_code=ABCD-1234"
+```
+
 ### Approve (Browser)
 
 #### `POST /api/device/verify`
@@ -478,6 +553,19 @@ User approves the device from the browser.
 
 ```bash
 curl -X POST http://relay:8080/api/device/verify \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"user_code": "ABCD-1234"}'
+```
+
+### Deny (Browser)
+
+#### `POST /api/device/deny`
+
+User denies the device authorization from the browser.
+
+```bash
+curl -X POST http://relay:8080/api/device/deny \
   -H "Authorization: Bearer $SESSION_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"user_code": "ABCD-1234"}'
@@ -495,6 +583,17 @@ Long-lived tokens for programmatic access.
 
 ```bash
 curl http://relay:8080/api/auth-tokens \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Get API Key
+
+#### `GET /api/auth-tokens/{id}`
+
+Get details for a specific API key (token value is not returned).
+
+```bash
+curl http://relay:8080/api/auth-tokens/token-uuid \
   -H "Authorization: Bearer $TOKEN"
 ```
 
@@ -528,6 +627,21 @@ curl -X PATCH http://relay:8080/api/auth-tokens/token-uuid \
 
 ```bash
 curl -X DELETE http://relay:8080/api/auth-tokens/token-uuid \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+---
+
+## Teams
+
+### List Teams
+
+#### `GET /api/teams`
+
+List teams for the current user.
+
+```bash
+curl http://relay:8080/api/teams \
   -H "Authorization: Bearer $TOKEN"
 ```
 

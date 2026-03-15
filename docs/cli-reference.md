@@ -209,8 +209,20 @@ Add or remove a tunnel from the daemon configuration.
 
 ```bash
 localup daemon add frontend -p 3000 --protocol https -s frontend
+localup daemon add api -p 8080 --protocol http -s api --custom-domain api.example.com
 localup daemon remove frontend
 ```
+
+Available flags for `daemon add`:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--port <PORT>` | | Local port (required) |
+| `--protocol <PROTO>` | `https` | Protocol: `http`, `https`, `tcp`, `tls` |
+| `--subdomain <NAME>` | | Subdomain for HTTP/HTTPS tunnels |
+| `--custom-domain <DOMAIN>` | | Custom domain (repeatable, supports wildcards) |
+
+Note: `daemon add` defaults to `https` protocol, unlike `localup add` which defaults to `http`.
 
 ---
 
@@ -277,6 +289,8 @@ localup relay http \
 
 ### Common Relay Options
 
+These flags are available on all relay subcommands (`tcp`, `tls`, `http`):
+
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
 | `--localup-addr <ADDR>` | | `0.0.0.0:4443` | QUIC control plane address |
@@ -286,7 +300,14 @@ localup relay http \
 | `--tls-key <PATH>` | | auto-generated | TLS private key |
 | `--database-url <URL>` | `DATABASE_URL` | in-memory SQLite | Database connection |
 | `--log-level <LEVEL>` | | `info` | Log level |
-| `--transport <PROTO>` | | `quic` | Control plane transport |
+
+### TLS Relay Extras
+
+| Flag | Description |
+|------|-------------|
+| `--http-redirect-addr <ADDR>` | Optional HTTP server that redirects to HTTPS |
+| `--https-redirect-port <PORT>` | HTTPS port to redirect to (default: `443`) |
+| `--http-passthrough-addr <ADDR>` | Optional HTTP passthrough server for plain HTTP traffic |
 
 ### API Server Options (All Relay Types)
 
@@ -311,10 +332,12 @@ localup relay http \
 
 | Flag | Env Var | Description |
 |------|---------|-------------|
+| `--transport <PROTO>` | | Control plane transport: `quic`, `h2`, `websocket` (default: `quic`) |
 | `--acme-email <EMAIL>` | `ACME_EMAIL` | Let's Encrypt email |
 | `--acme-staging` | | Use Let's Encrypt staging |
 | `--acme-cert-dir <PATH>` | | ACME cert directory (default: `/opt/localup/certs/acme`) |
 | `--websocket-path <PATH>` | | WebSocket endpoint (default: `/localup`) |
+| `--oauth-client <SPEC>` | `OAUTH_CLIENTS` | Register OAuth client for Device Authorization Grant (RFC 8628) |
 | `--smtp-host <HOST>` | `SMTP_HOST` | SMTP server for email features |
 | `--smtp-port <PORT>` | `SMTP_PORT` | SMTP port (default: `587`) |
 | `--smtp-username <USER>` | `SMTP_USERNAME` | SMTP username |
@@ -479,6 +502,7 @@ Remove the stored authentication token.
 | `SMTP_USERNAME` | SMTP username |
 | `SMTP_PASSWORD` | SMTP password |
 | `SMTP_FROM` | Sender email address |
+| `OAUTH_CLIENTS` | OAuth client registrations for Device Authorization Grant |
 
 ### Agent
 
