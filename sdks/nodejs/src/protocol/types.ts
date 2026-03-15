@@ -28,13 +28,7 @@ export type Protocol =
 /**
  * Geographic regions for exit node selection
  */
-export type Region =
-  | "UsEast"
-  | "UsWest"
-  | "EuWest"
-  | "EuCentral"
-  | "AsiaPacific"
-  | "SouthAmerica";
+export type Region = "UsEast" | "UsWest" | "EuWest" | "EuCentral" | "AsiaPacific" | "SouthAmerica";
 
 /**
  * Exit node configuration

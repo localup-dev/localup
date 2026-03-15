@@ -16,16 +16,16 @@
  * ```
  */
 
+import { EventEmitter } from "node:events";
 import * as http from "node:http";
 import * as https from "node:https";
 import * as net from "node:net";
-import { EventEmitter } from "node:events";
-import type { TransportConnection, TransportStream, TransportConnector } from "./transport/base.ts";
-import { WebSocketConnector } from "./transport/websocket.ts";
-import { H2Connector } from "./transport/h2.ts";
-import { QuicConnector, isQuicAvailable, getQuicUnavailableReason } from "./transport/quic.ts";
-import type { TunnelMessage, Protocol, Endpoint, TunnelConfig } from "./protocol/types.ts";
+import type { Endpoint, Protocol, TunnelConfig, TunnelMessage } from "./protocol/types.ts";
 import { createDefaultTunnelConfig } from "./protocol/types.ts";
+import type { TransportConnection, TransportConnector, TransportStream } from "./transport/base.ts";
+import { H2Connector } from "./transport/h2.ts";
+import { QuicConnector, getQuicUnavailableReason, isQuicAvailable } from "./transport/quic.ts";
+import { WebSocketConnector } from "./transport/websocket.ts";
 import { logger } from "./utils/logger.ts";
 
 // ============================================================================
@@ -129,7 +129,7 @@ function parseRelayAddress(relay: string): { host: string; port: number } {
   if (parts.length === 2) {
     return {
       host: parts[0]!,
-      port: parseInt(parts[1]!, 10),
+      port: Number.parseInt(parts[1]!, 10),
     };
   }
   return {
@@ -215,7 +215,7 @@ class LocalupListener extends EventEmitter implements Listener {
     endpoints: Endpoint[],
     localAddr: string,
     localPort: number,
-    localHttps: boolean
+    localHttps: boolean,
   ) {
     super();
     this.connection = connection;
@@ -228,7 +228,11 @@ class LocalupListener extends EventEmitter implements Listener {
 
     // Connection-pooling agents (matches Rust HttpProxy MAX_POOL_SIZE = 10)
     this.httpAgent = new http.Agent({ keepAlive: true, maxSockets: 10 });
-    this.httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 10, rejectUnauthorized: false });
+    this.httpsAgent = new https.Agent({
+      keepAlive: true,
+      maxSockets: 10,
+      rejectUnauthorized: false,
+    });
 
     this.closePromise = new Promise((resolve) => {
       this.closeResolve = resolve;
@@ -259,9 +263,9 @@ class LocalupListener extends EventEmitter implements Listener {
             logger.debug(`Received ping (timestamp: ${msg.timestamp}), sending pong...`);
             await this.controlStream.sendMessage({
               type: "Pong",
-              timestamp: msg.timestamp
+              timestamp: msg.timestamp,
             });
-            logger.debug(`Sent pong response`);
+            logger.debug("Sent pong response");
             break;
           case "Disconnect":
             logger.info(`Relay disconnected: ${msg.reason}`);
@@ -402,7 +406,7 @@ class LocalupListener extends EventEmitter implements Listener {
 
   private async handleHttpRequest(
     stream: TransportStream,
-    msg: Extract<TunnelMessage, { type: "HttpRequest" }>
+    msg: Extract<TunnelMessage, { type: "HttpRequest" }>,
   ): Promise<void> {
     const { method, uri, headers, body, streamId } = msg;
 
@@ -501,7 +505,7 @@ class LocalupListener extends EventEmitter implements Listener {
 
   private async handleHttpStream(
     stream: TransportStream,
-    msg: Extract<TunnelMessage, { type: "HttpStreamConnect" }>
+    msg: Extract<TunnelMessage, { type: "HttpStreamConnect" }>,
   ): Promise<void> {
     const { streamId, initialData } = msg;
 
@@ -551,7 +555,7 @@ class LocalupListener extends EventEmitter implements Listener {
 
   private async handleTcpConnect(
     stream: TransportStream,
-    msg: Extract<TunnelMessage, { type: "TcpConnect" }>
+    msg: Extract<TunnelMessage, { type: "TcpConnect" }>,
   ): Promise<void> {
     const { streamId } = msg;
 
@@ -605,7 +609,7 @@ class LocalupListener extends EventEmitter implements Listener {
         },
         () => {
           resolve(socket);
-        }
+        },
       );
 
       socket.on("error", reject);
@@ -663,16 +667,18 @@ export async function forward(options: ForwardOptions): Promise<Listener> {
     const parts = options.addr.split(":");
     if (parts.length === 2) {
       localHost = parts[0]!;
-      localPort = parseInt(parts[1]!, 10);
+      localPort = Number.parseInt(parts[1]!, 10);
     } else {
-      localPort = parseInt(options.addr, 10);
+      localPort = Number.parseInt(options.addr, 10);
     }
   }
 
   // Get auth token
   const authToken = options.authtoken ?? process.env.LOCALUP_AUTHTOKEN ?? "";
   if (!authToken) {
-    throw new Error("Authentication token is required. Set authtoken option or LOCALUP_AUTHTOKEN env.");
+    throw new Error(
+      "Authentication token is required. Set authtoken option or LOCALUP_AUTHTOKEN env.",
+    );
   }
 
   // Get relay address
@@ -710,7 +716,7 @@ export async function forward(options: ForwardOptions): Promise<Listener> {
         });
       } else {
         throw new Error(
-          `QUIC transport requested but not available. ${getQuicUnavailableReason()}`
+          `QUIC transport requested but not available. ${getQuicUnavailableReason()}`,
         );
       }
       break;
@@ -787,7 +793,7 @@ export async function forward(options: ForwardOptions): Promise<Listener> {
     response.endpoints,
     localHost,
     localPort,
-    proto === "https"
+    proto === "https",
   );
 }
 
