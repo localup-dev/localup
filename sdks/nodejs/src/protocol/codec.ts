@@ -13,14 +13,14 @@
  */
 
 import {
-  type TunnelMessage,
-  type Protocol,
-  type TunnelConfig,
+  type AgentMetadata,
   type Endpoint,
   type ExitNodeConfig,
-  type AgentMetadata,
-  MessageDiscriminant,
   MAX_FRAME_SIZE,
+  MessageDiscriminant,
+  type Protocol,
+  type TunnelConfig,
+  type TunnelMessage,
 } from "./types.ts";
 
 // ============================================================================
@@ -832,6 +832,7 @@ export class FrameAccumulator {
   readAllMessages(): TunnelMessage[] {
     const messages: TunnelMessage[] = [];
     let msg: TunnelMessage | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: standard read-loop pattern
     while ((msg = this.tryReadMessage()) !== null) {
       messages.push(msg);
     }

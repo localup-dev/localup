@@ -6,14 +6,14 @@
  */
 
 import * as http2 from "node:http2";
-import * as tls from "node:tls";
+import type * as tls from "node:tls";
+import { FrameAccumulator, encodeMessage } from "../protocol/codec.ts";
 import type { TunnelMessage } from "../protocol/types.ts";
-import { encodeMessage, FrameAccumulator } from "../protocol/codec.ts";
 import type {
-  TransportStream,
+  ConnectionStats,
   TransportConnection,
   TransportConnector,
-  ConnectionStats,
+  TransportStream,
 } from "./base.ts";
 import { TransportError, TransportErrorCode } from "./base.ts";
 
@@ -283,7 +283,7 @@ export class H2Connector implements TransportConnector {
   private rejectUnauthorized: boolean;
 
   constructor(
-    options: { useTls?: boolean; alpnProtocol?: string; rejectUnauthorized?: boolean } = {}
+    options: { useTls?: boolean; alpnProtocol?: string; rejectUnauthorized?: boolean } = {},
   ) {
     this.useTls = options.useTls ?? true;
     this.alpnProtocol = options.alpnProtocol ?? "localup-v1";
@@ -320,7 +320,12 @@ export class H2Connector implements TransportConnector {
 
       session.on("error", (err) => {
         clearTimeout(timeout);
-        reject(new TransportError(`Connection failed: ${err.message}`, TransportErrorCode.ConnectionFailed));
+        reject(
+          new TransportError(
+            `Connection failed: ${err.message}`,
+            TransportErrorCode.ConnectionFailed,
+          ),
+        );
       });
     });
   }

@@ -18,21 +18,19 @@
  * If QUIC is not available, use WebSocket or HTTP/2 transport instead.
  */
 
+import * as crypto from "node:crypto";
+import { FrameAccumulator, encodeMessage } from "../protocol/codec.ts";
 import type { TunnelMessage } from "../protocol/types.ts";
-import { encodeMessage, FrameAccumulator } from "../protocol/codec.ts";
 import type {
-  TransportStream,
+  ConnectionStats,
   TransportConnection,
   TransportConnector,
-  ConnectionStats,
+  TransportStream,
 } from "./base.ts";
 import { TransportError, TransportErrorCode } from "./base.ts";
-import * as crypto from "node:crypto";
 
-// We use dynamic imports and 'any' types to make @matrixai/quic optional
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// Dynamic imports with 'any' types to make @matrixai/quic optional
 let QUICClient: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let EventQUICConnectionStream: any = null;
 let quicLoadAttempted = false;
 let quicLoadError: Error | null = null;
@@ -387,10 +385,7 @@ export class QuicConnector implements TransportConnector {
   async connect(host: string, port: number, serverName?: string): Promise<TransportConnection> {
     const available = await loadQuicModule();
     if (!available || !QUICClient) {
-      throw new TransportError(
-        getQuicUnavailableReason(),
-        TransportErrorCode.ConnectionFailed
-      );
+      throw new TransportError(getQuicUnavailableReason(), TransportErrorCode.ConnectionFailed);
     }
 
     try {
@@ -419,7 +414,7 @@ export class QuicConnector implements TransportConnector {
       throw new TransportError(
         `QUIC connection to ${host}:${port} failed: ${errMsg}`,
         TransportErrorCode.ConnectionFailed,
-        err as Error
+        err as Error,
       );
     }
   }

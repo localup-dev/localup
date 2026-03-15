@@ -14,13 +14,13 @@
  * 3 = WindowUpdate
  */
 
+import { decodeMessagePayload, encodeMessagePayload } from "../protocol/codec.ts";
 import type { TunnelMessage } from "../protocol/types.ts";
-import { encodeMessagePayload, decodeMessagePayload } from "../protocol/codec.ts";
 import type {
-  TransportStream,
+  ConnectionStats,
   TransportConnection,
   TransportConnector,
-  ConnectionStats,
+  TransportStream,
 } from "./base.ts";
 import { TransportError, TransportErrorCode } from "./base.ts";
 
@@ -403,7 +403,10 @@ export class WebSocketConnector implements TransportConnector {
       ws.onerror = (event: Event) => {
         clearTimeout(timeout);
         reject(
-          new TransportError(`Connection failed: ${event.type}`, TransportErrorCode.ConnectionFailed)
+          new TransportError(
+            `Connection failed: ${event.type}`,
+            TransportErrorCode.ConnectionFailed,
+          ),
         );
       };
     });
